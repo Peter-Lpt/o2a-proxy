@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>o2a-proxy</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="popover">
+    <!-- 顶部：状态 + 电源开关 -->
+    <header class="head">
+      <div class="brand">
+        <span class="logo" id="logo">⇄</span>
+        <div class="brand-txt">
+          <div class="title">o2a-proxy</div>
+          <div class="sub" id="headSub">代理已停止</div>
+        </div>
+      </div>
+      <div class="head-actions">
+        <button id="floatBtn" class="float-btn" title="悬浮看板：置顶小窗实时查看">◱ 悬浮</button>
+        <label class="switch" title="启动 / 停止代理">
+          <input type="checkbox" id="powerSwitch" />
+          <span class="knob"></span>
+        </label>
+      </div>
+    </header>
+
+    <!-- 未启动信息条（仅停止时显示） -->
+    <div id="offHero" class="off-bar">
+      <span class="dot off"></span>
+      <span id="offMeta">代理未启动 · 端口 :11011 · qwen-plus</span>
+      <div class="off-err" id="offErr"></div>
+    </div>
+
+    <!-- 运行中信息条（仅运行时显示） -->
+    <div id="onBar" class="on-bar" style="display:none">
+      <span class="dot"></span>
+      <span id="onBarText">运行中 · 127.0.0.1:11011</span>
+      <span class="on-tag" id="onTag1m" style="display:none">1M</span>
+    </div>
+
+    <!-- 选项卡 -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="dashboard">统计</button>
+      <button class="tab" data-tab="config">配置</button>
+    </nav>
+
+    <main>
+      <!-- 统计 -->
+      <section id="dashboard" class="panel active">
+        <!-- 实时调用（仅代理运行中显示） -->
+        <div id="liveCard" class="card live-card" style="display:none">
+          <div class="live-head">
+            <span class="live-title"><span class="live-dot"></span>实时调用</span>
+            <span class="live-sum" id="liveSum">等待请求…</span>
+          </div>
+          <canvas id="liveSpark" class="live-spark"></canvas>
+          <div class="live-feed" id="liveFeed"></div>
+        </div>
+
+        <div class="stat-table card">
+          <div class="st-row st-head">
+            <span></span><span>本小时</span><span>今日</span><span>本月</span>
+          </div>
+          <div class="st-row"><span>请求数</span><b id="req0"></b><b id="req1"></b><b id="req2"></b></div>
+          <div class="st-row"><span>输入</span><b id="in0"></b><b id="in1"></b><b id="in2"></b></div>
+          <div class="st-row"><span>缓存读</span><b id="rd0"></b><b id="rd1"></b><b id="rd2"></b></div>
+          <div class="st-row"><span>输出</span><b id="out0"></b><b id="out1"></b><b id="out2"></b></div>
+          <div class="st-row"><span>总计</span><b id="total0"></b><b id="total1"></b><b id="total2"></b></div>
+          <div class="st-row hit"><span>命中率</span><b id="hit0"></b><b id="hit1"></b><b id="hit2"></b></div>
+          <div class="st-row cost"><span>费用</span><b id="cost0"></b><b id="cost1"></b><b id="cost2"></b></div>
+        </div>
+
+        <div class="chart-head">
+          <div class="seg">
+            <button class="seg-btn active" data-range="today">今日</button>
+            <button class="seg-btn" data-range="month">本月</button>
+          </div>
+          <button id="refreshBtn" class="icon-btn" title="刷新">↻</button>
+        </div>
+
+        <div class="card chart-box">
+          <div class="chart-title" id="chartTitle">缓存命中率 & Token 消耗</div>
+          <canvas id="chartCombined"></canvas>
+          <div class="chart-note">* 缓存写不支持（当前 API 未返回该字段）</div>
+        </div>
+        <div id="updatedAt" class="updated">—</div>
+      </section>
+
+      <!-- 配置 -->
+      <section id="config" class="panel">
+        <div id="cfgLock" class="cfg-lock" style="display:none">
+          <span>🔒 代理运行中，配置已锁定</span>
+          <button type="button" id="cfgLockStopBtn" class="btn btn-sm">停止代理以编辑</button>
+        </div>
+        <form id="configForm">
+          <div class="card form-card">
+            <div class="fc-h">服务</div>
+            <label>API 地址 <input name="openai_base_url" type="text" spellcheck="false" /></label>
+            <label>API Key
+              <span class="model-wrap">
+                <input name="openai_api_key" type="password" placeholder="sk-..." autocomplete="off" />
+                <button type="button" id="toggleKeyBtn" class="mini-btn text">显示</button>
+              </span>
+            </label>
+            <div class="grid2">
+              <label>模型
+                <span class="model-wrap combo">
+                  <input name="model" type="text" spellcheck="false" autocomplete="off" placeholder="输入或选择" />
+                  <button type="button" id="fetchModelsBtn" class="mini-btn" title="从 API 地址拉取模型列表">↻</button>
+                  <div class="combo-list" id="comboModel"></div>
+                </span>
+              </label>
+              <label>子模型
+                <span class="model-wrap combo">
+                  <input name="sub_model" type="text" spellcheck="false" autocomplete="off" placeholder="输入或选择" />
+                  <div class="combo-list" id="comboSubModel"></div>
+                </span>
+              </label>
+            </div>
+            <div class="model-hint" id="modelHint"></div>
+            <div class="grid2">
+              <label>监听端口 <input name="listen_address" type="text" /></label>
+              <label>备注 <input name="comment" type="text" /></label>
+            </div>
+            <label class="inline">
+              <input name="context_1m" type="checkbox" />
+              <span>启用 1M 上下文<small>max_tokens = 1,000,000</small></span>
+            </label>
+          </div>
+
+          <div class="card form-card">
+            <div class="fc-h">全局</div>
+            <label>认证令牌 auth_token <input name="auth_token" type="text" /></label>
+            <label class="inline">
+              <input name="cache_stats_enabled" type="checkbox" />
+              <span>启用缓存统计</span>
+            </label>
+            <div class="grid2">
+              <label>保留天数 <input name="cache_stats_retention_days" type="number" min="1" max="365" /></label>
+              <label>统计目录 <input name="cache_stats_dir" type="text" /></label>
+            </div>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn btn-primary">保存配置</button>
+            <button type="button" id="openCfgBtn" class="btn">打开 config.json</button>
+          </div>
+          <p class="hint">代理运行中配置将锁定，停止后方可编辑。多服务请直接编辑 config.json（代理仅使用第一个服务）。</p>
+        </form>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span id="footStatus">—</span>
+      <button id="quitBtn" class="link-btn">退出应用</button>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Config files (secrets)
+config.json
+
+# IDE / tool settings
+.claude/
+.codex/
+.workbuddy/
+
+# System files
+.DS_Store
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Cache statistics data
+cache_stats/
+
+# Electron build output
+mac/node_modules/
+mac/dist/

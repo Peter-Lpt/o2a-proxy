@@ -1,0 +1,309 @@
+{
+  "_meta": {
+    "currency": "CNY",
+    "billing_unit": "每百万 Token",
+    "cache_rules": {
+      "explicit": {
+        "write_multiplier": 1.25,
+        "read_multiplier": 0.1,
+        "min_tokens": 1024,
+        "ttl": "5分钟（命中后重置）"
+      },
+      "implicit": {
+        "write_multiplier": 1.0,
+        "read_multiplier": 0.2,
+        "min_tokens": 256,
+        "ttl": "不确定，系统定期清理"
+      }
+    },
+    "last_updated": "2026-07-30"
+  },
+
+  "dashscope": {
+    "source": "https://help.aliyun.com/zh/model-studio/billing-for-model-studio",
+    "cache_source": "https://help.aliyun.com/zh/model-studio/context-cache",
+    "models": {
+      "qwen3.7-max": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-1M", "input": 12, "output": 36, "output_thinking": 36 }
+        ],
+        "discount": 0.5,
+        "discount_note": "限时 5 折",
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen3.7-plus": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-256K", "input": 2, "output": 8, "output_thinking": 8 },
+          { "range": "256K-1M", "input": 6, "output": 24, "output_thinking": 24 }
+        ],
+        "discount": 0.8,
+        "discount_note": "限时 8 折",
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen3.7-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-32K", "input": 0.2, "output": 0.8, "output_thinking": 0.8 },
+          { "range": "32K-256K", "input": 0.6, "output": 2.4, "output_thinking": 2.4 },
+          { "range": "256K-1M", "input": 1.2, "output": 4.8, "output_thinking": 4.8 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen3.6-plus": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-256K", "input": 2, "output": 12, "output_thinking": 12 },
+          { "range": "256K-1M", "input": 8, "output": 48, "output_thinking": 48 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3.6-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-256K", "input": 1.2, "output": 7.2, "output_thinking": 7.2 },
+          { "range": "256K-1M", "input": 4.8, "output": 28.8, "output_thinking": 28.8 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen3.5-plus": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-128K", "input": 0.8, "output": 4.8, "output_thinking": 4.8 },
+          { "range": "128K-256K", "input": 2, "output": 12, "output_thinking": 12 },
+          { "range": "256K-1M", "input": 4, "output": 24, "output_thinking": 24 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3.5-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-128K", "input": 0.2, "output": 2, "output_thinking": 2 },
+          { "range": "128K-256K", "input": 0.8, "output": 8, "output_thinking": 8 },
+          { "range": "256K-1M", "input": 1.2, "output": 12, "output_thinking": 12 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen3-max": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-32K", "input": 2.5, "output": 10, "output_thinking": 10 },
+          { "range": "32K-128K", "input": 4, "output": 16, "output_thinking": 16 },
+          { "range": "128K-256K", "input": 7, "output": 28, "output_thinking": 28 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen-plus": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-128K", "input": 0.8, "output": 2, "output_thinking": 8 },
+          { "range": "128K-256K", "input": 2.4, "output": 20, "output_thinking": 24 },
+          { "range": "256K-1M", "input": 4.8, "output": 48, "output_thinking": 64 }
+        ],
+        "cache": false,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen-turbo": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 0.3, "output": 0.6, "output_thinking": 3 }
+        ],
+        "cache": false,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "0-128K", "input": 0.15, "output": 1.5, "output_thinking": 1.5 },
+          { "range": "128K-256K", "input": 0.6, "output": 6, "output_thinking": 6 },
+          { "range": "256K-1M", "input": 1.2, "output": 12, "output_thinking": 12 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000
+      },
+      "qwen-long": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 0.5, "output": 2, "output_thinking": 2 }
+        ],
+        "cache": false,
+        "batch": true,
+        "free_quota": 0
+      },
+      "qwen-vl-max": {
+        "category": "vision",
+        "tiers": [
+          { "range": "unlimited", "input": 1.6, "output": 4, "output_thinking": 4 }
+        ],
+        "cache": true,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen-vl-plus": {
+        "category": "vision",
+        "tiers": [
+          { "range": "unlimited", "input": 0.8, "output": 2, "output_thinking": 2 }
+        ],
+        "cache": true,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen-coder-plus": {
+        "category": "code",
+        "tiers": [
+          { "range": "unlimited", "input": 3.5, "output": 7, "output_thinking": 7 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen-coder-turbo": {
+        "category": "code",
+        "tiers": [
+          { "range": "unlimited", "input": 2, "output": 6, "output_thinking": 6 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3-coder-plus": {
+        "category": "code",
+        "tiers": [
+          { "range": "0-32K", "input": 4, "output": 16, "output_thinking": 16 },
+          { "range": "32K-128K", "input": 6, "output": 24, "output_thinking": 24 },
+          { "range": "128K-256K", "input": 10, "output": 40, "output_thinking": 40 },
+          { "range": "256K-1M", "input": 20, "output": 200, "output_thinking": 200 }
+        ],
+        "cache": true,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3-coder-flash": {
+        "category": "code",
+        "tiers": [
+          { "range": "0-32K", "input": 1, "output": 4, "output_thinking": 4 },
+          { "range": "32K-128K", "input": 1.5, "output": 6, "output_thinking": 6 },
+          { "range": "128K-256K", "input": 2.5, "output": 10, "output_thinking": 10 },
+          { "range": "256K-1M", "input": 5, "output": 20, "output_thinking": 20 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3-235b-a22b": {
+        "category": "open-source",
+        "note": "thinking 版本仅支持思考模式，instruct 版本仅支持非思考模式",
+        "tiers": [
+          { "range": "unlimited", "input": 2, "output": 8, "output_thinking": 20 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3-32b": {
+        "category": "open-source",
+        "tiers": [
+          { "range": "unlimited", "input": 2, "output": 8, "output_thinking": 20 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      },
+      "qwen3-30b-a3b": {
+        "category": "open-source",
+        "tiers": [
+          { "range": "unlimited", "input": 0.75, "output": 3, "output_thinking": 7.5 }
+        ],
+        "cache": false,
+        "batch": false,
+        "free_quota": 1000000
+      }
+    }
+  },
+
+  "deepseek": {
+    "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    "models": {
+      "deepseek-v4-pro": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 3, "output": 6, "cache_hit": 0.025, "cache_miss": 3 }
+        ],
+        "cache": true,
+        "context_length": "1M",
+        "max_output": "384K"
+      },
+      "deepseek-v4-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 1, "output": 2, "cache_hit": 0.02, "cache_miss": 1 }
+        ],
+        "cache": true,
+        "context_length": "1M",
+        "max_output": "384K"
+      }
+    }
+  },
+
+  "kimi": {
+    "source": "https://platform.kimi.com/docs/pricing/chat",
+    "models": {
+      "kimi-k3": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 20, "output": 100, "cache_hit": 2, "cache_miss": 20 }
+        ],
+        "cache": true,
+        "context_length": "1M",
+        "note": "旗舰模型，始终进行推理"
+      },
+      "kimi-k2.7-code": {
+        "category": "code",
+        "tiers": [
+          { "range": "unlimited", "input": 6.5, "output": 27, "cache_hit": 1.3, "cache_miss": 6.5 }
+        ],
+        "cache": true,
+        "context_length": "256K",
+        "note": "编程模型，仅支持思考模式"
+      },
+      "kimi-k2.7-code-highspeed": {
+        "category": "code",
+        "tiers": [
+          { "range": "unlimited", "input": 13, "output": 54, "cache_hit": 2.6, "cache_miss": 13 }
+        ],
+        "cache": true,
+        "context_length": "256K",
+        "note": "高速版，约 180 tokens/s"
+      },
+      "kimi-k2.6": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 6.5, "output": 27, "cache_hit": 1.1, "cache_miss": 6.5 }
+        ],
+        "cache": true,
+        "context_length": "256K",
+        "note": "通用模型，支持思考与非思考模式"
+      }
+    }
+  }
+}

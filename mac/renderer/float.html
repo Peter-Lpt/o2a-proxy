@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>o2a-proxy 悬浮看板</title>
+  <style>
+    :root {
+      --bg: rgba(250, 251, 253, 0.92);
+      --border: #e3e8ef;
+      --text: #1c2330;
+      --muted: #8a93a3;
+      --green: #1fab6b;
+      --orange: #f5a623;
+      --red: #e5484d;
+      --primary: #2d7ff9;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: transparent; overflow: hidden; }
+    body {
+      font: 12px/1.45 -apple-system, "PingFang SC", sans-serif;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      user-select: none;
+    }
+    .float {
+      margin: 6px;
+      border-radius: 13px;
+      background: var(--bg);
+      backdrop-filter: blur(24px);
+      border: 1px solid var(--border);
+      box-shadow: 0 10px 32px rgba(20, 30, 50, 0.22);
+      overflow: hidden;
+      -webkit-app-region: drag; /* 整卡可拖动 */
+    }
+    .head {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 10px 6px;
+    }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #c3cad6; flex: none; }
+    .dot.on { background: var(--green); animation: blink 1.6s ease-in-out infinite; }
+    @keyframes blink { 50% { opacity: .3; } }
+    .ttl { font-weight: 700; font-size: 12px; }
+    .sub { color: var(--muted); font-size: 10.5px; margin-left: 2px; flex: 1;
+           white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .x {
+      -webkit-app-region: no-drag;
+      width: 18px; height: 18px; border: none; border-radius: 5px;
+      background: transparent; color: var(--muted); cursor: pointer;
+      font-size: 12px; line-height: 1; flex: none;
+    }
+    .x:hover { background: rgba(0,0,0,.07); color: var(--text); }
+
+    .nums {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      padding: 2px 10px 6px; gap: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .num b { display: block; font-size: 15px; font-weight: 700; }
+    .num span { font-size: 10px; color: var(--muted); }
+    .num b.good { color: var(--green); }
+
+    canvas.spark { width: calc(100% - 20px); height: 40px; display: block; margin: 0 10px 4px; }
+
+    .feed {
+      -webkit-app-region: no-drag;
+      max-height: 66px; overflow-y: auto;
+      border-top: 1px solid var(--border);
+      padding: 2px 10px 6px;
+      font-size: 10.5px; font-variant-numeric: tabular-nums;
+    }
+    .row { display: flex; gap: 6px; padding: 2.5px 0; white-space: nowrap; }
+    .row.flash { animation: flash 1.2s ease-out; }
+    @keyframes flash { 0% { background: rgba(45,127,249,.14); } 100% { background: transparent; } }
+    .t { color: var(--muted); flex: none; }
+    .k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+    .h { flex: none; font-weight: 700; min-width: 36px; text-align: right; }
+    .h.good { color: var(--green); } .h.mid { color: var(--orange); } .h.bad { color: var(--muted); }
+    .empty { text-align: center; color: var(--muted); padding: 6px 0; font-size: 10.5px; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-thumb { background: rgba(0,0,0,.15); border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <div class="float">
+    <div class="head">
+      <span class="dot" id="dot"></span>
+      <span class="ttl">o2a-proxy</span>
+      <span class="sub" id="sub">已停止</span>
+      <button class="x" id="closeBtn" title="关闭悬浮看板">✕</button>
+    </div>
+    <div class="nums">
+      <div class="num"><b id="nReq">—</b><span>近5min请求</span></div>
+      <div class="num"><b id="nTok">—</b><span>近5min Token</span></div>
+      <div class="num"><b id="nHit" class="good">—</b><span>今日命中</span></div>
+    </div>
+    <canvas class="spark" id="spark"></canvas>
+    <div class="feed" id="feed"><div class="empty">等待请求…</div></div>
+  </div>
+  <script src="float.js"></script>
+</body>
+</html>
