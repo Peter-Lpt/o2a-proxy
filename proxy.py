@@ -42,6 +42,8 @@ PROXY_MAX_TOKENS = int(os.environ.get("PROXY_MAX_TOKENS", "4096"))
 # 子 agent 模型配置（Claude Code 的 Task 工具会启动子 agent，使用 haiku 等模型）
 # 默认与主 agent 相同，可单独配置
 SUB_PROXY_MODEL = os.environ.get("SUB_PROXY_MODEL", PROXY_MODEL)
+# 流式响应总超时（秒），防止模型长时间卡在推理阶段
+STREAM_TIMEOUT = int(os.environ.get("STREAM_TIMEOUT", "600"))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -833,10 +835,38 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
                                 f"time_to_first_token={first_chunk_ts - conn_start:.2f}s "
                                 f"elapsed_since_req={first_chunk_ts - (getattr(self, '_req_start', None) or conn_start):.2f}s")
                 now = time.time()
+                req_elapsed = now - (getattr(self, '_req_start', None) or conn_start)
+                if req_elapsed > STREAM_TIMEOUT:
+                    logger.warning(f"[STREAM] timeout after {req_elapsed:.1f}s "
+                                   f"(limit={STREAM_TIMEOUT}s) chunks={n_chunks} "
+                                   f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes}")
+                    # 关闭未关闭的 block
+                    if thinking_block_open:
+                        write_chunk(sse_event({
+                            "type": "content_block_stop",
+                            "index": content_block_idx,
+                        }).encode())
+                        thinking_block_open = False
+                    if content_block_open:
+                        write_chunk(sse_event({
+                            "type": "content_block_stop",
+                            "index": content_block_idx,
+                        }).encode())
+                        content_block_open = False
+                    # 发送超时错误给客户端
+                    if started:
+                        write_chunk(sse_event({
+                            "type": "message_delta",
+                            "delta": {"stop_reason": "max_tokens"},
+                            "usage": latest_usage,
+                        }).encode())
+                    write_chunk(sse_event({"type": "message_stop"}).encode())
+                    finished = True
+                    break
                 if now - last_prog_ts >= 5.0:
                     last_prog_ts = now
                     logger.info(f"[STREAM] progress chunks={n_chunks} "
-                                f"elapsed={now - (getattr(self, '_req_start', None) or conn_start):.1f}s "
+                                f"elapsed={req_elapsed:.1f}s "
                                 f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes}")
 
                 data_str = line[5:].strip()

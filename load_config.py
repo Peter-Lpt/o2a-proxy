@@ -25,3 +25,4 @@ print(f'export SUB_PROXY_MODEL="{svc.get("sub_model", svc.get("model", "qwen-plu
 print(f'export CACHE_STATS_ENABLED="{str(config.get("cache_stats_enabled", True)).lower()}"')
 print(f'export CACHE_STATS_DIR="{config.get("cache_stats_dir", "cache_stats")}"')
 print(f'export CACHE_STATS_RETENTION_DAYS="{config.get("cache_stats_retention_days", 30)}"')
+print(f'export STREAM_TIMEOUT="{config.get("stream_timeout", 600)}"')
