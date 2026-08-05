@@ -16,6 +16,9 @@ __pycache__/
 # Cache statistics data
 cache_stats/
 
+# Proxy runtime logs
+proxy_*.log
+
 # Electron build output
 mac/node_modules/
 mac/dist/

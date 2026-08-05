@@ -1,0 +1,2 @@
+# asyncio 版代理（proxy_async.py）依赖；proxy.py 保持纯标准库
+aiohttp>=3.9

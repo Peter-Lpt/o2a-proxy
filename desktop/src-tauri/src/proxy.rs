@@ -1,0 +1,280 @@
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use crate::AppState;
+
+fn config_services(state: &AppState) -> Vec<serde_json::Value> {
+    crate::read_config_value(state)
+        .ok()
+        .and_then(|c| c.get("services").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+}
+
+fn find_service<'a>(services: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
+    services.iter().find(|s| {
+        let mode = s.get("mode").and_then(|m| m.as_str()).unwrap_or("claude");
+        if mode != "claude" && mode != "codex" {
+            return false;
+        }
+        let comment = s.get("comment").and_then(|c| c.as_str()).unwrap_or("");
+        let port = s.get("listen_address").and_then(|p| p.as_str()).unwrap_or("");
+        comment == name || port == name
+    })
+}
+
+fn is_alive(child: &mut std::process::Child) -> bool {
+    child.try_wait().ok().flatten().is_none()
+}
+
+fn log_path(state: &AppState, name: &str) -> PathBuf {
+    let safe: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    state.root.join(format!("proxy_{}.log", safe))
+}
+
+fn read_log_tail(p: &std::path::Path, max: usize) -> String {
+    let Ok(mut f) = File::open(p) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    if f.read_to_string(&mut s).is_err() {
+        return String::new();
+    }
+    let bytes = s.as_bytes();
+    let mut idx = bytes.len().saturating_sub(max);
+    while idx < bytes.len() && (bytes[idx] & 0xC0) == 0x80 {
+        idx += 1;
+    }
+    s[idx..].trim().to_string()
+}
+
+fn service_host_port(svc: &serde_json::Value) -> (String, u16) {
+    let host = svc
+        .get("listen_host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    let port: u16 = svc
+        .get("listen_address")
+        .and_then(|v| v.as_u64().map(|n| n as u16))
+        .or_else(|| {
+            svc.get("listen_address")
+                .and_then(|v| v.as_str())
+                .and_then(|x| x.parse().ok())
+        })
+        .unwrap_or(0);
+    (host, port)
+}
+
+pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
+    let services = config_services(state);
+    if find_service(&services, name).is_none() {
+        return Err(format!("未找到服务: {name}"));
+    }
+    let mut children = state.children.lock().unwrap();
+    if let Some(child) = children.get_mut(name) {
+        if is_alive(child) {
+            return Ok(());
+        }
+        children.remove(name);
+    }
+    let log = log_path(state, name);
+    let file = File::create(&log).map_err(|e| format!("无法创建日志文件: {e}"))?;
+    let err_file = file.try_clone().map_err(|e| e.to_string())?;
+    let mut cmd = Command::new(&state.python);
+    cmd.arg("proxy_async.py")
+        .arg("--service")
+        .arg(name)
+        .current_dir(&state.root)
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(err_file));
+    // 配置未显式指定统计目录时，把默认目录传给代理，保证两端路径一致
+    let has_stats_dir = crate::read_config_value(state)
+        .ok()
+        .and_then(|c| {
+            c.get("cache_stats_dir")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+        })
+        .unwrap_or(false);
+    if !has_stats_dir {
+        cmd.env("CACHE_STATS_DIR", &state.default_stats_dir);
+    }
+    let child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
+    children.insert(name.to_string(), child);
+    // 短暂等待，确认进程没有因端口占用/缺 key 等立刻退出
+    std::thread::sleep(Duration::from_millis(1200));
+    if let Some(ch) = children.get_mut(name) {
+        if let Some(status) = ch.try_wait().map_err(|e| e.to_string())? {
+            children.remove(name);
+            let tail = read_log_tail(&log, 1500);
+            let msg = if tail.is_empty() {
+                String::new()
+            } else {
+                format!("，日志：{tail}")
+            };
+            return Err(format!("代理启动后立即退出（code={status}）{msg}"));
+        }
+    }
+    Ok(())
+}
+
+pub fn stop_service(state: &AppState, name: &str) -> Result<(), String> {
+    let mut children = state.children.lock().unwrap();
+    if let Some(mut child) = children.remove(name) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    Ok(())
+}
+
+pub fn toggle_service(state: &AppState, name: &str) -> Result<(), String> {
+    let services = config_services(state);
+    let Some(svc) = find_service(&services, name) else {
+        return Err(format!("未找到服务: {name}"));
+    };
+    let svc = svc.clone();
+
+    // 自己管理的子进程还在运行 -> 停止
+    let child_alive = {
+        let mut children = state.children.lock().unwrap();
+        children.get_mut(name).map(is_alive).unwrap_or(false)
+    };
+    if child_alive {
+        return stop_service(state, name);
+    }
+
+    // 进程不在本客户端管理内，但端口被监听（可能是外部启动）-> 提示无法停止，而不是误启动
+    let (host, port) = service_host_port(&svc);
+    if port > 0 && crate::port_open(&host, port) {
+        return Err(format!(
+            "端口 {port} 已有进程监听（可能由外部启动），客户端无法停止；请手动关闭该进程后重试"
+        ));
+    }
+
+    start_service(state, name)
+}
+
+pub fn start_all(state: &AppState) -> Result<(), String> {
+    let services = config_services(state);
+    let mut last_err = None;
+    for s in &services {
+        let name = s
+            .get("comment")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            if let Err(e) = start_service(state, &name) {
+                last_err = Some(e);
+            }
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+pub fn stop_all(state: &AppState) -> Result<(), String> {
+    let names: Vec<String> = state.children.lock().unwrap().keys().cloned().collect();
+    for n in names {
+        let _ = stop_service(state, &n);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn start_service_detects_immediate_exit() {
+        // 缺 API Key 时代理启动即退出（确定性失败，避免 Windows 端口复用语义差异）
+        let root = std::env::temp_dir().join(format!("o2a_proxy_svc_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        std::fs::copy(repo.join("proxy_async.py"), root.join("proxy_async.py")).unwrap();
+        std::fs::copy(repo.join("proxy.py"), root.join("proxy.py")).unwrap();
+
+        let cfg = serde_json::json!({
+            "cache_stats_enabled": false,
+            "services": [{
+                "comment": "svc1",
+                "mode": "claude",
+                "model": "m",
+                "sub_model": "m",
+                "listen_address": 18999,
+                "openai_base_url": "http://127.0.0.1:1/v1",
+                "openai_api_key": ""
+            }]
+        });
+        std::fs::write(root.join("config.json"), serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let state = AppState {
+            root: root.clone(),
+            python: "python".to_string(),
+            default_stats_dir: root.join("cache_stats"),
+            children: Mutex::new(std::collections::HashMap::new()),
+        };
+        let res = start_service(&state, "svc1");
+        assert!(res.is_err(), "缺少 API Key 时启动应报错");
+        let msg = res.unwrap_err();
+        assert!(msg.contains("立即退出"), "错误信息应包含启动失败原因，实际: {msg}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn toggle_stops_running_child() {
+        let root = std::env::temp_dir().join(format!("o2a_proxy_toggle_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cfg = serde_json::json!({
+            "cache_stats_enabled": false,
+            "services": [{
+                "comment": "svc1",
+                "mode": "claude",
+                "model": "m",
+                "sub_model": "m",
+                "listen_address": 18999,
+                "openai_base_url": "http://127.0.0.1:1/v1",
+                "openai_api_key": "sk-test"
+            }]
+        });
+        std::fs::write(root.join("config.json"), serde_json::to_string(&cfg).unwrap()).unwrap();
+        let state = AppState {
+            root: root.clone(),
+            python: "python".to_string(),
+            default_stats_dir: root.join("cache_stats"),
+            children: Mutex::new(std::collections::HashMap::new()),
+        };
+        // 模拟一个运行中的子进程
+        let child = Command::new("python")
+            .arg("-c")
+            .arg("import time; time.sleep(30)")
+            .spawn()
+            .unwrap();
+        state.children.lock().unwrap().insert("svc1".to_string(), child);
+
+        let res = toggle_service(&state, "svc1");
+        assert!(res.is_ok(), "停止运行中的子进程应成功，实际: {res:?}");
+        assert!(
+            state.children.lock().unwrap().is_empty(),
+            "停止后子进程应从管理表移除"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

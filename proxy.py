@@ -76,9 +76,9 @@ def load_config():
     services = []
     if os.path.exists(config_path):
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 config = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             config = {}
         if config:
             # 全局缓存统计设置（供 get_stats / is_cache_stats_enabled 读取）
@@ -171,9 +171,9 @@ class CacheStats:
             return self._pricing
         pricing_path = os.path.join(os.path.dirname(self.stats_dir), "pricing.json")
         try:
-            with open(pricing_path, "r") as f:
+            with open(pricing_path, "r", encoding="utf-8") as f:
                 self._pricing = json.load(f)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             self._pricing = {}
         return self._pricing
 
