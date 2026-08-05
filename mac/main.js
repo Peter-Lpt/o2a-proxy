@@ -17,7 +17,6 @@ function resolveRoot() {
     );
     if (saved && saved.root) candidates.push(saved.root);
   } catch (_) {}
-  candidates.push("/Users/macos/workspace/self/ai-work/o2a-proxy");
   for (const c of candidates) {
     try {
       if (fs.existsSync(path.join(c, "proxy.py"))) return c;
