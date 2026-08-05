@@ -36,8 +36,8 @@ npm start        # 启动菜单栏应用
 这是一个**纯菜单栏应用**（不占 Dock、无主窗口）。启动后菜单栏右上角会出现一个 ⇄ 图标：
 - **左键点击图标** → 在图标正下方弹出/收起小面板（点面板外部或按 Esc 自动收起）
 - **右键点击图标** → 快捷菜单：「启动/停止代理」「打开配置文件」「退出」
-- 面板头部为**电源开关**；未启动时显示大电源按钮，点击即可启动
-- 统计页含「本小时 / 今日 / 本月」对比表 + 今日/本月切换的命中率与 Token 消耗图表，每 5 秒自动刷新
+- 面板头部为**电源开关**，控制当前选中的服务；顶部「全部 / 服务1 / 服务2 …」标签可切换服务，每个服务独立启停、互不影响（运行中的服务带绿色圆点）
+- 统计页含「本小时 / 今日 / 本月」对比表 + 今日/本月切换的命中率与 Token 消耗图表，每 5 秒自动刷新；**统计跟随顶部选中的服务**（选「全部」看总体，选单个服务看该服务）
 - 退出应用：面板底部「退出应用」或右键菜单「退出」
 
 > 前提：本机已安装 `python3`（系统自带即可，`proxy.py` 仅用标准库），且 `../config.json` 中已填写有效的 `openai_api_key`。
@@ -53,18 +53,19 @@ npm start        # 启动菜单栏应用
 | `cache_stats_retention_days` | 统计保留天数 | 全局 |
 | `cache_stats_dir` | 统计目录名 | 全局 |
 | `services[].comment` | 服务备注 | 服务卡片 |
+| `services[].mode` | 模式：`claude`/`codex` | 服务卡片 |
 | `services[].model` | 主模型 | 服务卡片 |
-| `services[].sub_model` | 子 agent 模型 | 服务卡片 |
-| `services[].listen_address` | 监听端口 | 服务卡片 |
+| `services[].sub_model` | 子 agent 模型（仅 claude） | 服务卡片 |
+| `services[].listen_address` | 监听端口（claude/codex） | 服务卡片 |
 | `services[].openai_base_url` | API 请求地址 | 服务卡片 |
 | `services[].openai_api_key` | API Key | 服务卡片 |
-| `services[].context_1m` | **1M 上下文开关**（max_tokens=1,000,000） | 服务卡片 |
+| `services[].context_1m` | **1M 上下文开关**（仅 claude） | 服务卡片 |
 
-> 代理实际只使用 `services` 列表中的**第一个**服务（与 `proxy.py` / `load_config.py` 行为一致）。
+> 代理为 `services` 列表中每个服务各监听一个端口：`claude` 走 Anthropic 转换、`codex` 走 OpenAI 透传。多服务同时监听各自端口，UI 支持添加/删除多个服务，并在卡片上切换模式。
 
 ## 1M 上下文开关
 
-勾选后，客户端启动 `proxy.py` 时会注入环境变量 `PROXY_MAX_TOKENS=1000000`（已在 `proxy.py` 中支持，作为 `max_tokens` 默认值）。若上游服务需要额外参数（如特定模型名或 query 参数），可在 `proxy.py` 中扩展。
+claude 模式服务勾选后，`config.json` 中该服务的 `context_1m` 为 `true`。`proxy.py` 会将其 `max_tokens` 默认值设为 1,000,000（客户端未显式传 `max_tokens` 时生效）。若上游服务需要额外参数（如特定模型名或 query 参数），可在 `proxy.py` 中扩展。
 
 ## 统计口径
 

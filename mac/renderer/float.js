@@ -1,9 +1,19 @@
-/* o2a-proxy 悬浮看板 —— 实时小窗逻辑 */
+/* o2a-proxy 悬浮看板 —— 实时小窗逻辑（每个服务独立小窗） */
 (function () {
   const $ = (id) => document.getElementById(id);
   const KEEP = 80;
+  const svc = (new URLSearchParams(location.search).get("svc") || "").trim();
   let records = [];
-  let status = { running: false, port: "", model: "" };
+  let svcStatus = { running: false, port: "", model: "" };
+
+  document.title = svc ? `o2a-proxy · ${svc}` : "o2a-proxy 悬浮看板";
+  $("ttl").textContent = svc ? svc : "o2a-proxy";
+
+  function pickStatus(s) {
+    const list = (s && s.services) || [];
+    const found = list.find((x) => x.name === svc);
+    return found || { running: false, port: "", model: "", mode: "" };
+  }
 
   function fmt(n) {
     n = Number(n) || 0;
@@ -19,14 +29,14 @@
   }
 
   function renderHead() {
-    $("dot").classList.toggle("on", !!status.running);
-    $("sub").textContent = status.running
-      ? `:${status.port} · ${status.model}`
+    $("dot").classList.toggle("on", !!svcStatus.running);
+    $("sub").textContent = svcStatus.running
+      ? `:${svcStatus.port} · ${svcStatus.model}`
       : "已停止";
   }
 
   function render(newCount) {
-    // 近 5 分钟汇总
+    // 近 5 分钟汇总（命中率用近5分钟 token 加权，反映当下瞬时命中，而非当日平均）
     const now = Date.now();
     let n = 0, inp = 0, rd = 0, wr = 0, out = 0;
     for (const r of records) {
@@ -38,6 +48,9 @@
     }
     $("nReq").textContent = n ? String(n) : "0";
     $("nTok").textContent = n ? fmt(inp + rd + wr + out) : "0";
+    const hr = inp + rd > 0 ? rd / (inp + rd) : 0;
+    $("nHit").textContent = n ? (hr * 100).toFixed(0) + "%" : "—";
+    $("nHit").className = hr >= 0.6 ? "good" : hr > 0.15 ? "mid" : "bad";
 
     // 流水（最近 8 条）
     const feed = $("feed");
@@ -76,15 +89,13 @@
       ctx.fillText("暂无请求", W / 2, H / 2);
       return;
     }
-    const vals = rows.map((r) => (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0) + (r.output_tokens || 0));
-    const logs = vals.map((v) => Math.log10(Math.max(v, 1)));
-    const maxL = Math.max(...logs, 1);
     const gap = 2;
     const bw = Math.max(3, Math.min(8, (W - gap * rows.length) / rows.length));
     let x = W - (rows.length * (bw + gap) - gap);
     const COLOR = { good: "#1fab6b", mid: "#f5a623", bad: "#c3cad6" };
-    rows.forEach((r, i) => {
-      const h = Math.max(2, (logs[i] / maxL) * (H - 3));
+    rows.forEach((r) => {
+      const rate = Number(r.cache_hit_rate) || 0;
+      const h = Math.max(2, rate * (H - 3));
       ctx.fillStyle = COLOR[hitCls(r)];
       ctx.beginPath();
       ctx.roundRect(x, H - h, bw, h, 1.5);
@@ -93,37 +104,30 @@
     });
   }
 
-  async function loadTodayHit() {
-    try {
-      const s = await window.api.getStats();
-      if (s && s.today) $("nHit").textContent = ((s.today.hitRate || 0) * 100).toFixed(1) + "%";
-    } catch (_) {}
-  }
-
   async function seed() {
     try {
-      const res = await window.api.getLive();
+      const res = await window.api.getLive(svc || undefined);
       records = ((res && res.records) || []).slice(-KEEP);
       render(0);
     } catch (_) {}
-    loadTodayHit();
   }
 
   window.api.onLiveRecords((recs) => {
     if (!Array.isArray(recs) || !recs.length) return;
-    records.push(...recs);
+    const mine = svc ? recs.filter((r) => r.service === svc) : recs;
+    if (!mine.length) return;
+    records.push(...mine);
     if (records.length > KEEP) records = records.slice(-KEEP);
-    render(recs.length);
-    loadTodayHit();
+    render(mine.length);
   });
 
-  window.api.onStatus((s) => { status = s; renderHead(); });
+  window.api.onStatus((s) => { svcStatus = pickStatus(s); renderHead(); });
   window.api.onPanelShown(() => { seed(); refreshStatus(); });
 
-  $("closeBtn").addEventListener("click", () => window.api.toggleFloat(false));
+  $("closeBtn").addEventListener("click", () => window.api.toggleFloat(svc));
 
   async function refreshStatus() {
-    try { status = await window.api.getStatus(); } catch (_) {}
+    try { svcStatus = pickStatus(await window.api.getStatus()); } catch (_) {}
     renderHead();
   }
 

@@ -3,9 +3,13 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("api", {
   getConfig: () => ipcRenderer.invoke("get-config"),
   saveConfig: (cfg) => ipcRenderer.invoke("save-config", cfg),
-  getStats: () => ipcRenderer.invoke("get-stats"),
+  getStats: (service) => ipcRenderer.invoke("get-stats", service),
+  toggleService: (name) => ipcRenderer.invoke("toggle-service", name),
+  startService: (name) => ipcRenderer.invoke("start-service", name),
+  stopService: (name) => ipcRenderer.invoke("stop-service", name),
+  toggleProxy: () => ipcRenderer.invoke("toggle-proxy"),
   getStatus: () => ipcRenderer.invoke("get-status"),
-  getLive: () => ipcRenderer.invoke("get-live"),
+  getLive: (service) => ipcRenderer.invoke("get-live", service),
   onLiveRecords: (cb) => {
     const listener = (_e, recs) => cb(recs);
     ipcRenderer.on("live-records", listener);
@@ -17,8 +21,8 @@ contextBridge.exposeInMainWorld("api", {
   stopProxy: () => ipcRenderer.invoke("stop-proxy"),
   openConfigFile: () => ipcRenderer.invoke("open-config-file"),
   hidePanel: () => ipcRenderer.invoke("hide-panel"),
-  toggleFloat: (forceOpen) => ipcRenderer.invoke("toggle-float", forceOpen),
-  getFloatState: () => ipcRenderer.invoke("get-float-state"),
+  toggleFloat: (name) => ipcRenderer.invoke("toggle-float", name),
+  getFloatState: (name) => ipcRenderer.invoke("get-float-state", name),
   onFloatState: (cb) => {
     const listener = (_e, s) => cb(s);
     ipcRenderer.on("float-state", listener);

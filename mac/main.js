@@ -58,6 +58,7 @@ function defaultConfig() {
     services: [
       {
         comment: "service-1",
+        mode: "claude",
         model: "qwen-plus",
         sub_model: "qwen-plus",
         listen_address: "11011",
@@ -86,12 +87,17 @@ function readConfig() {
   }
   for (const s of cfg.services) {
     s.comment = s.comment || "service";
+    s.mode = s.mode || "claude"; // claude | codex
     s.model = s.model || "qwen-plus";
-    s.sub_model = s.sub_model || s.model;
-    s.listen_address = String(s.listen_address || "11011");
+    if (s.mode === "claude") {
+      s.sub_model = s.sub_model || s.model;
+      s.context_1m = !!s.context_1m;
+    }
+    if (s.mode === "claude" || s.mode === "codex") {
+      s.listen_address = String(s.listen_address || "11011");
+    }
     s.openai_base_url = s.openai_base_url || def.services[0].openai_base_url;
     s.openai_api_key = s.openai_api_key || "";
-    s.context_1m = !!s.context_1m;
   }
   return cfg;
 }
@@ -100,123 +106,136 @@ function writeConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 }
 
-// ---------- 代理进程管理 ----------
-let child = null;
-let running = false;
+// ---------- 代理进程管理（按服务独立进程） ----------
+const children = {}; // service.comment -> child process
 let panel = null;
-let floatWin = null;
 let tray = null;
 let lastError = "";
 
-// 向所有窗口（面板 + 悬浮窗）广播
+function runningServices() { return Object.keys(children); }
+function anyRunning() { return runningServices().length > 0; }
+function isRunning(name) { return !!children[name]; }
+
+// 向所有窗口（面板 + 各服务悬浮窗）广播
 function sendAll(channel, payload) {
-  for (const w of [panel, floatWin]) {
+  for (const w of [panel, ...Object.values(floatWins)]) {
     if (w && !w.isDestroyed()) w.webContents.send(channel, payload);
   }
 }
 
+// proxy.py 直接读取 config.json，这里仅透传缓存统计相关环境变量兜底
 function buildEnv(cfg) {
-  const svc = cfg.services[0];
   return {
     ...process.env,
-    PROXY_HOST: "127.0.0.1",
-    PROXY_PORT: String(svc.listen_address),
-    DASHSCOPE_URL: svc.openai_base_url,
-    DASHSCOPE_API_KEY: svc.openai_api_key,
-    PROXY_MODEL: svc.model,
-    SUB_PROXY_MODEL: svc.sub_model || svc.model,
     CACHE_STATS_ENABLED: String(cfg.cache_stats_enabled),
     CACHE_STATS_DIR: cfg.cache_stats_dir,
     CACHE_STATS_RETENTION_DAYS: String(cfg.cache_stats_retention_days),
-    PROXY_MAX_TOKENS: svc.context_1m ? "1000000" : "4096",
   };
 }
 
-function startProxy() {
-  if (running && child) return { ok: true, running: true };
+function startService(name) {
+  if (children[name]) return { ok: true, running: true };
   const cfg = readConfig();
-  if (!fs.existsSync(PROXY_SCRIPT)) {
-    lastError = `未找到代理脚本: ${PROXY_SCRIPT}`;
-    return { ok: false, error: lastError };
-  }
-  const svc = cfg.services[0];
-  if (!svc.openai_api_key) {
-    lastError = "API Key 未配置，请先在「配置」中填写";
-    return { ok: false, error: lastError };
-  }
+  const svc = (cfg.services || []).find((s) => s.comment === name);
+  if (!svc) return { ok: false, error: "服务不存在" };
+  if (!svc.openai_api_key) return { ok: false, error: `${name} 的 API Key 未配置` };
+  if (!fs.existsSync(PROXY_SCRIPT)) return { ok: false, error: `未找到代理脚本: ${PROXY_SCRIPT}` };
   try {
     lastError = "";
-    child = spawn(resolvePython(), [PROXY_SCRIPT], {
+    const child = spawn(resolvePython(), [PROXY_SCRIPT, "--service", name], {
       env: buildEnv(cfg),
       cwd: ROOT,
       stdio: ["ignore", "pipe", "pipe"],
     });
-    running = true;
+    children[name] = child;
     let stderrTail = "";
-    child.stdout.on("data", (d) => { try { console.log(`[proxy] ${d.toString().trim()}`); } catch (_) {} });
+    child.stdout.on("data", (d) => { try { console.log(`[${name}] ${d.toString().trim()}`); } catch (_) {} });
     child.stderr.on("data", (d) => {
       const s = d.toString();
       stderrTail = (stderrTail + s).slice(-500);
-      try { console.error(`[proxy] ${s.trim()}`); } catch (_) {}
+      try { console.error(`[${name}] ${s.trim()}`); } catch (_) {}
     });
     child.on("exit", (code, signal) => {
-      running = false;
-      child = null;
+      delete children[name];
       if (code && code !== 0) {
-        // 提炼常见错误
         if (/Address already in use|EADDRINUSE|address in use/i.test(stderrTail)) {
-          lastError = `端口 :${svc.listen_address} 已被占用（可能有其他代理进程在运行）`;
+          lastError = `${name} 端口 :${svc.listen_address} 已被占用`;
         } else {
-          lastError = `代理异常退出 (code=${code})`;
+          lastError = `${name} 异常退出 (code=${code})`;
         }
       }
-      console.log(`[proxy] exited code=${code} signal=${signal}`);
-      stopLiveWatch();
+      console.log(`[${name}] exited code=${code} signal=${signal}`);
+      if (!anyRunning()) stopLiveWatch();
       pushStatus();
     });
     child.on("error", (e) => {
-      running = false;
-      child = null;
-      lastError = "启动失败: " + e.message;
+      delete children[name];
+      lastError = `启动失败: ${e.message}`;
       pushStatus();
     });
-    startLiveWatch();
+    if (Object.keys(children).length === 1) startLiveWatch();
     pushStatus();
-    return { ok: true, running: true, port: svc.listen_address, model: svc.model };
+    return { ok: true, running: true };
   } catch (e) {
-    running = false;
-    child = null;
+    delete children[name];
     lastError = e.message;
     return { ok: false, error: e.message };
   }
 }
 
-function stopProxy() {
+function stopService(name) {
+  const child = children[name];
   if (child) {
-    try {
-      child.kill("SIGINT");
-    } catch (_) {}
+    try { child.kill("SIGINT"); } catch (_) {}
     setTimeout(() => {
-      if (child) {
-        try { child.kill("SIGKILL"); } catch (_) {}
-      }
+      if (children[name]) { try { children[name].kill("SIGKILL"); } catch (_) {} }
     }, 1500);
   }
-  running = false;
+  delete children[name];
+  if (!anyRunning()) stopLiveWatch();
   lastError = "";
-  stopLiveWatch();
   pushStatus();
   return { ok: true, running: false };
 }
 
+function toggleService(name) { return isRunning(name) ? stopService(name) : startService(name); }
+
+function startProxy() {
+  const cfg = readConfig();
+  const enabled = (cfg.services || []).filter((s) => (s.mode === "claude" || s.mode === "codex") && s.openai_api_key);
+  if (!enabled.length) {
+    lastError = "没有可代理的服务，或 API Key 未配置";
+    pushStatus();
+    return { ok: false, error: lastError };
+  }
+  for (const s of enabled) startService(s.comment);
+  return { ok: true };
+}
+
+function stopProxy() {
+  for (const n of runningServices()) stopService(n);
+  return { ok: true };
+}
+
 function statusPayload() {
-  const svc = readConfig().services[0];
+  const cfg = readConfig();
+  const services = (cfg.services || []).map((s) => {
+    const proxiable = s.mode === "claude" || s.mode === "codex";
+    return {
+      name: s.comment,
+      mode: s.mode,
+      port: s.listen_address || "",
+      model: s.model || "",
+      running: proxiable && !!children[s.comment],
+      proxiable,
+    };
+  });
+  const running = services.some((s) => s.running);
   return {
     running,
-    port: svc.listen_address,
-    model: svc.model,
-    context1m: !!svc.context_1m,
     error: lastError,
+    services,
+    ports: services.filter((s) => s.running).map((s) => ({ mode: s.mode, port: s.port, model: s.model })),
   };
 }
 
@@ -300,15 +319,16 @@ function stopLiveWatch() {
 
 // ---------- 托盘 ----------
 function buildTrayMenu() {
-  const cfg = readConfig();
-  const port = cfg.services[0].listen_address;
+  const label = anyRunning()
+    ? `● 代理运行中 · ${runningServices().length} 个服务`
+    : "○ 代理已停止";
   return Menu.buildFromTemplate([
-    { label: running ? `● 代理运行中 :${port}` : "○ 代理已停止", enabled: false },
-    { label: running ? "停止代理" : "启动代理", click: () => (running ? stopProxy() : startProxy()) },
+    { label, enabled: false },
+    { label: anyRunning() ? "停止全部代理" : "启动全部代理", click: () => (anyRunning() ? stopProxy() : startProxy()) },
     { type: "separator" },
     {
-      label: (floatWin && !floatWin.isDestroyed() && floatWin.isVisible()) ? "关闭悬浮看板" : "打开悬浮看板",
-      click: () => toggleFloat(),
+      label: "打开悬浮看板（第一服务）",
+      click: () => { const s = readConfig().services?.[0]; if (s) toggleFloat(s.comment); },
     },
     { label: "打开配置文件", click: () => shell.openPath(CONFIG_PATH).catch(() => {}) },
     { type: "separator" },
@@ -318,9 +338,9 @@ function buildTrayMenu() {
 
 function updateTray() {
   if (!tray) return;
-  tray.setToolTip(running ? "o2a-proxy · 运行中" : "o2a-proxy · 已停止");
+  tray.setToolTip(anyRunning() ? "o2a-proxy · 运行中" : "o2a-proxy · 已停止");
   // 运行时在图标旁显示端口，一眼可见状态
-  tray.setTitle(running ? "" : "", { fontType: "monospacedDigit" });
+  tray.setTitle(anyRunning() ? "" : "", { fontType: "monospacedDigit" });
 }
 
 // ---------- 弹出面板（menubar popover 风格）----------
@@ -393,90 +413,82 @@ function togglePanel() {
   panel.webContents.send("panel-shown");
 }
 
-// ---------- 悬浮看板（置顶小窗，实时查看） ----------
+// ---------- 悬浮看板（每个服务独立小窗） ----------
 const FLOAT_W = 300;
 const FLOAT_H = 210;
 const FLOAT_STATE = path.join(app.getPath("userData"), "float-state.json");
+const floatWins = {}; // service.comment -> BrowserWindow
 
 function readFloatState() {
   try { return JSON.parse(fs.readFileSync(FLOAT_STATE, "utf-8")); } catch (_) { return {}; }
 }
-function saveFloatState() {
-  if (!floatWin || floatWin.isDestroyed()) return;
+function saveFloatState(name) {
+  const w = floatWins[name];
+  if (!w || w.isDestroyed()) return;
   try {
-    const [x, y] = floatWin.getPosition();
-    fs.writeFileSync(FLOAT_STATE, JSON.stringify({ x, y, open: floatWin.isVisible() }));
+    const st = readFloatState();
+    const [x, y] = w.getPosition();
+    st[name] = { x, y, open: w.isVisible() };
+    fs.writeFileSync(FLOAT_STATE, JSON.stringify(st));
   } catch (_) {}
 }
 
-function createFloatWin() {
-  const st = readFloatState();
+function createFloatWin(name) {
+  const st = (readFloatState())[name] || {};
   const display = screen.getPrimaryDisplay();
   const wa = display.workArea;
   let x = Number.isFinite(st.x) ? st.x : wa.x + wa.width - FLOAT_W - 16;
   let y = Number.isFinite(st.y) ? st.y : wa.y + 44;
-  // 防止历史位置在屏幕外
   x = Math.min(Math.max(x, wa.x), wa.x + wa.width - FLOAT_W);
   y = Math.min(Math.max(y, wa.y), wa.y + wa.height - FLOAT_H);
 
-  floatWin = new BrowserWindow({
-    width: FLOAT_W,
-    height: FLOAT_H,
-    x, y,
-    show: false,
-    frame: false,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    transparent: true,
-    hasShadow: true,
-    alwaysOnTop: true,
-    hiddenInMissionControl: true,
+  const w = new BrowserWindow({
+    width: FLOAT_W, height: FLOAT_H, x, y,
+    show: false, frame: false, resizable: false, minimizable: false, maximizable: false,
+    fullscreenable: false, skipTaskbar: true, transparent: true, hasShadow: true,
+    alwaysOnTop: true, hiddenInMissionControl: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
-  floatWin.setAlwaysOnTop(true, "floating");
-  floatWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  floatWin.loadFile(path.join(__dirname, "renderer", "float.html"));
-  floatWin.on("moved", saveFloatState);
-  floatWin.on("close", (e) => {
+  w.setAlwaysOnTop(true, "floating");
+  w.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  w.loadFile(path.join(__dirname, "renderer", "float.html"), { query: { svc: name } });
+  w.on("moved", () => saveFloatState(name));
+  w.on("close", (e) => {
     if (!app.isQuiting) {
       e.preventDefault();
-      floatWin.hide();
-      saveFloatState();
-      sendAll("float-state", { open: false });
+      w.hide();
+      saveFloatState(name);
     }
   });
-  return floatWin;
+  w.on("closed", () => { delete floatWins[name]; });
+  floatWins[name] = w;
+  return w;
 }
 
-function toggleFloat(forceOpen) {
-  if (!floatWin || floatWin.isDestroyed()) createFloatWin();
-  const open = forceOpen === undefined ? !floatWin.isVisible() : !!forceOpen;
+function toggleFloat(name, forceOpen) {
+  if (!floatWins[name] || floatWins[name].isDestroyed()) createFloatWin(name);
+  const w = floatWins[name];
+  const open = forceOpen === undefined ? !w.isVisible() : !!forceOpen;
   if (open) {
-    floatWin.showInactive(); // 不抢焦点，面板不会因 blur 收起
-    floatWin.webContents.send("status", statusPayload());
-    floatWin.webContents.send("panel-shown");
+    w.showInactive(); // 不抢焦点，面板不会因 blur 收起
+    w.webContents.send("status", statusPayload());
+    w.webContents.send("panel-shown");
   } else {
-    floatWin.hide();
+    w.hide();
   }
-  saveFloatState();
-  sendAll("float-state", { open });
+  saveFloatState(name);
+  sendAll("float-state", { name, open });
   return { ok: true, open };
 }
 
 // ---------- IPC ----------
 ipcMain.handle("get-config", () => readConfig());
 ipcMain.handle("save-config", (_e, cfg) => {
-  // 运行中锁定配置：必须先停止代理才能修改（避免运行参数与配置不一致）
-  if (running) {
-    return { ok: false, locked: true, error: "代理运行中，请先停止代理再修改配置" };
-  }
+  // 允许运行中保存配置；运行中的代理不会热加载，需重启相应服务后生效
   try {
     writeConfig(cfg);
     pushStatus();
@@ -485,13 +497,41 @@ ipcMain.handle("save-config", (_e, cfg) => {
     return { ok: false, error: e.message };
   }
 });
-// 实时调用记录：面板打开时取最近缓冲
-ipcMain.handle("get-live", () => ({ running, records: liveBuf.slice(-LIVE_MAX) }));
-ipcMain.handle("get-stats", () => {
+// 从最近几天的 jsonl 读取历史实时记录（按服务过滤），用于无运行代理时回退显示
+function loadRecentLive(service, limit = LIVE_MAX) {
+  const dir = statsDirPath();
+  let files;
+  try { files = fs.readdirSync(dir).filter((f) => f.endsWith(".jsonl")).sort(); } catch (_) { return []; }
+  const recs = [];
+  for (const f of files.slice(-4)) { // 最近 4 天
+    try {
+      const lines = fs.readFileSync(path.join(dir, f), "utf-8").split("\n");
+      for (const ln of lines) {
+        const t = ln.trim(); if (!t) continue;
+        try {
+          const r = JSON.parse(t);
+          if (service && r.service !== service) continue;
+          recs.push(r);
+        } catch (_) {}
+      }
+    } catch (_) {}
+  }
+  return recs.slice(-limit);
+}
+
+// 实时调用记录：面板打开时取最近缓冲；无运行代理时回退到历史实时数据（可按服务过滤）
+ipcMain.handle("get-live", (_e, service) => {
+  let recs = service ? liveBuf.filter((r) => r.service === service) : liveBuf;
+  if (!recs.length) recs = loadRecentLive(service);
+  return { running: anyRunning(), records: (recs || []).slice(-LIVE_MAX) };
+});
+ipcMain.handle("get-stats", (_e, service) => {
   const cfg = readConfig();
   const dir = path.join(ROOT, cfg.cache_stats_dir || "cache_stats");
   try {
-    return new Stats(dir).getStats();
+    const stats = new Stats(dir);
+    stats.migrateLegacy(); // 一次性：把历史数据归入第一个可代理服务
+    return stats.getStats(service || undefined);
   } catch (e) {
     return { error: e.message };
   }
@@ -530,7 +570,10 @@ ipcMain.handle("fetch-models", async (_e, { baseUrl, apiKey }) => {
 });
 ipcMain.handle("start-proxy", () => startProxy());
 ipcMain.handle("stop-proxy", () => stopProxy());
-ipcMain.handle("toggle-proxy", () => (running ? stopProxy() : startProxy()));
+ipcMain.handle("toggle-proxy", () => (anyRunning() ? stopProxy() : startProxy()));
+ipcMain.handle("start-service", (_e, name) => startService(name));
+ipcMain.handle("stop-service", (_e, name) => stopService(name));
+ipcMain.handle("toggle-service", (_e, name) => toggleService(name));
 ipcMain.handle("open-config-file", () => {
   shell.openPath(CONFIG_PATH).catch(() => {});
   return { ok: true };
@@ -539,9 +582,9 @@ ipcMain.handle("hide-panel", () => {
   if (panel && !panel.isDestroyed()) panel.hide();
   return { ok: true };
 });
-ipcMain.handle("toggle-float", (_e, forceOpen) => toggleFloat(forceOpen));
-ipcMain.handle("get-float-state", () => ({
-  open: !!(floatWin && !floatWin.isDestroyed() && floatWin.isVisible()),
+ipcMain.handle("toggle-float", (_e, name) => toggleFloat(name));
+ipcMain.handle("get-float-state", (_e, name) => ({
+  open: !!(floatWins[name] && !floatWins[name].isDestroyed() && floatWins[name].isVisible()),
 }));
 ipcMain.handle("quit-app", () => {
   app.isQuiting = true;
@@ -564,9 +607,11 @@ if (!app.requestSingleInstanceLock()) {
     tray.on("click", () => togglePanel());
     tray.on("right-click", () => tray.popUpContextMenu(buildTrayMenu()));
     createPanel();
-    createFloatWin();
-    // 上次退出时悬浮窗是打开的 → 恢复显示
-    if (readFloatState().open) toggleFloat(true);
+    // 恢复上次退出时各服务打开的悬浮窗
+    const fst = readFloatState();
+    for (const s of readConfig().services || []) {
+      if (fst[s.comment] && fst[s.comment].open) toggleFloat(s.comment, true);
+    }
     updateTray();
   });
   app.on("before-quit", () => {

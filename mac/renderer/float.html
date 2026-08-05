@@ -58,6 +58,8 @@
     .num b { display: block; font-size: 15px; font-weight: 700; }
     .num span { font-size: 10px; color: var(--muted); }
     .num b.good { color: var(--green); }
+    .num b.mid { color: var(--orange); }
+    .num b.bad { color: var(--muted); }
 
     canvas.spark { width: calc(100% - 20px); height: 40px; display: block; margin: 0 10px 4px; }
 
@@ -84,14 +86,14 @@
   <div class="float">
     <div class="head">
       <span class="dot" id="dot"></span>
-      <span class="ttl">o2a-proxy</span>
+      <span class="ttl" id="ttl">o2a-proxy</span>
       <span class="sub" id="sub">已停止</span>
       <button class="x" id="closeBtn" title="关闭悬浮看板">✕</button>
     </div>
     <div class="nums">
       <div class="num"><b id="nReq">—</b><span>近5min请求</span></div>
       <div class="num"><b id="nTok">—</b><span>近5min Token</span></div>
-      <div class="num"><b id="nHit" class="good">—</b><span>今日命中</span></div>
+      <div class="num"><b id="nHit" class="good">—</b><span>近5min命中</span></div>
     </div>
     <canvas class="spark" id="spark"></canvas>
     <div class="feed" id="feed"><div class="empty">等待请求…</div></div>

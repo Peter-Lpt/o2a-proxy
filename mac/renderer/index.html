@@ -17,13 +17,15 @@
         </div>
       </div>
       <div class="head-actions">
+        <button type="button" id="addSvcBtn" class="btn btn-sm head-add" title="添加服务">＋ 添加服务</button>
         <button id="floatBtn" class="float-btn" title="悬浮看板：置顶小窗实时查看">◱ 悬浮</button>
-        <label class="switch" title="启动 / 停止代理">
-          <input type="checkbox" id="powerSwitch" />
-          <span class="knob"></span>
-        </label>
       </div>
     </header>
+
+    <!-- 服务切换标签（每个服务一个，自带独立开关） -->
+    <div class="svc-bar">
+      <div id="svcTabs" class="svc-tabs"></div>
+    </div>
 
     <!-- 未启动信息条（仅停止时显示） -->
     <div id="offHero" class="off-bar">
@@ -60,7 +62,7 @@
 
         <div class="stat-table card">
           <div class="st-row st-head">
-            <span></span><span>本小时</span><span>今日</span><span>本月</span>
+            <span id="statsScope" class="stats-scope">全部</span><span>本小时</span><span>今日</span><span>本月</span>
           </div>
           <div class="st-row"><span>请求数</span><b id="req0"></b><b id="req1"></b><b id="req2"></b></div>
           <div class="st-row"><span>输入</span><b id="in0"></b><b id="in1"></b><b id="in2"></b></div>
@@ -76,7 +78,19 @@
             <button class="seg-btn active" data-range="today">今日</button>
             <button class="seg-btn" data-range="month">本月</button>
           </div>
-          <button id="refreshBtn" class="icon-btn" title="刷新">↻</button>
+          <div class="chart-head-right">
+            <select id="modelFilter" class="chart-select" title="按模型过滤（今日/本月）"></select>
+            <button id="refreshBtn" class="icon-btn" title="刷新">↻</button>
+          </div>
+        </div>
+
+        <!-- 按模型分组统计（受今日/本月切换控制） -->
+        <div id="modelStatsCard" class="card model-stats-card" style="display:none">
+          <div class="model-stats-head">
+            <span class="model-stats-title" id="modelStatsTitle">今日按模型</span>
+            <span class="model-stats-total" id="modelStatsTotal"></span>
+          </div>
+          <div id="modelStatsList" class="model-stats-list"></div>
         </div>
 
         <div class="card chart-box">
@@ -90,43 +104,14 @@
       <!-- 配置 -->
       <section id="config" class="panel">
         <div id="cfgLock" class="cfg-lock" style="display:none">
-          <span>🔒 代理运行中，配置已锁定</span>
-          <button type="button" id="cfgLockStopBtn" class="btn btn-sm">停止代理以编辑</button>
+          <span id="cfgLockText">🔒 该服务运行中，配置已锁定</span>
+          <button type="button" id="cfgLockStopBtn" class="btn btn-sm" style="display:none">停止代理以编辑</button>
         </div>
         <form id="configForm">
           <div class="card form-card">
-            <div class="fc-h">服务</div>
-            <label>API 地址 <input name="openai_base_url" type="text" spellcheck="false" /></label>
-            <label>API Key
-              <span class="model-wrap">
-                <input name="openai_api_key" type="password" placeholder="sk-..." autocomplete="off" />
-                <button type="button" id="toggleKeyBtn" class="mini-btn text">显示</button>
-              </span>
-            </label>
-            <div class="grid2">
-              <label>模型
-                <span class="model-wrap combo">
-                  <input name="model" type="text" spellcheck="false" autocomplete="off" placeholder="输入或选择" />
-                  <button type="button" id="fetchModelsBtn" class="mini-btn" title="从 API 地址拉取模型列表">↻</button>
-                  <div class="combo-list" id="comboModel"></div>
-                </span>
-              </label>
-              <label>子模型
-                <span class="model-wrap combo">
-                  <input name="sub_model" type="text" spellcheck="false" autocomplete="off" placeholder="输入或选择" />
-                  <div class="combo-list" id="comboSubModel"></div>
-                </span>
-              </label>
-            </div>
+            <div class="fc-h">服务配置 <span id="activeSvcTitle" class="fc-sub"></span></div>
+            <div id="svcSingle"></div>
             <div class="model-hint" id="modelHint"></div>
-            <div class="grid2">
-              <label>监听端口 <input name="listen_address" type="text" /></label>
-              <label>备注 <input name="comment" type="text" /></label>
-            </div>
-            <label class="inline">
-              <input name="context_1m" type="checkbox" />
-              <span>启用 1M 上下文<small>max_tokens = 1,000,000</small></span>
-            </label>
           </div>
 
           <div class="card form-card">
@@ -142,11 +127,14 @@
             </div>
           </div>
 
+          <datalist id="modelList"></datalist>
+
           <div class="form-actions">
             <button type="submit" class="btn btn-primary">保存配置</button>
+            <button type="button" id="removeSvcBtn" class="btn btn-danger">删除此服务</button>
             <button type="button" id="openCfgBtn" class="btn">打开 config.json</button>
           </div>
-          <p class="hint">代理运行中配置将锁定，停止后方可编辑。多服务请直接编辑 config.json（代理仅使用第一个服务）。</p>
+          <p class="hint">每个服务监听各自端口：claude 走 Anthropic 转换，codex 走 OpenAI 透传，均记录统计。填写真实 API Key 后点服务标签上的开关即可启动。</p>
         </form>
       </section>
     </main>

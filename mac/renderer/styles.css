@@ -132,6 +132,12 @@ main { flex: 1; overflow-y: auto; padding: 12px; }
 
 /* ---------- 图表 ---------- */
 .chart-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 8px; }
+.chart-head-right { display: flex; align-items: center; gap: 6px; }
+.chart-select {
+  border: 1px solid var(--border); border-radius: 7px; background: #fff;
+  font-size: 11px; color: var(--text); padding: 3px 6px; max-width: 150px;
+  cursor: pointer; outline: none;
+}
 .seg { display: inline-flex; background: #e9ecf1; border-radius: 8px; padding: 2px; }
 .seg-btn {
   border: none; background: none; padding: 4px 14px; border-radius: 6px;
@@ -145,7 +151,7 @@ main { flex: 1; overflow-y: auto; padding: 12px; }
 .icon-btn:hover { color: var(--text); }
 .chart-box { padding: 10px 12px 6px; }
 .chart-title { font-weight: 700; font-size: 12px; margin-bottom: 6px; }
-.chart-box canvas { width: 100%; height: 220px; display: block; cursor: grab; }
+.chart-box canvas { width: 100%; height: 260px; display: block; cursor: grab; }
 .chart-note { font-size: 10px; color: var(--muted); margin-top: 4px; text-align: right; }
 
 /* ---------- chart tooltip ---------- */
@@ -266,6 +272,38 @@ main { flex: 1; overflow-y: auto; padding: 12px; }
 .live-hit.bad { color: var(--muted); }
 .live-empty { padding: 10px 0; text-align: center; color: var(--muted); font-size: 11px; }
 
+/* ---------- 按模型分组统计 ---------- */
+.model-stats-card { padding: 10px 12px 8px; }
+.model-stats-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border);
+}
+.model-stats-title { font-size: 12px; font-weight: 700; }
+.model-stats-total { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.model-stats-list { display: flex; flex-direction: column; gap: 8px; }
+.model-stat-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 12px;
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.model-stat-name {
+  font-weight: 600; font-size: 12px; color: var(--text);
+  display: flex; align-items: center; gap: 6px;
+}
+.model-stat-badge {
+  font-size: 9px; color: var(--primary); background: rgba(45,127,249,.08);
+  padding: 1px 5px; border-radius: 3px; font-weight: 500;
+}
+.model-stat-cost { font-weight: 700; color: var(--primary); text-align: right; }
+.model-stat-details {
+  grid-column: 1 / -1; display: flex; gap: 12px;
+  font-size: 10px; color: var(--muted); padding-top: 2px;
+}
+.model-stat-details span { white-space: nowrap; }
+.model-stat-hit { font-weight: 600; }
+.model-stat-hit.good { color: var(--green); }
+.model-stat-hit.mid { color: var(--orange); }
+.model-stat-hit.bad { color: var(--muted); }
+
 /* ---------- 配置锁定 ---------- */
 .cfg-lock {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -287,3 +325,62 @@ form.locked { opacity: .55; pointer-events: none; user-select: none; }
 .float-btn.on {
   color: #fff; background: var(--primary); border-color: var(--primary);
 }
+
+/* ---------- 服务切换标签（每服务独立开关） ---------- */
+.svc-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px; }
+.svc-tabs { display: flex; gap: 6px; overflow-x: auto; flex-wrap: nowrap; flex: 1; }
+.svc-tab {
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  padding: 5px 8px 5px 11px; border: 1px solid var(--border); background: #fff; color: var(--text);
+  border-radius: 999px; font-size: 11px; font-weight: 600; cursor: pointer;
+}
+.svc-tab:hover { border-color: var(--primary); }
+.svc-tab.active { background: var(--primary); border-color: var(--primary); color: #fff; }
+.svc-tab-toggle {
+  width: 22px; height: 13px; border-radius: 999px; background: var(--border);
+  position: relative; cursor: pointer; flex: none; transition: background .15s;
+}
+.svc-tab-toggle::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 9px; height: 9px;
+  border-radius: 50%; background: #fff; transition: left .15s;
+}
+.svc-tab-toggle.on { background: #1fab6b; }
+.svc-tab-toggle.on::after { left: 11px; }
+.svc-tab.active .svc-tab-toggle:not(.on) { background: rgba(255,255,255,.4); }
+.svc-add {
+  width: 26px; height: 26px; flex: none; border: 1px dashed var(--border); background: transparent;
+  color: var(--muted); border-radius: 8px; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.svc-add:hover { color: var(--primary); border-color: var(--primary); }
+
+/* ---------- 服务配置卡片 ---------- */
+.fc-sub { color: var(--muted); font-weight: 500; font-size: 11px; }
+.svc-card {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  margin-bottom: 10px; background: #fafbfc;
+}
+.svc-card .svc-title { font-weight: 700; font-size: 12px; color: var(--text); margin-bottom: 8px; display: block; }
+.svc-mode-wrap { display: block; margin-bottom: 8px; }
+.svc-mode {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 7px;
+  font-size: 12px; background: #fff; color: var(--text); cursor: pointer;
+}
+.svc-mode:focus { outline: none; border-color: var(--primary); }
+.hidden { display: none !important; }
+.btn-danger { color: var(--red); border-color: var(--red); }
+.btn-danger:hover { background: rgba(255,0,0,.06); }
+
+/* 顶部「添加服务」按钮 */
+.head-add { padding: 4px 10px; font-size: 11px; white-space: nowrap; }
+.svc-bar { padding: 6px 12px 4px; }
+
+/* 服务标签上的删除按钮 */
+.svc-tab-del { margin-left: 3px; color: var(--mut, #888); font-weight: 700; line-height: 1; padding: 0 2px; border-radius: 3px; }
+.svc-tab-del:hover { color: #fff; background: #e5484d; }
+
+/* 实时流水：服务名标签 */
+.live-row { display: flex; align-items: center; gap: 6px; }
+.live-svc { font-size: 9px; color: #fff; background: #4a90d9; border-radius: 8px; padding: 0 5px; line-height: 1.4; flex: none; }
+
+/* 统计范围标注 */
+.stats-scope { font-weight: 700; color: #4a90d9; }

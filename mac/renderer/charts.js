@@ -30,7 +30,17 @@
     const pow = Math.pow(10, Math.floor(Math.log10(v)));
     const f = v / pow;
     let nf;
-    if (f <= 1) nf = 1; else if (f <= 2) nf = 2; else if (f <= 5) nf = 5; else nf = 10;
+    if (f <= 1) nf = 1;
+    else if (f <= 1.2) nf = 1.2;
+    else if (f <= 1.5) nf = 1.5;
+    else if (f <= 2) nf = 2;
+    else if (f <= 2.5) nf = 2.5;
+    else if (f <= 3) nf = 3;
+    else if (f <= 4) nf = 4;
+    else if (f <= 5) nf = 5;
+    else if (f <= 6) nf = 6;
+    else if (f <= 8) nf = 8;
+    else nf = 10;
     return nf * pow;
   }
 
@@ -63,7 +73,7 @@
     ctx.font = "11px -apple-system, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    const ticks = 4;
+    const ticks = 6;
     for (let i = 0; i <= ticks; i++) {
       const y = padT + (plotH * i) / ticks;
       const val = maxV * (1 - i / ticks);
@@ -142,7 +152,7 @@
     ctx.font = "11px -apple-system, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    const ticks = 4;
+    const ticks = 6;
     for (let i = 0; i <= ticks; i++) {
       const y = padT + (plotH * i) / ticks;
       const val = maxV * (1 - i / ticks);
@@ -208,11 +218,33 @@
     return `rgba(${r},${g},${b},${a})`;
   }
 
+  // 绘制路径：smooth=true 时用 Catmull-Rom 转贝塞尔平滑曲线，否则直线
+  function tracePath(ctx, pts, smooth) {
+    ctx.moveTo(pts[0].x, pts[0].y);
+    if (!smooth || pts.length < 3) {
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      return;
+    }
+    // Catmull-Rom -> Bezier：每段用前后各一点作为控制点
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(pts.length - 1, i + 2)];
+      const c1x = p1.x + (p2.x - p0.x) / 6;
+      const c1y = p1.y + (p2.y - p0.y) / 6;
+      const c2x = p2.x - (p3.x - p1.x) / 6;
+      const c2y = p2.y - (p3.y - p1.y) / 6;
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y);
+    }
+  }
+
   function drawCombinedChart(canvas, opts) {
     const { ctx, w, h } = setupCanvas(canvas);
     const labels = opts.labels || [];
     const series = opts.series || [];
     const hitData = opts.hitData || [];
+    const mode = opts.mode || "bar"; // bar | line
     const yFmt = opts.yFmt || fmtNum;
     const padL = 52, padR = 42, padT = 14, padB = 26;
     const plotW = w - padL - padR;
@@ -244,7 +276,7 @@
     ctx.font = "11px -apple-system, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    const ticks = 4;
+    const ticks = 6;
     for (let i = 0; i <= ticks; i++) {
       const y = padT + (plotH * i) / ticks;
       ctx.beginPath();
@@ -253,6 +285,19 @@
       ctx.stroke();
       ctx.fillText(yFmt(maxTok * (1 - i / ticks)), padL - 6, y);
     }
+    // intermediate dotted sub-grid
+    ctx.save();
+    ctx.setLineDash([2, 3]);
+    ctx.strokeStyle = "#f0f2f6";
+    ctx.lineWidth = 0.5;
+    for (let i = 0; i < ticks; i++) {
+      const y = padT + (plotH * (i + 0.5)) / ticks;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + plotW, y);
+      ctx.stroke();
+    }
+    ctx.restore();
 
     // right y-axis (hit rate %)
     ctx.textAlign = "left";
@@ -273,17 +318,48 @@
     const bw = Math.min(22, slot * 0.6);
     const xCenter = (vi) => padL + slot * (vi - si) + slot / 2;
 
-    // bars
-    for (let vi = si; vi < ei; vi++) {
-      const cx = xCenter(vi);
-      let base = padT + plotH;
+    const smooth = mode === "curve";
+    if (mode === "line" || mode === "curve") {
+      // 折线 / 平滑曲线模式：各 series 独立线 + 命中率线
       for (const ser of series) {
-        const v = ser.data[vi] || 0;
-        if (v <= 0) continue;
-        const bh = plotH * (v / maxTok);
-        ctx.fillStyle = ser.color;
-        ctx.fillRect(cx - bw / 2, base - bh, bw, bh);
-        base -= bh;
+        const pts = [];
+        for (let vi = si; vi < ei; vi++) {
+          const v = ser.data[vi] || 0;
+          if (v > 0) pts.push({ x: xCenter(vi), y: padT + plotH * (1 - Math.min(v, maxTok) / maxTok) });
+        }
+        if (pts.length < 2) continue;
+        // 面积填充
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, padT + plotH);
+        tracePath(ctx, pts, smooth);
+        ctx.lineTo(pts[pts.length - 1].x, padT + plotH);
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(0, padT, 0, padT + plotH);
+        grad.addColorStop(0, hexA(ser.color, 0.18));
+        grad.addColorStop(1, hexA(ser.color, 0.02));
+        ctx.fillStyle = grad;
+        ctx.fill();
+        // 线
+        ctx.beginPath();
+        tracePath(ctx, pts, smooth);
+        ctx.strokeStyle = ser.color;
+        ctx.lineWidth = 2;
+        ctx.lineJoin = "round";
+        ctx.stroke();
+      }
+    } else {
+      // bars
+      for (let vi = si; vi < ei; vi++) {
+        const cx = xCenter(vi);
+        let base = padT + plotH;
+        for (const ser of series) {
+          const v = ser.data[vi] || 0;
+          if (v <= 0) continue;
+          const bh = plotH * (v / maxTok);
+          ctx.fillStyle = ser.color;
+          ctx.fillRect(cx - bw / 2, base - bh, bw, bh);
+          base -= bh;
+        }
       }
     }
 
@@ -296,8 +372,7 @@
     }
     if (pts.length > 1) {
       ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      tracePath(ctx, pts, smooth);
       ctx.strokeStyle = "rgba(31,171,107,0.45)";
       ctx.lineWidth = 2;
       ctx.lineJoin = "round";
