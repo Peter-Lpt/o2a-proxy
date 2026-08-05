@@ -1,5 +1,6 @@
 #!/bin/bash
-# Anthropic -> OpenAI 协议转换代理启动脚本
+# o2a-proxy 多服务代理启动脚本
+# 每个 service 一个端口，mode 为 claude(Anthropic 转换) 或 codex(OpenAI 透传)
 
 set -euo pipefail
 
@@ -7,7 +8,7 @@ PROXY_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="${PROXY_DIR}/config.json"
 
 echo "============================================"
-echo "  Anthropic -> OpenAI 协议转换代理"
+echo "  o2a-proxy 多服务代理"
 echo "============================================"
 echo ""
 
@@ -17,25 +18,38 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-# 从 config.json 读取配置
-eval "$(python3 "$PROXY_DIR/load_config.py" "$CONFIG_FILE")"
+# 列出启用服务并校验 API key
+echo "启用服务:"
+python3 - "$CONFIG_FILE" <<'PYEOF'
+import json, sys
+config = json.load(open(sys.argv[1]))
+for svc in config.get("services", []):
+    mode = svc.get("mode", "claude")
+    if mode not in ("claude", "codex"):
+        continue
+    port = svc.get("listen_address", "8317")
+    if not svc.get("openai_api_key"):
+        raise SystemExit(f"错误: 服务 {svc.get('comment','?')} 缺少 openai_api_key")
+    print(f"  [{mode}] {svc.get('comment','?')} -> http://127.0.0.1:{port}")
+    print(f"         target={svc.get('openai_base_url')}  model={svc.get('model')}")
+PYEOF
+echo ""
 
-PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
-CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-.claude/settings.json}"
-
-# 检查 API Key
-if [ -z "${DASHSCOPE_API_KEY:-}" ]; then
-    echo "错误: DASHSCOPE_API_KEY 未配置"
-    exit 1
-fi
-
-# 检查端口占用
-if lsof -Pi :${PROXY_PORT} -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "警告: 端口 ${PROXY_PORT} 已被占用"
-    echo "正在停止旧进程..."
-    pids=$(lsof -ti :${PROXY_PORT} 2>/dev/null) && [ -n "$pids" ] && echo "$pids" | xargs kill -9 2>/dev/null
-    sleep 1
-fi
+# 检查端口占用并清理旧进程
+for port in $(python3 - "$CONFIG_FILE" <<'PYEOF'
+import json, sys
+config = json.load(open(sys.argv[1]))
+for svc in config.get("services", []):
+    if svc.get("mode", "claude") in ("claude", "codex"):
+        print(svc.get("listen_address", "8317"))
+PYEOF
+); do
+    if lsof -Pi :${port} -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "警告: 端口 ${port} 已被占用，正在停止旧进程..."
+        pids=$(lsof -ti :${port} 2>/dev/null) && [ -n "$pids" ] && echo "$pids" | xargs kill -9 2>/dev/null
+        sleep 1
+    fi
+done
 
 # ============================================
 # 自动更新 .claude/settings.json 代理配置
@@ -126,17 +140,26 @@ except Exception as e:
 PYEOF
 }
 
-echo "📝 更新 Claude 代理配置..."
-update_claude_settings "$CLAUDE_SETTINGS" "$PROXY_URL"
-echo ""
+# 取第一个 claude 模式服务，更新 Claude 客户端配置
+CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-.claude/settings.json}"
+CLAUDE_URL=$(python3 - "$CONFIG_FILE" <<'PYEOF'
+import json, sys
+config = json.load(open(sys.argv[1]))
+for svc in config.get("services", []):
+    if svc.get("mode", "claude") == "claude":
+        print(f"http://127.0.0.1:{svc.get('listen_address','8317')}")
+        break
+PYEOF
+)
+
+if [ -n "$CLAUDE_URL" ]; then
+    echo "📝 更新 Claude 代理配置..."
+    update_claude_settings "$CLAUDE_SETTINGS" "$CLAUDE_URL"
+    echo ""
+fi
 
 # 启动代理
-echo "启动代理: ${PROXY_URL}"
-echo "目标: ${DASHSCOPE_URL}"
-echo "主 agent 模型: ${PROXY_MODEL}"
-echo "子 agent 模型: ${SUB_PROXY_MODEL:-${PROXY_MODEL}}"
+echo "启动代理..."
 echo "按 Ctrl+C 停止代理"
 echo ""
-
-export PROXY_HOST PROXY_PORT DASHSCOPE_URL DASHSCOPE_API_KEY PROXY_MODEL SUB_PROXY_MODEL
 exec python3 "$PROXY_DIR/proxy.py"

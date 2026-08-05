@@ -14,6 +14,7 @@ import sys
 import time
 import ssl
 import threading
+import uuid
 from datetime import datetime, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -52,27 +53,105 @@ logging.basicConfig(
 logger = logging.getLogger("proxy")
 
 
+class Service:
+    """单个服务的配置。mode: claude(Anthropic 转换) 或 codex(OpenAI 透传)。"""
+
+    def __init__(self, name, mode, host, port, target_url, api_key,
+                 model, sub_model, max_tokens, proxy):
+        self.name = name
+        self.mode = mode
+        self.host = host
+        self.port = port
+        self.target_url = target_url
+        self.api_key = api_key
+        self.model = model
+        self.sub_model = sub_model
+        self.max_tokens = max_tokens
+        self.proxy = proxy or ""
+
+
+def load_config():
+    """从 config.json 读取服务列表；文件不存在时回退到环境变量（单服务）。"""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    services = []
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            config = {}
+        if config:
+            # 全局缓存统计设置（供 get_stats / is_cache_stats_enabled 读取）
+            os.environ.setdefault("CACHE_STATS_ENABLED",
+                                  str(config.get("cache_stats_enabled", True)).lower())
+            os.environ.setdefault("CACHE_STATS_DIR",
+                                  config.get("cache_stats_dir", "cache_stats"))
+            os.environ.setdefault("CACHE_STATS_RETENTION_DAYS",
+                                  str(config.get("cache_stats_retention_days", 30)))
+            for svc in config.get("services", []):
+                mode = svc.get("mode", "claude")
+                if mode not in ("claude", "codex"):
+                    continue  # 未知模式跳过
+                services.append(Service(
+                    name=svc.get("comment") or svc.get("model") or mode,
+                    mode=mode,
+                    host=svc.get("listen_host", "127.0.0.1"),
+                    port=int(svc.get("listen_address", "8317")),
+                    target_url=svc.get("openai_base_url", ""),
+                    api_key=svc.get("openai_api_key", ""),
+                    model=svc.get("model", "qwen-plus"),
+                    sub_model=svc.get("sub_model", svc.get("model", "qwen-plus")),
+                    max_tokens=int(svc.get("max_tokens", 1000000 if svc.get("context_1m") else 4096)),
+                    proxy=os.environ.get("HTTP_PROXY", ""),
+                ))
+    if not services and API_KEY:
+        # 回退：环境变量配置（单服务）
+        services.append(Service(
+            name="default", mode="claude", host=LISTEN_HOST, port=LISTEN_PORT,
+            target_url=TARGET_URL, api_key=API_KEY, model=PROXY_MODEL,
+            sub_model=SUB_PROXY_MODEL, max_tokens=PROXY_MAX_TOKENS,
+            proxy=PROXY,
+        ))
+    return services
+
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
 class CacheStats:
-    """缓存命中统计：记录、聚合、查询。"""
+    """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。"""
 
-    def __init__(self, stats_dir="cache_stats", retention_days=30):
+    def __init__(self, stats_dir="cache_stats", retention_days=30, service=None):
         self.stats_dir = stats_dir
         self.retention_days = retention_days
+        self.service = service or ""
         self._lock = threading.Lock()
         self._last_hour = None
-        os.makedirs(os.path.join(stats_dir, "summary"), exist_ok=True)
+        self._pricing = None
+        os.makedirs(self._summary_root(), exist_ok=True)
         self._cleanup_old_files()
 
+    def _summary_root(self):
+        """summary 根目录；按服务分目录时返回其子目录。"""
+        root = os.path.join(self.stats_dir, "summary")
+        if self.service:
+            return os.path.join(root, self.service)
+        return root
+
     def _cleanup_old_files(self):
-        """启动时清理超过保留天数的文件。"""
+        """启动时清理超过保留天数的文件（含按服务分目录的 summary）。"""
         cutoff = datetime.now() - timedelta(days=self.retention_days)
         cutoff_ts = cutoff.timestamp()
-        for subdir in ["", "summary"]:
-            dirpath = os.path.join(self.stats_dir, subdir) if subdir else self.stats_dir
+        # jsonl 与 summary 根目录（含服务子目录）
+        dirs = [self.stats_dir, os.path.join(self.stats_dir, "summary")]
+        summary_children = os.path.join(self.stats_dir, "summary")
+        if os.path.isdir(summary_children):
+            for entry in os.listdir(summary_children):
+                p = os.path.join(summary_children, entry)
+                if os.path.isdir(p):
+                    dirs.append(p)
+        for dirpath in dirs:
             if not os.path.isdir(dirpath):
                 continue
             for filename in os.listdir(dirpath):
@@ -85,6 +164,52 @@ class CacheStats:
                         logger.info(f"[CACHE] Cleaned up old file: {filename}")
                 except OSError:
                     pass
+
+    def _load_pricing(self):
+        """加载定价数据（缓存）。"""
+        if self._pricing is not None:
+            return self._pricing
+        pricing_path = os.path.join(os.path.dirname(self.stats_dir), "pricing.json")
+        try:
+            with open(pricing_path, "r") as f:
+                self._pricing = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            self._pricing = {}
+        return self._pricing
+
+    def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens):
+        """计算单次请求的费用（CNY）。"""
+        pricing = self._load_pricing()
+        if not pricing:
+            return 0.0
+        # 查找模型定价
+        price = None
+        for provider in pricing:
+            if provider.startswith("_"):
+                continue
+            models = pricing[provider].get("models", {})
+            if model in models:
+                price = models[model]
+                break
+        if not price:
+            return 0.0
+        # 使用第一档价格（单次请求无法判断 tier）
+        tier = price["tiers"][0] if price.get("tiers") else None
+        if not tier:
+            return 0.0
+        input_cost = input_tokens * tier.get("input", 0) / 1_000_000
+        output_cost = output_tokens * tier.get("output", 0) / 1_000_000
+        # 缓存读：优先用 cache_hit 价格，否则按 input * 0.2
+        if "cache_hit" in tier:
+            cache_read_cost = cache_read * tier["cache_hit"] / 1_000_000
+        else:
+            cache_read_cost = cache_read * tier.get("input", 0) * 0.2 / 1_000_000
+        # 缓存写：优先用 cache_miss 价格，否则按 input * 1.0
+        if "cache_miss" in tier:
+            cache_write_cost = cache_write * tier["cache_miss"] / 1_000_000
+        else:
+            cache_write_cost = cache_write * tier.get("input", 0) / 1_000_000
+        return input_cost + output_cost + cache_read_cost + cache_write_cost
 
     def _get_today_file(self):
         """返回当天的 JSONL 文件路径（本地时间）。"""
@@ -110,8 +235,10 @@ class CacheStats:
         cache_hit_rate, cache_coverage = self._compute_rates(
             input_tokens, cache_read, cache_write
         )
+        cost = self._calc_cost(model, input_tokens, cache_read, cache_write, output_tokens)
         return {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "service": self.service,
             "model": model,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read,
@@ -119,6 +246,7 @@ class CacheStats:
             "output_tokens": output_tokens,
             "cache_hit_rate": round(cache_hit_rate, 4),
             "cache_coverage": round(cache_coverage, 4),
+            "cost": round(cost, 6),
         }
 
     def _format_log(self, record):
@@ -165,20 +293,23 @@ class CacheStats:
         logger.info(self._format_log(record))
 
     def _update_hourly_summary(self, record):
-        """更新当天的小时聚合 JSON。"""
+        """更新当天的小时聚合 JSON（按服务分目录，跨进程加锁）。"""
         date_str = record["timestamp"][:10]
         hour_str = record["timestamp"][11:13]
-        summary_path = os.path.join(
-            self.stats_dir, "summary", f"{date_str}.json"
-        )
+        summary_path = os.path.join(self._summary_root(), f"{date_str}.json")
 
         summary = {}
-        if os.path.exists(summary_path):
-            try:
-                with open(summary_path, "r") as f:
-                    summary = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                summary = {}
+        try:
+            with open(summary_path, "r") as f:
+                if HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                raw = f.read()
+                if HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            if raw.strip():
+                summary = json.loads(raw)
+        except (json.JSONDecodeError, OSError):
+            summary = {}
 
         if "hours" not in summary:
             summary["date"] = date_str
@@ -190,6 +321,7 @@ class CacheStats:
             "total_cache_read_tokens": 0,
             "total_cache_write_tokens": 0,
             "total_output_tokens": 0,
+            "total_cost": 0.0,
             "_hit_rate_sum": 0.0,
             "_coverage_sum": 0.0,
         })
@@ -198,12 +330,17 @@ class CacheStats:
         h["total_cache_read_tokens"] += record["cache_read_tokens"]
         h["total_cache_write_tokens"] += record["cache_write_tokens"]
         h["total_output_tokens"] += record["output_tokens"]
+        h["total_cost"] = h.get("total_cost", 0.0) + record.get("cost", 0.0)
         h["_hit_rate_sum"] += record["cache_hit_rate"]
         h["_coverage_sum"] += record["cache_coverage"]
 
         try:
             with open(summary_path, "w") as f:
+                if HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 json.dump(summary, f, ensure_ascii=False)
+                if HAS_FCNTL:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except OSError as e:
             logger.warning(f"[CACHE] Failed to write summary: {e}")
 
@@ -211,9 +348,7 @@ class CacheStats:
         """打印上一小时的汇总日志。"""
         date_str = hour_str[:10]
         hour = hour_str[11:13] if len(hour_str) >= 13 else hour_str[-2:]
-        summary_path = os.path.join(
-            self.stats_dir, "summary", f"{date_str}.json"
-        )
+        summary_path = os.path.join(self._summary_root(), f"{date_str}.json")
         if not os.path.exists(summary_path):
             return
         try:
@@ -247,9 +382,7 @@ class CacheStats:
 
     def _load_day_summary(self, date_str):
         """加载某天的 summary JSON，清理内部字段。"""
-        summary_path = os.path.join(
-            self.stats_dir, "summary", f"{date_str}.json"
-        )
+        summary_path = os.path.join(self._summary_root(), f"{date_str}.json")
         if not os.path.exists(summary_path):
             return None
         try:
@@ -266,9 +399,11 @@ class CacheStats:
             "total_cache_read_tokens": 0,
             "total_cache_write_tokens": 0,
             "total_output_tokens": 0,
+            "total_cost": 0.0,
         }
         for hour, h in sorted(summary.get("hours", {}).items()):
             req = h["requests"]
+            hour_cost = h.get("total_cost", 0.0)
             hours_list.append({
                 "hour": f"{date_str}T{hour}:00:00",
                 "requests": req,
@@ -278,12 +413,14 @@ class CacheStats:
                 "total_cache_write_tokens": h["total_cache_write_tokens"],
                 "total_input_tokens": h["total_input_tokens"],
                 "total_output_tokens": h["total_output_tokens"],
+                "total_cost": round(hour_cost, 6),
             })
             daily["requests"] += req
             daily["total_input_tokens"] += h["total_input_tokens"]
             daily["total_cache_read_tokens"] += h["total_cache_read_tokens"]
             daily["total_cache_write_tokens"] += h["total_cache_write_tokens"]
             daily["total_output_tokens"] += h["total_output_tokens"]
+            daily["total_cost"] += hour_cost
 
         denom_hit = daily["total_cache_read_tokens"] + daily["total_input_tokens"]
         denom_cov = denom_hit + daily["total_cache_write_tokens"]
@@ -318,7 +455,7 @@ class CacheStats:
 
     def _get_all_summary(self):
         """返回所有天的汇总。"""
-        summary_dir = os.path.join(self.stats_dir, "summary")
+        summary_dir = self._summary_root()
         days = []
         total = {
             "requests": 0,
@@ -326,6 +463,7 @@ class CacheStats:
             "total_cache_read_tokens": 0,
             "total_cache_write_tokens": 0,
             "total_output_tokens": 0,
+            "total_cost": 0.0,
         }
         for filename in sorted(os.listdir(summary_dir)):
             if not filename.endswith(".json"):
@@ -340,6 +478,7 @@ class CacheStats:
                 total["total_cache_read_tokens"] += dt["total_cache_read_tokens"]
                 total["total_cache_write_tokens"] += dt["total_cache_write_tokens"]
                 total["total_output_tokens"] += dt["total_output_tokens"]
+                total["total_cost"] += dt.get("total_cost", 0.0)
 
         denom_hit = total["total_cache_read_tokens"] + total["total_input_tokens"]
         denom_cov = denom_hit + total["total_cache_write_tokens"]
@@ -353,21 +492,22 @@ class CacheStats:
         return {"period": "all", "days": days, "total": total}
 
 
-# 全局缓存统计实例
-_stats = None
+# 全局缓存统计实例（按服务区分）
+_stats = {}
 _stats_lock = threading.Lock()
 
 
-def get_stats():
-    """获取全局 CacheStats 实例（线程安全的懒初始化）。"""
-    global _stats
-    if _stats is None:
+def get_stats(service=None):
+    """获取 CacheStats 实例（线程安全的懒初始化，按服务区分）。"""
+    key = service or "default"
+    if key not in _stats:
         with _stats_lock:
-            if _stats is None:  # 双重检查
+            if key not in _stats:  # 双重检查
                 stats_dir = os.environ.get("CACHE_STATS_DIR", "cache_stats")
                 retention = int(os.environ.get("CACHE_STATS_RETENTION_DAYS", "30"))
-                _stats = CacheStats(stats_dir=stats_dir, retention_days=retention)
-    return _stats
+                _stats[key] = CacheStats(stats_dir=stats_dir, retention_days=retention,
+                                         service=service)
+    return _stats[key]
 
 
 def is_cache_stats_enabled():
@@ -515,7 +655,357 @@ def _strip_cache_control(obj):
     return obj
 
 
-def convert_request(req):
+def _responses_content_to_text(content):
+    """将 Responses API 消息 content parts 提取为纯文本。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                t = p.get("type")
+                if "text" in p and isinstance(p.get("text"), str):
+                    parts.append(p.get("text"))
+                elif t in ("input_text", "output_text"):
+                    parts.append(p.get("text", ""))
+        return "\n".join(parts)
+    return ""
+
+
+def _responses_to_chat(req, service):
+    """将 OpenAI Responses API 请求转成 Chat Completions 请求。"""
+    messages = []
+    pending_calls = []  # 连续 function_call 项合并为一条 assistant 消息
+
+    def flush_calls():
+        if pending_calls:
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": list(pending_calls),
+            })
+            del pending_calls[:]
+
+    for item in req.get("input", []):
+        if not isinstance(item, dict):
+            continue
+        itype = item.get("type")
+        if itype == "function_call":
+            pending_calls.append({
+                "id": item.get("call_id") or item.get("id") or "",
+                "type": "function",
+                "function": {
+                    "name": item.get("name", ""),
+                    "arguments": item.get("arguments", ""),
+                },
+            })
+        elif itype == "function_call_output":
+            flush_calls()
+            messages.append({
+                "role": "tool",
+                "tool_call_id": item.get("call_id") or item.get("id") or "",
+                "content": item.get("output", ""),
+            })
+        elif "role" in item:
+            flush_calls()
+            role = item.get("role")
+            if role == "developer":
+                role = "system"
+            messages.append({"role": role, "content": _responses_content_to_text(item.get("content", ""))})
+    flush_calls()
+
+    instructions = req.get("instructions", "")
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+
+    chat = {
+        "model": service.model,
+        "messages": messages,
+        "stream": req.get("stream", False),
+    }
+    if "max_output_tokens" in req:
+        chat["max_tokens"] = req["max_output_tokens"]
+    elif "max_tokens" in req:
+        chat["max_tokens"] = req["max_tokens"]
+    else:
+        chat["max_tokens"] = service.max_tokens
+    for k in ("temperature", "top_p", "stream_options", "seed", "parallel_tool_calls"):
+        if k in req:
+            chat[k] = req[k]
+    if req.get("stream") and "stream_options" not in chat:
+        chat["stream_options"] = {"include_usage": True}
+
+    tools = req.get("tools", [])
+    if tools:
+        chat_tools = []
+        for t in tools:
+            if isinstance(t, dict) and t.get("type") == "function":
+                chat_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("parameters", {"type": "object"}) or {"type": "object"},
+                        "strict": t.get("strict", False),
+                    },
+                })
+        if chat_tools:
+            chat["tools"] = chat_tools
+
+    tool_choice = req.get("tool_choice")
+    if tool_choice:
+        if isinstance(tool_choice, str):
+            chat["tool_choice"] = tool_choice
+        elif isinstance(tool_choice, dict):
+            chat["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tool_choice.get("name", "")},
+            }
+    return chat
+
+
+def _chat_usage_to_responses(usage):
+    """将 Chat Completions usage 转成 Responses API usage 格式。"""
+    usage = usage or {}
+    prompt = _to_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
+    completion = _to_int(usage.get("completion_tokens", usage.get("output_tokens", 0)))
+    cached = _to_int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+    reasoning = _to_int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0))
+    return {
+        "input_tokens": prompt,
+        "input_tokens_details": {"cached_tokens": cached},
+        "output_tokens": completion,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+        "total_tokens": prompt + completion,
+    }
+
+
+def _chat_to_responses_json(data, model):
+    """将 Chat Completions 非流式响应转成 Responses API 响应。"""
+    resp_id = "resp_" + uuid.uuid4().hex[:24]
+    created = int(time.time())
+    output = []
+    choice = (data.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    # 文本输出
+    text = message.get("content") or ""
+    if text:
+        output.append({
+            "id": f"msg_{len(output)}",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        })
+    # 函数调用
+    for tc in message.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        output.append({
+            "id": f"fc_{len(output)}",
+            "type": "function_call",
+            "status": "completed",
+            "name": fn.get("name", ""),
+            "call_id": tc.get("id", ""),
+            "arguments": fn.get("arguments", ""),
+        })
+    return {
+        "id": resp_id,
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "model": model or data.get("model", ""),
+        "output": output,
+        "parallel_tool_calls": True,
+        "tools": [],
+        "usage": _chat_usage_to_responses(data.get("usage")),
+    }
+
+
+class _ResponsesStreamTranslator:
+    """将 Chat Completions 流式 SSE 翻译为 Responses API 流式 SSE。"""
+
+    def __init__(self, model):
+        self.model = model
+        self.response_id = "resp_" + uuid.uuid4().hex[:24]
+        self.created_at = int(time.time())
+        self.output_index = 0
+        self._emitted_created = False
+        self._msg_item_id = None
+        self._msg_output_index = 0
+        self._msg_delivered = False
+        self._text = ""
+        self._tool_states = {}  # index -> state
+        self._tool_order = []
+        self._delivered_tool = set()
+        self.usage = None
+
+    def _base_response(self):
+        return {
+            "id": self.response_id,
+            "object": "response",
+            "created_at": self.created_at,
+            "status": "in_progress",
+            "model": self.model,
+            "output": [],
+            "parallel_tool_calls": True,
+            "tools": [],
+            "usage": self.usage,
+        }
+
+    def _ensure_created(self, events):
+        if not self._emitted_created:
+            self._emitted_created = True
+            events.append({"type": "response.created", "response": self._base_response()})
+
+    def _deliver_message(self, events):
+        if self._msg_delivered:
+            return
+        self._msg_delivered = True
+        self._msg_item_id = f"msg_{self.output_index}"
+        self._msg_output_index = self.output_index
+        self.output_index += 1
+        item = {
+            "id": self._msg_item_id,
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [],
+        }
+        events.append({"type": "response.output_item.added",
+                       "output_index": self._msg_output_index, "item": item})
+        events.append({"type": "response.content_part.added",
+                       "item_id": self._msg_item_id,
+                       "output_index": self._msg_output_index,
+                       "content_index": 0,
+                       "part": {"type": "output_text", "text": "", "annotations": []}})
+
+    def _deliver_tool(self, idx, events):
+        if idx in self._delivered_tool:
+            return
+        self._delivered_tool.add(idx)
+        state = self._tool_states[idx]
+        state["output_index"] = self.output_index
+        state["item_id"] = f"fc_{self.output_index}"
+        self.output_index += 1
+        item = {
+            "id": state["item_id"],
+            "type": "function_call",
+            "status": "in_progress",
+            "name": state["name"],
+            "call_id": state["id"],
+            "arguments": "",
+        }
+        events.append({"type": "response.output_item.added",
+                       "output_index": state["output_index"], "item": item})
+
+    def translate(self, data):
+        """处理一个 chat chunk，返回 Responses 事件 dict 列表。"""
+        events = []
+        choices = data.get("choices") or []
+        if data.get("usage"):
+            self.usage = _chat_usage_to_responses(data.get("usage"))
+        if not choices:
+            return events
+        delta = choices[0].get("delta") or {}
+
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self._ensure_created(events)
+            self._deliver_message(events)
+            self._text += content
+            events.append({
+                "type": "response.output_text.delta",
+                "item_id": self._msg_item_id,
+                "output_index": self._msg_output_index,
+                "content_index": 0,
+                "delta": content,
+            })
+
+        for tc in delta.get("tool_calls") or []:
+            idx = tc.get("index", 0)
+            fn = tc.get("function") or {}
+            state = self._tool_states.get(idx)
+            if state is None:
+                state = {"id": tc.get("id", ""), "name": fn.get("name", ""), "arguments": ""}
+                self._tool_states[idx] = state
+                self._tool_order.append(idx)
+            else:
+                if fn.get("name"):
+                    state["name"] = fn["name"]
+                if tc.get("id"):
+                    state["id"] = tc["id"]
+            if fn.get("arguments"):
+                self._ensure_created(events)
+                self._deliver_tool(idx, events)
+                state["arguments"] += fn["arguments"]
+                events.append({
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": state["item_id"],
+                    "output_index": state["output_index"],
+                    "delta": fn["arguments"],
+                })
+
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason:
+            self._finish(events)
+        return events
+
+    def _finish(self, events):
+        if not self._emitted_created:
+            self._ensure_created(events)
+        # 关闭文本消息
+        if self._msg_delivered:
+            events.append({"type": "response.output_text.done",
+                           "item_id": self._msg_item_id,
+                           "output_index": self._msg_output_index,
+                           "content_index": 0, "text": self._text})
+            events.append({"type": "response.content_part.done",
+                           "item_id": self._msg_item_id,
+                           "output_index": self._msg_output_index,
+                           "content_index": 0,
+                           "part": {"type": "output_text", "text": self._text, "annotations": []}})
+            events.append({"type": "response.output_item.done",
+                           "output_index": self._msg_output_index, "item": {
+                               "id": self._msg_item_id, "type": "message",
+                               "role": "assistant", "status": "completed",
+                               "content": [{"type": "output_text", "text": self._text, "annotations": []}]}})
+        # 关闭工具调用
+        for idx in self._tool_order:
+            state = self._tool_states[idx]
+            if idx not in self._delivered_tool:
+                self._deliver_tool(idx, events)
+            events.append({"type": "response.function_call_arguments.done",
+                           "item_id": state["item_id"],
+                           "output_index": state["output_index"],
+                           "arguments": state["arguments"]})
+            events.append({"type": "response.output_item.done",
+                           "output_index": state["output_index"], "item": {
+                               "id": state["item_id"], "type": "function_call",
+                               "status": "completed", "name": state["name"],
+                               "call_id": state["id"], "arguments": state["arguments"]}})
+        events.append({"type": "response.completed", "response": self.assemble()})
+
+    def assemble(self):
+        output = []
+        if self._msg_delivered:
+            output.append({"id": self._msg_item_id, "type": "message", "role": "assistant",
+                           "status": "completed",
+                           "content": [{"type": "output_text", "text": self._text, "annotations": []}]})
+        for idx in self._tool_order:
+            state = self._tool_states[idx]
+            output.append({"id": state["item_id"], "type": "function_call",
+                           "status": "completed", "name": state["name"],
+                           "call_id": state["id"], "arguments": state["arguments"]})
+        resp = self._base_response()
+        resp["status"] = "completed"
+        resp["output"] = output
+        resp["usage"] = self.usage
+        return resp
+
+
+def convert_request(req, service):
     """将 Anthropic Messages 格式转为 OpenAI chat completions 格式。"""
     raw_messages = list(req.get("messages", []))
 
@@ -601,13 +1091,13 @@ def convert_request(req):
     # Claude Code 子 agent (Task 工具) 使用 haiku 模型名
     client_model = req.get("model", "")
     is_subagent = "haiku" in client_model.lower()
-    model = SUB_PROXY_MODEL if is_subagent else PROXY_MODEL
+    model = service.sub_model if is_subagent else service.model
     if is_subagent:
         logger.debug(f"[SUBAGENT] Detected sub-agent request: {client_model} -> {model}")
     openai_req = {
         "model": model,
         "messages": messages,
-        "max_tokens": req.get("max_tokens", PROXY_MAX_TOKENS),
+        "max_tokens": req.get("max_tokens", service.max_tokens),
         "stream": is_stream,
     }
     if is_stream:
@@ -666,7 +1156,7 @@ def convert_request(req):
 # 不再使用 raw socket，统一用 urllib
 
 
-class AnthropicProxyHandler(BaseHTTPRequestHandler):
+class _ProxyHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format, *args):
@@ -678,6 +1168,12 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
+        if getattr(self, "service", None) and self.service.mode == "codex":
+            self._handle_openai_post()
+        else:
+            self._handle_claude_post()
+
+    def _handle_claude_post(self):
         req_start = time.time()
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
@@ -696,7 +1192,7 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
                     f"tools={len(anthropic_request.get('tools', []))} "
                     f"has_thinking={'thinking' in anthropic_request} "
                     f"elapsed={time.time()-req_start:.3f}s")
-        openai_request = convert_request(anthropic_request)
+        openai_request = convert_request(anthropic_request, self.service)
         # 移除 cache_control（DashScope 不支持）
         openai_request = _strip_cache_control(openai_request)
         logger.debug(f"Converted: {json.dumps(openai_request)[:500]}")
@@ -707,19 +1203,163 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
         else:
             self._handle_non_stream(openai_request)
 
+    def _handle_openai_post(self):
+        """OpenAI Responses (codex) 请求：Responses -> Chat 转换后转发，响应再转回 Responses。"""
+        req_start = time.time()
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+        try:
+            req = json.loads(body)
+        except json.JSONDecodeError:
+            self._send_openai_error(400, "invalid json")
+            return
+        stream = req.get("stream", False)
+        logger.info(f"[REQ][codex] model={req.get('model')} stream={stream} "
+                    f"bytes={content_length} elapsed={time.time()-req_start:.3f}s")
+        chat = _responses_to_chat(req, self.service)
+        chat_body = json.dumps(chat).encode("utf-8")
+        if stream:
+            self._handle_openai_stream(req, chat_body)
+        else:
+            self._handle_openai_non_stream(req, chat_body)
+
+    def _forward_openai(self, body):
+        target = self.service.target_url
+        if self.path and "?" in self.path:
+            target += "?" + self.path.split("?", 1)[1]
+        req = Request(target, method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Authorization", f"Bearer {self.service.api_key}")
+        if self.service.proxy:
+            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
+            req.set_proxy(proxy_host, "https")
+        return urlopen(req, body, timeout=120)
+
+    def _handle_openai_non_stream(self, req, body):
+        try:
+            response = self._forward_openai(body)
+            status = response.getcode()
+        except Exception as e:
+            if hasattr(e, "read"):
+                try:
+                    err = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err = str(e)
+            else:
+                err = str(e)
+            logger.error(f"[codex] upstream failed: {err[:500]}")
+            self._send_openai_error(502, f"upstream error: {err[:300]}")
+            return
+        if status != 200:
+            err = response.read().decode("utf-8", errors="replace")
+            self._send_raw(status, err.encode("utf-8"))
+            return
+        raw = response.read()
+        try:
+            data = json.loads(raw)
+            # 记录缓存（复用 OpenAI usage 解析）
+            converted = _convert_usage(data.get("usage") or {})
+            if converted.get("input_tokens") and is_cache_stats_enabled():
+                model = data.get("model") or req.get("model") or self.service.model
+                get_stats(self.service.name).record(model, converted)
+            # 转回 Responses API 格式
+            out = _chat_to_responses_json(data, req.get("model") or self.service.model)
+            raw = json.dumps(out).encode("utf-8")
+        except Exception as e:
+            logger.warning(f"[codex] response convert failed: {e}")
+        logger.info(f"[codex][nonstream] completed bytes={len(raw)}")
+        self._send_raw(200, raw)
+
+    def _handle_openai_stream(self, req, body):
+        try:
+            response = self._forward_openai(body)
+            status = response.getcode()
+        except Exception as e:
+            if hasattr(e, "read"):
+                try:
+                    err = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err = str(e)
+            else:
+                err = str(e)
+            logger.error(f"[codex] upstream failed: {err[:500]}")
+            self._send_openai_error(502, f"upstream error: {err[:300]}")
+            return
+        if status != 200:
+            err = response.read().decode("utf-8", errors="replace")
+            self._send_raw(status, err.encode("utf-8"))
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        model = req.get("model") or self.service.model
+        latest_usage = None
+        translator = _ResponsesStreamTranslator(model)
+        try:
+            while True:
+                line = response.readline()
+                if not line:
+                    break
+                if line.startswith(b"data:"):
+                    data_str = line[5:].strip().decode("utf-8", errors="replace")
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                        usage = chunk.get("usage")
+                        if usage:
+                            latest_usage = _convert_usage(usage)
+                    except Exception:
+                        continue
+                    for ev in translator.translate(chunk):
+                        self._chunk_write(sse_event(ev).encode())
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            if latest_usage and latest_usage.get("input_tokens") and is_cache_stats_enabled():
+                get_stats(self.service.name).record(model, latest_usage)
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            response.close()
+
+    def _chunk_write(self, data: bytes):
+        if not data:
+            return
+        chunk_size = format(len(data), "x").encode()
+        self.wfile.write(chunk_size + b"\r\n" + data + b"\r\n")
+        self.wfile.flush()
+
+    def _send_raw(self, status_code, data):
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_openai_error(self, status_code, message):
+        self._send_raw(status_code, json.dumps({
+            "error": {"message": message, "type": "api_error"},
+        }).encode("utf-8"))
+
     def _handle_stream(self, openai_request):
         """处理流式请求，使用 urllib 的流式读取（自动处理 HTTP chunked encoding）。"""
         from urllib.request import Request, urlopen
 
-        target = TARGET_URL
+        target = self.service.target_url
         # 转发查询参数（如 ?beta=true）
         if self.path and "?" in self.path:
             target += "?" + self.path.split("?", 1)[1]
         req = Request(target, method="POST")
         req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {API_KEY}")
-        if PROXY:
-            proxy_host = PROXY.replace("http://", "").replace("https://", "")
+        req.add_header("Authorization", f"Bearer {self.service.api_key}")
+        if self.service.proxy:
+            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
             req.set_proxy(proxy_host, "https")
 
         body = json.dumps(openai_request).encode("utf-8")
@@ -761,10 +1401,10 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        logger.info(f"[STREAM] response headers sent to client model={PROXY_MODEL}")
+        logger.info(f"[STREAM] response headers sent to client model={self.service.model}")
 
         message_id = "proxy-msg-stream"
-        model = PROXY_MODEL
+        model = self.service.model
         started = False
         finished = False
         input_tokens = 0
@@ -896,7 +1536,7 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
                         finished = True
                         # 记录缓存统计
                         if is_cache_stats_enabled() and latest_usage and latest_usage.get("input_tokens"):
-                            get_stats().record(model, latest_usage)
+                            get_stats(self.service.name).record(model, latest_usage)
                     logger.info(f"[STREAM] completed finished={finished} chunks={n_chunks} "
                                 f"total_elapsed={time.time() - (getattr(self, '_req_start', None) or conn_start):.2f}s "
                                 f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes} "
@@ -943,7 +1583,7 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
                         finished = True
                         # 记录缓存统计
                         if is_cache_stats_enabled() and latest_usage and latest_usage.get("input_tokens"):
-                            get_stats().record(model, latest_usage)
+                            get_stats(self.service.name).record(model, latest_usage)
                     continue
 
                 choice = choices[0]
@@ -1148,15 +1788,15 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_non_stream(self, openai_request):
         """处理非流式请求。"""
-        target = TARGET_URL
+        target = self.service.target_url
         # 转发查询参数（如 ?beta=true）
         if self.path and "?" in self.path:
             target += "?" + self.path.split("?", 1)[1]
         req = Request(target, method="POST")
         req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {API_KEY}")
-        if PROXY:
-            proxy_host = PROXY.replace("http://", "").replace("https://", "")
+        req.add_header("Authorization", f"Bearer {self.service.api_key}")
+        if self.service.proxy:
+            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
             req.set_proxy(proxy_host, "https")
 
         body = json.dumps(openai_request).encode("utf-8")
@@ -1243,15 +1883,15 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
 
         # 记录缓存统计
         if is_cache_stats_enabled() and converted_usage and converted_usage.get("input_tokens"):
-            response_model = raw.get("model", PROXY_MODEL)
-            get_stats().record(response_model, converted_usage)
+            response_model = raw.get("model", self.service.model)
+            get_stats(self.service.name).record(response_model, converted_usage)
 
         self._send_json(200, {
             "id": raw.get("id", "proxy-msg"),
             "type": "message",
             "role": "assistant",
             "content": content_list if content_list else [],
-            "model": raw.get("model", PROXY_MODEL),
+            "model": raw.get("model", self.service.model),
             "stop_reason": stop_reason,
             "stop_sequence": None,
             "usage": {
@@ -1301,34 +1941,62 @@ class AnthropicProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"error": "cache stats is disabled"})
                 return
             period = self._get_query_param("period", "day")
-            summary = get_stats().get_summary(period)
+            summary = get_stats(self.service.name).get_summary(period)
             self._send_json(200, summary)
         elif path == "/health":
             self._send_json(200, {"status": "ok"})
         else:
             self._send_json(200, {
                 "status": "ok",
-                "target": TARGET_URL,
+                "mode": getattr(self, "service", None).mode if getattr(self, "service", None) else "",
+                "target": self.service.target_url,
                 "endpoints": ["/stats?period=hour|day|all", "/health"],
             })
 
 
+def make_handler(service):
+    """为每个服务生成一个绑定其配置的 handler 类。"""
+    class _Handler(_ProxyHandler):
+        pass
+    _Handler.service = service
+    return _Handler
+
+
 def main():
-    if not API_KEY:
-        logger.error("DASHSCOPE_API_KEY 环境变量未设置")
+    # 支持 --service <comment|port> 只启动指定的单个服务（供 mac UI 按服务独立启停）
+    service_filter = None
+    if "--service" in sys.argv:
+        i = sys.argv.index("--service")
+        if i + 1 < len(sys.argv):
+            service_filter = sys.argv[i + 1]
+
+    services = load_config()
+    enabled = [s for s in services if s.mode in ("claude", "codex") and s.api_key]
+    if service_filter:
+        enabled = [s for s in enabled
+                   if s.name == service_filter or str(s.port) == service_filter]
+    if not enabled:
+        logger.error("没有可用的服务（请检查 config.json 的 services 与 API key）")
         sys.exit(1)
 
-    server = ThreadedHTTPServer((LISTEN_HOST, LISTEN_PORT), AnthropicProxyHandler)
-    logger.info(f"代理启动: http://{LISTEN_HOST}:{LISTEN_PORT}")
-    logger.info(f"目标: {TARGET_URL}")
-    logger.info(f"主 agent 模型: {PROXY_MODEL}")
-    logger.info(f"子 agent 模型: {SUB_PROXY_MODEL}")
+    servers = []
+    for svc in enabled:
+        handler = make_handler(svc)
+        server = ThreadedHTTPServer((svc.host, svc.port), handler)
+        servers.append(server)
+        logger.info(f"代理启动: http://{svc.host}:{svc.port} mode={svc.mode} "
+                    f"target={svc.target_url} model={svc.model}")
+
+    for s in servers:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
 
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(3600)
     except KeyboardInterrupt:
         logger.info("收到中断信号，关闭代理")
-        server.shutdown()
+        for s in servers:
+            s.shutdown()
 
 
 if __name__ == "__main__":

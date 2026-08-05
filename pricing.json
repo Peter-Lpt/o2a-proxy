@@ -16,7 +16,12 @@
         "ttl": "不确定，系统定期清理"
       }
     },
-    "last_updated": "2026-07-30"
+    "last_updated": "2026-07-30",
+    "sources": {
+      "qianwen_pricing_api": "https://platform-home.qianwenai.com/data/api.json?product=AliyunDeliveryService&action=GetSeriesModel",
+      "qianwen_model_page": "https://www.qianwenai.com/models/{model-id}",
+      "qianwen_pricing_api_note": "需要 sec_token (CSRF) + session cookie，非公开接口；dataId 对应模型系列页"
+    }
   },
 
   "dashscope": {
@@ -237,6 +242,14 @@
         "cache": false,
         "batch": false,
         "free_quota": 1000000
+      },
+      "deepseek-v4-flash-0731": {
+        "category": "third-party",
+        "source": "https://www.qianwenai.com/models/deepseek-v4-flash-0731#overview",
+        "tiers": [
+          { "range": "unlimited", "input": 1, "output": 2, "cache_hit": 0.2 }
+        ],
+        "cache": true
       }
     }
   },
