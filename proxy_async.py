@@ -635,7 +635,7 @@ async def handle_openai_stream(request: web.Request, service: Service,
                                req: dict, chat_body: bytes, req_start: float):
     session = request.app["session"]
     target = build_target(service, request)
-    logger.info(f"[FWD][codex] forwarding stream model={req.get('model')} "
+    logger.info(f"[FWD][codex] forwarding stream model={service.model} "
                 f"url={target} payload_bytes={len(chat_body)}")
 
     resp = None
@@ -656,9 +656,9 @@ async def handle_openai_stream(request: web.Request, service: Service,
             })
             await resp.prepare(request)
 
-            model = req.get("model") or service.model
+            model = service.model
             latest_usage = None
-            translator = _ResponsesStreamTranslator(model)
+            translator = _ResponsesStreamTranslator(req.get("model") or service.model)
             try:
                 while True:
                     line = await up.content.readline()
@@ -702,7 +702,7 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
                                    req: dict, chat_body: bytes, req_start: float):
     session = request.app["session"]
     target = build_target(service, request)
-    logger.info(f"[FWD][codex] forwarding(non-stream) model={req.get('model')} "
+    logger.info(f"[FWD][codex] forwarding(non-stream) model={service.model} "
                 f"url={target} payload_bytes={len(chat_body)}")
 
     try:
@@ -724,7 +724,7 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         data = json.loads(raw)
         converted = _convert_usage(data.get("usage") or {})
         if converted.get("input_tokens") and is_cache_stats_enabled():
-            model = data.get("model") or req.get("model") or service.model
+            model = service.model
             await asyncio.to_thread(get_stats(service.name).record, model, converted)
         out = _chat_to_responses_json(data, req.get("model") or service.model)
         raw = json.dumps(out).encode("utf-8")
@@ -892,7 +892,7 @@ async def handle_request(request: web.Request):
 
     if service.mode == "codex":
         stream = bool(payload.get("stream", False))
-        logger.info(f"[REQ][codex] model={payload.get('model')} stream={stream} "
+        logger.info(f"[REQ][codex] model={service.model} stream={stream} "
                     f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
         chat = _responses_to_chat(payload, service)
         chat_body = json.dumps(chat).encode("utf-8")

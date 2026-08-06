@@ -6,7 +6,8 @@
       <span class="sub">{{ statusText }}</span>
       <button class="x" title="关闭悬浮看板" @click="api.toggleFloatFor(floatService)"><Icon name="x" :size="12" /></button>
     </div>
-    <div class="nums">
+
+    <div class="stats">
       <div class="num">
         <b>{{ fmtNum(min1.requests) }}</b><span>近5min 请求</span>
       </div>
@@ -17,14 +18,25 @@
         <b :class="hitCls">{{ now1min.length ? fmtPct(min1.hitRate) : "—" }}</b><span>近5min 命中</span>
       </div>
     </div>
-    <Spark :points="spark" :height="36" :color="sparkColor" />
-    <div class="feed" data-tauri-drag-region="false">
-      <div v-if="!liveFeed.length" class="empty">等待请求…</div>
-      <div v-for="(r, i) in liveFeed" :key="i" class="row" :class="{ flash: i === 0 }">
-        <span class="t">{{ r.time }}</span>
-        <span v-if="r.service" class="svc">{{ r.service }}</span>
-        <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
-        <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
+
+    <div class="spark-box">
+      <Spark :points="spark" :height="36" />
+      <div class="spark-meta">
+        <span class="sm">{{ sparkRange[0] }}</span>
+        <span class="sm-lbl">缓存命中 · {{ spark.length }} 次</span>
+        <span class="sm">{{ sparkRange[1] }}</span>
+      </div>
+    </div>
+
+    <div class="feed-wrap" data-tauri-drag-region="false">
+      <div class="feed">
+        <div v-if="!liveFeed.length" class="empty">等待请求…</div>
+        <div v-for="(r, i) in liveFeed" :key="r.key" class="row" :class="{ flash: i === 0 }">
+          <span class="t">{{ r.time }}</span>
+          <span v-if="r.service" class="svc">{{ r.service }}</span>
+          <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+          <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
+        </div>
       </div>
     </div>
   </div>
@@ -63,10 +75,6 @@ const runningMeta = computed(() => {
   const list = (status.value.services || []).filter((s: any) => s.running);
   return list.length ? list.map((s: any) => ":" + s.port).join(" ") : "运行中";
 });
-const sparkColor = computed(() => {
-  if (!anyRunning.value) return "#3a4250";
-  return theme.value === "light" ? "#0f9d6a" : "#34d399";
-});
 const statusText = computed(() =>
   anyRunning.value
     ? now1min.value.length
@@ -93,16 +101,23 @@ const min1 = computed(() => {
 
 const hitCls = computed(() => (min1.value.hitRate >= 0.3 ? "good" : min1.value.hitRate > 0 ? "mid" : ""));
 
-const spark = computed(() =>
-  (records.value || []).slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
-);
+// getLive 返回最新在前；取最近 40 条并反转为时间正序（旧→新，最新在右）
+const pending = computed(() => (records.value || []).slice(0, 40).reverse());
+const spark = computed(() => pending.value.map((r: any) => Number(r.cache_hit_rate || 0)));
+const sparkRange = computed(() => {
+  if (!pending.value.length) return ["", ""];
+  const first = String(pending.value[0].timestamp || "").slice(11, 16);
+  const last = String(pending.value[pending.value.length - 1].timestamp || "").slice(11, 16);
+  return [first, last];
+});
 
 const liveFeed = computed(() =>
   (records.value || [])
-    .slice(0, 30)
+    .slice(0, 24)
     .map((r: any) => {
       const rate = Number(r.cache_hit_rate || 0);
       return {
+        key: `${r.timestamp}_${r.service}_${r.output_tokens}`,
         time: String(r.timestamp || "").slice(11, 19),
         service: r.service || "",
         total:
@@ -146,25 +161,24 @@ onUnmounted(() => {
 <style scoped>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 .float {
-  margin: 6px;
-  border-radius: 13px;
-  background: var(--glass-bg);
-  backdrop-filter: blur(22px);
-  -webkit-backdrop-filter: blur(22px);
+  position: absolute;
+  inset: 6px; /* 铺满窗口（留 6px 边距），随窗口缩放自适应 */
+  border-radius: 14px; /* 与主面板 .popover 一致 */
+  /* 不用 backdrop-filter：透明置顶窗口上每帧采样/模糊桌面是拖动卡顿主因，
+     改用接近不透明的实色背景，保证拖动流畅 */
+  background: var(--float-bg, rgba(13, 18, 32, 0.97));
   border: 1px solid var(--glass-border);
-  box-shadow: none;
-  transition: border-color 0.3s;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
   overflow: hidden;
   font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
   font-size: 12px;
   user-select: none;
+  display: flex;
+  flex-direction: column;
 }
-.float.on {
-  border-color: rgba(52, 211, 153, 0.35);
-  box-shadow: none;
-}
-.head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; }
+.float.on { border-color: rgba(52, 211, 153, 0.4); }
+.head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; flex: none; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4250; flex: none; }
 .dot.on { background: var(--green); animation: blink 1.6s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: 0.3; } }
@@ -175,25 +189,35 @@ onUnmounted(() => {
   background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; line-height: 1;
 }
 .x:hover { background: var(--bg3); color: var(--text); }
-.nums { display: grid; grid-template-columns: repeat(3, 1fr); padding: 2px 10px 4px; gap: 4px; font-variant-numeric: tabular-nums; }
+.stats { display: grid; grid-template-columns: repeat(3, 1fr); padding: 2px 10px 4px; gap: 4px; font-variant-numeric: tabular-nums; flex: none; }
 .num b { display: block; font-size: 15px; font-weight: 700; font-family: var(--font-mono, ui-monospace, Consolas, monospace); }
 .num b.good { color: var(--green); }
 .num b.mid { color: var(--amber); }
 .num span { font-size: 10px; color: var(--muted); }
-.feed {
-  max-height: 62px; overflow-y: auto;
+.spark-box { flex: none; padding: 0 10px 2px; }
+.spark-meta { display: flex; justify-content: space-between; align-items: center; font-size: 9.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; margin-top: 1px; }
+.sm-lbl { color: var(--muted); }
+.feed-wrap {
+  flex: 1 1 auto; min-height: 46px;
+  overflow: hidden;
   border-top: 1px solid var(--hairline);
+  border-radius: 0 0 14px 14px;
+}
+.feed {
+  height: 100%; overflow-y: auto;
+  overflow-x: hidden;
   padding: 3px 10px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums;
 }
-.row { display: flex; gap: 6px; padding: 2px 0; white-space: nowrap; }
+.row { display: flex; gap: 6px; padding: 2px 0; white-space: nowrap; align-items: baseline; }
 .row.flash { animation: flash 1.2s ease-out; }
 @keyframes flash { 0% { background: rgba(45,127,249,.14); } 100% { background: transparent; } }
 .t { color: var(--muted); flex: none; }
-.k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .svc { color: var(--muted); flex: none; font-size: 10px; }
+.k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .h { flex: none; font-weight: 700; min-width: 36px; text-align: right; }
 .h.good { color: var(--green); }
 .h.mid { color: var(--amber); }
+.h.bad { color: var(--muted-2); }
 .empty { text-align: center; color: var(--muted); padding: 5px 0; font-size: 10.5px; }
 ::-webkit-scrollbar { width: 4px; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 2px; }

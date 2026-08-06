@@ -27,6 +27,7 @@
   --scrollbar: rgba(255, 255, 255, 0.1);
   --glass-bg: rgba(13, 18, 32, 0.88);
   --glass-border: #202b44;
+  --float-bg: rgba(13, 18, 32, 0.97);
   --chart-grid: rgba(255, 255, 255, 0.05);
   --chart-text: #5f6c85;
   --chart-bar: rgba(79, 140, 255, 0.5);
@@ -58,6 +59,7 @@
   --scrollbar: rgba(15, 23, 42, 0.15);
   --glass-bg: rgba(255, 255, 255, 0.9);
   --glass-border: #d9e0ec;
+  --float-bg: rgba(255, 255, 255, 0.98);
   --shadow: 0 12px 32px rgba(30, 40, 70, 0.14);
   --chart-grid: rgba(15, 23, 42, 0.08);
   --chart-text: #8b98ae;
@@ -103,6 +105,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  border-radius: 14px;
+  overflow: hidden;
   background:
     radial-gradient(1200px 500px at 80% -10%, rgba(79, 140, 255, 0.08), transparent 60%),
     radial-gradient(900px 400px at -10% 110%, rgba(52, 211, 153, 0.05), transparent 55%),

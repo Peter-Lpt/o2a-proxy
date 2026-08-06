@@ -614,22 +614,8 @@
     return liveService ? liveRecords.filter((r) => r.service === liveService) : liveRecords;
   }
 
-  function liveHitCls(r) {
-    const rate = Number(r.cache_hit_rate) || 0;
-    return rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad";
-  }
-
   function liveRowHtml(r) {
-    const t = String(r.timestamp || "").slice(11, 19) || "--:--:--";
-    const total = (r.input_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_write_tokens || 0);
-    const rate = Number(r.cache_hit_rate) || 0;
-    const svcTag = r.service ? `<span class="live-svc">${esc(r.service)}</span>` : "";
-    return (
-      `<span class="live-time">${t}</span>` +
-      svcTag +
-      `<span class="live-tok">↑${fmt(total)} · 读${fmt(r.cache_read_tokens || 0)} · ↓${fmt(r.output_tokens || 0)}</span>` +
-      `<span class="live-hit ${liveHitCls(r)}">${(rate * 100).toFixed(0)}%</span>`
-    );
+    return Live.rowHtml(r, true);
   }
 
   function renderLive(newCount) {
@@ -650,19 +636,10 @@
       .join("");
     feed.scrollTop = 0;
 
-    // 汇总：最近 5 分钟
-    const now = Date.now();
-    let n = 0, inp = 0, rd = 0, wr = 0, out = 0;
-    for (const r of pool) {
-      const ts = Date.parse(r.timestamp);
-      if (isNaN(ts) || now - ts > 300000) continue;
-      n++;
-      inp += r.input_tokens || 0; rd += r.cache_read_tokens || 0;
-      wr += r.cache_write_tokens || 0; out += r.output_tokens || 0;
-    }
-    if (n > 0) {
-      const hr = rd + inp > 0 ? rd / (rd + inp) : 0;
-      $("liveSum").textContent = `近5min：${n} 次 · ${fmt(inp + rd + wr + out)} tok · 命中 ${(hr * 100).toFixed(0)}%`;
+    // 汇总：最近 5 分钟（与悬浮窗同一套逻辑）
+    const s = Live.summarize(pool);
+    if (s.n > 0) {
+      $("liveSum").textContent = `近5min：${s.n} 次 · ${fmt(s.tokens)} tok · 命中 ${(s.hitRate * 100).toFixed(0)}%`;
     } else {
       const last = pool[pool.length - 1];
       $("liveSum").textContent = `最近一次 ${String(last.timestamp || "").slice(11, 19)}`;
@@ -670,40 +647,9 @@
     drawSpark();
   }
 
-  // 迷你条形图：最近 40 次请求，高度=命中率百分比
+  // 迷你条形图：最近 40 次请求，高度=命中率百分比（与悬浮窗同一套逻辑）
   function drawSpark() {
-    const cv = $("liveSpark");
-    const rect = cv.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    const W = Math.max(1, Math.round(rect.width)) || 360;
-    const H = Math.max(1, Math.round(rect.height)) || 44;
-    cv.width = W * dpr; cv.height = H * dpr;
-    const ctx = cv.getContext("2d");
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, W, H);
-    const rows = livePool().slice(-40);
-    if (!rows.length) {
-      ctx.fillStyle = "#c2c8d2";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.font = "11px -apple-system, sans-serif";
-      ctx.fillText("暂无请求", W / 2, H / 2);
-      return;
-    }
-    const gap = 2;
-    const bw = Math.max(3, Math.min(9, (W - gap * rows.length) / rows.length));
-    const totalW = rows.length * (bw + gap) - gap;
-    let x = W - totalW;
-    const COLOR = { good: "#1fab6b", mid: "#f5a623", bad: "#c3cad6" };
-    rows.forEach((r) => {
-      const rate = Number(r.cache_hit_rate) || 0;
-      const h = Math.max(2, rate * (H - 4));
-      ctx.fillStyle = COLOR[liveHitCls(r)];
-      ctx.beginPath();
-      ctx.roundRect(x, H - h, bw, h, 1.5);
-      ctx.fill();
-      x += bw + gap;
-    });
+    Live.drawSpark($("liveSpark"), livePool(), { maxBarWidth: 9 });
   }
 
   async function seedLive() {
