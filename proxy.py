@@ -90,7 +90,7 @@ def load_config():
                                   str(config.get("cache_stats_retention_days", 30)))
             for svc in config.get("services", []):
                 mode = svc.get("mode", "claude")
-                if mode not in ("claude", "codex"):
+                if mode not in ("claude", "codex", "direct"):
                     continue  # 未知模式跳过
                 services.append(Service(
                     name=svc.get("comment") or svc.get("model") or mode,
@@ -1168,8 +1168,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
-        if getattr(self, "service", None) and self.service.mode == "codex":
+        mode = getattr(self, "service", None).mode if getattr(self, "service", None) else "claude"
+        if mode == "codex":
             self._handle_openai_post()
+        elif mode == "direct":
+            self._handle_direct_post()
         else:
             self._handle_claude_post()
 
@@ -1222,6 +1225,96 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             self._handle_openai_stream(req, chat_body)
         else:
             self._handle_openai_non_stream(req, chat_body)
+
+    def _handle_direct_post(self):
+        """Anthropic 原生透传：原样转发请求、原样返回响应，抓取 usage 记统计。"""
+        req_start = time.time()
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+        try:
+            req = json.loads(body)
+        except json.JSONDecodeError:
+            self._send_error(400, "invalid json")
+            return
+        stream = req.get("stream", False)
+        logger.info(f"[REQ][direct] model={req.get('model')} stream={stream} "
+                    f"bytes={content_length} elapsed={time.time()-req_start:.3f}s")
+
+        target = self.service.target_url
+        if self.path and "?" in self.path:
+            target += "?" + self.path.split("?", 1)[1]
+        try:
+            r = Request(target, method="POST")
+            r.add_header("Content-Type", "application/json")
+            r.add_header("Authorization", f"Bearer {self.service.api_key}")
+            r.add_header("x-api-key", self.service.api_key)
+            r.add_header("anthropic-version", "2023-06-01")
+            if self.service.proxy:
+                proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
+                r.set_proxy(proxy_host, "https")
+            response = urlopen(r, body, timeout=120)
+            status = response.getcode()
+        except Exception as e:
+            if hasattr(e, "read"):
+                try:
+                    err = e.read().decode("utf-8", errors="replace")
+                except Exception:
+                    err = str(e)
+            else:
+                err = str(e)
+            logger.error(f"[direct] upstream failed: {err[:500]}")
+            self._send_error(502, f"upstream error: {err[:300]}")
+            return
+        if status != 200:
+            err = response.read().decode("utf-8", errors="replace")
+            self._send_raw(status, err.encode("utf-8"))
+            return
+
+        if stream:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            latest_usage = None
+            try:
+                while True:
+                    line = response.readline()
+                    if not line:
+                        break
+                    self._w(line)
+                    if line.startswith(b"data:"):
+                        data_str = line[5:].strip().decode("utf-8", errors="replace")
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        if ev.get("type") == "message_start":
+                            latest_usage = (ev.get("message") or {}).get("usage") or {}
+                        elif ev.get("type") == "message_delta":
+                            u = ev.get("usage") or {}
+                            if u:
+                                if latest_usage is None:
+                                    latest_usage = {}
+                                latest_usage.update(u)
+            finally:
+                if latest_usage and is_cache_stats_enabled():
+                    model = req.get("model") or self.service.model
+                    get_stats(self.service.name).record(model, latest_usage)
+            return
+
+        raw = response.read()
+        try:
+            data = json.loads(raw)
+            usage = data.get("usage") or {}
+            if usage.get("input_tokens") and is_cache_stats_enabled():
+                model = data.get("model") or self.service.model
+                get_stats(self.service.name).record(model, usage)
+        except Exception as e:
+            logger.warning(f"[direct] response parse failed: {e}")
+        logger.info(f"[direct][nonstream] completed bytes={len(raw)}")
+        self._send_raw(200, raw)
 
     def _forward_openai(self, body):
         target = self.service.target_url
@@ -1971,7 +2064,7 @@ def main():
             service_filter = sys.argv[i + 1]
 
     services = load_config()
-    enabled = [s for s in services if s.mode in ("claude", "codex") and s.api_key]
+    enabled = [s for s in services if s.mode in ("claude", "codex", "direct") and s.api_key]
     if service_filter:
         enabled = [s for s in enabled
                    if s.name == service_filter or str(s.port) == service_filter]

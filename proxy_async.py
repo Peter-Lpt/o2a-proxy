@@ -725,6 +725,140 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
 
 
 # ---------------------------------------------------------------------------
+# Direct 模式（Anthropic Messages -> Anthropic 原生透传，直连）
+# ---------------------------------------------------------------------------
+
+def upstream_direct_headers(service: Service) -> dict:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {service.api_key}",
+        "x-api-key": service.api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    return {"headers": headers}
+
+
+async def handle_direct_non_stream(request: web.Request, service: Service,
+                                   body: bytes, req_start: float):
+    """直连非流式：原样透传 Anthropic 请求，响应原样返回。"""
+    session = request.app["session"]
+    target = build_target(service, request)
+    logger.info(f"[FWD][direct] forwarding(non-stream) url={target} "
+                f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
+    try:
+        async with session.post(
+            target, data=body,
+            timeout=upstream_timeout(),
+            **upstream_direct_headers(service),
+        ) as up:
+            if up.status != 200:
+                err = await up.text()
+                logger.error(f"[direct] upstream error {up.status}: {err[:300]}")
+                return error_response(up.status, f"upstream error: {err[:300]}")
+            raw = await up.read()
+    except aiohttp.ClientError as e:
+        err_body = str(e)
+        logger.error(f"[direct] upstream failed: {err_body[:500]}")
+        return error_response(502, f"upstream error: {err_body[:300]}")
+
+    try:
+        data = json.loads(raw)
+        model = data.get("model") or service.model
+        usage = data.get("usage") or {}
+        # 兼容 Anthropic(input_tokens) 与 OpenAI(prompt_tokens/completion_tokens) 两种 usage 格式
+        if "prompt_tokens" in usage or "completion_tokens" in usage:
+            usage = _convert_usage(usage)
+        if (usage.get("input_tokens") or usage.get("output_tokens")) and is_cache_stats_enabled():
+            await asyncio.to_thread(get_stats(service.name).record, model, usage)
+    except Exception as e:
+        logger.warning(f"[direct] response parse failed: {e}")
+
+    logger.info(f"[direct][nonstream] completed bytes={len(raw)}")
+    return web.Response(body=raw, status=200, content_type="application/json")
+
+
+async def handle_direct_stream(request: web.Request, service: Service,
+                               body: bytes, req_start: float):
+    """直连流式：原样透传 Anthropic 的 SSE 事件，同时抓取 usage 记统计。"""
+    session = request.app["session"]
+    target = build_target(service, request)
+    logger.info(f"[FWD][direct] forwarding stream url={target} bytes={len(body)}")
+
+    resp = None
+    try:
+        async with session.post(
+            target, data=body,
+            timeout=upstream_timeout(),
+            **upstream_direct_headers(service),
+        ) as up:
+            if up.status != 200:
+                err = await up.text()
+                logger.error(f"[direct] upstream error {up.status}: {err[:300]}")
+                return error_response(up.status, f"upstream error: {err[:300]}")
+
+            resp = web.StreamResponse(status=200, headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            })
+            await resp.prepare(request)
+
+            model = service.model
+            latest_usage = None
+            try:
+                while True:
+                    line = await up.content.readline()
+                    if not line:
+                        break
+                    await stream_write(resp, line)
+                    if line.startswith(b"data:"):
+                        data_str = line[5:].strip().decode("utf-8", errors="replace")
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            ev = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        # Anthropic 全量 usage 在 message_start / message_delta
+                        if ev.get("type") == "message_start":
+                            latest_usage = (ev.get("message") or {}).get("usage") or {}
+                        elif ev.get("type") == "message_delta":
+                            u = ev.get("usage") or {}
+                            if u:
+                                if latest_usage is None:
+                                    latest_usage = {}
+                                latest_usage.update(u)
+                        # OpenAI 兼容流式：usage 通常出现在最后一个 chunk
+                        else:
+                            u = ev.get("usage")
+                            if u:
+                                if latest_usage is None:
+                                    latest_usage = {}
+                                latest_usage.update(u)
+            except ClientGone:
+                logger.info("Client disconnected (direct stream)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[direct] stream error: {e}", exc_info=True)
+            finally:
+                if latest_usage and ("prompt_tokens" in latest_usage or "completion_tokens" in latest_usage):
+                    latest_usage = _convert_usage(latest_usage)
+                await record_stats(service, model, latest_usage)
+    except aiohttp.ClientError as e:
+        err_body = str(e)
+        logger.error(f"[direct] upstream failed: {err_body[:500]}")
+        if resp is None:
+            return error_response(502, f"upstream error: {err_body[:300]}")
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
+    return resp
+
+
+# ---------------------------------------------------------------------------
 # 入口分发
 # ---------------------------------------------------------------------------
 
@@ -754,6 +888,14 @@ async def handle_request(request: web.Request):
         if stream:
             return await handle_openai_stream(request, service, payload, chat_body, req_start)
         return await handle_openai_non_stream(request, service, payload, chat_body, req_start)
+
+    if service.mode == "direct":
+        stream = bool(payload.get("stream", False))
+        logger.info(f"[REQ][direct] model={payload.get('model')} stream={stream} "
+                    f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
+        if stream:
+            return await handle_direct_stream(request, service, body, req_start)
+        return await handle_direct_non_stream(request, service, body, req_start)
 
     stream = bool(payload.get("stream", False))
     logger.info(f"[REQ] received model={payload.get('model')} stream={stream} "
@@ -793,7 +935,7 @@ async def handle_get(request: web.Request, service: Service):
 
 async def serve(service_filter: str = None) -> int:
     services = load_config()
-    enabled = [s for s in services if s.mode in ("claude", "codex") and s.api_key]
+    enabled = [s for s in services if s.mode in ("claude", "codex", "direct") and s.api_key]
     if service_filter:
         enabled = [s for s in enabled
                    if s.name == service_filter or str(s.port) == service_filter]

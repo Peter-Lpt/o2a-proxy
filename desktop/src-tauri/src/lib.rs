@@ -109,7 +109,7 @@ fn primary_service(state: &AppState) -> String {
         .iter()
         .find(|s| {
             let mode = s.get("mode").and_then(|m| m.as_str()).unwrap_or("claude");
-            mode == "claude" || mode == "codex"
+            mode == "claude" || mode == "codex" || mode == "direct"
         })
         .and_then(|s| s.get("comment").and_then(|c| c.as_str()).map(String::from))
         .unwrap_or_default()
@@ -232,7 +232,7 @@ fn get_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     if let Some(arr) = services.as_array() {
         for s in arr {
             let mode = s.get("mode").and_then(|m| m.as_str()).unwrap_or("claude");
-            if mode != "claude" && mode != "codex" {
+            if mode != "claude" && mode != "codex" && mode != "direct" {
                 continue;
             }
             let name = s

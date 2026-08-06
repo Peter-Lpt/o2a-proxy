@@ -1,10 +1,10 @@
 # o2a-proxy
 
-Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发出的 Anthropic Messages API 请求转换为 OpenAI 兼容格式，转发给 DashScope、DeepSeek、Kimi 等国内模型服务；同时支持 OpenAI Responses → Chat Completions 的透传（codex 模式，可接 Codex 类客户端）。
+Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发出的 Anthropic Messages API 请求转换为 OpenAI 兼容格式，转发给 DashScope、DeepSeek、Kimi 等国内模型服务；同时支持 OpenAI Responses → Chat Completions 的透传（codex 模式，可接 Codex 类客户端）与 Anthropic 原生透传（direct 模式，直连 Anthropic 协议端点）。
 
 ## 特性
 
-- **协议转换**：Anthropic Messages API → OpenAI Chat Completions；OpenAI Responses → Chat（codex 模式）
+- **协议转换**：Anthropic Messages API → OpenAI Chat Completions；OpenAI Responses → Chat（codex 模式）；Anthropic 原生透传（direct 模式）
 - **流式响应**：完整支持 SSE 流式输出，thinking / tool_calls / usage 逐段透传
 - **异步引擎**：asyncio + aiohttp，单进程多服务、连接池复用、客户端断连即取消上游
 - **多服务配置**：`config.json` 支持任意数量服务，每服务独立端口、独立启停
@@ -131,7 +131,7 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `cache_stats_dir` | 统计目录；**留空默认 `<项目根>/cache_stats`**（应用所在位置的相对目录），显式填写时相对路径基于项目根解析 |
 | `cache_stats_retention_days` | 统计保留天数 |
 | `services[].comment` | 服务备注（客户端里作为服务名） |
-| `services[].mode` | `claude`（Anthropic 转换）/ `codex`（OpenAI 透传） |
+| `services[].mode` | `claude`（Anthropic 转换）/ `codex`（OpenAI 透传）/ `direct`（Anthropic 原生透传） |
 | `services[].model` | 主模型 |
 | `services[].sub_model` | 子模型（Claude Code 子 agent / Task 工具使用） |
 | `services[].listen_address` | 监听端口，每服务独立 |

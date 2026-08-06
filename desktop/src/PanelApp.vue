@@ -228,6 +228,7 @@ const modelCache = new Map<string, string[]>();
 const modeOptions = [
   { value: "claude", label: "claude（Anthropic 转换）" },
   { value: "codex", label: "codex（OpenAI 透传）" },
+  { value: "direct", label: "direct（Anthropic 直连透传）" },
 ];
 let modelsSeq = 0;
 let mdTimer: any = null;
@@ -313,7 +314,7 @@ function showToast(msg: string) {
 
 // 服务标签以配置为准（添加/删除立即生效），运行态从 status 映射
 const serviceList = computed(() =>
-  (cfg.services || []).filter((s: any) => ["claude", "codex"].includes(s.mode || "claude"))
+  (cfg.services || []).filter((s: any) => ["claude", "codex", "direct"].includes(s.mode || "claude"))
 );
 const runningMap = computed<Record<string, boolean>>(() => {
   const m: Record<string, boolean> = {};
@@ -452,7 +453,7 @@ function validateConfig(): string | null {
   const svcs = cfg.services || [];
   const seen = new Set<string>();
   for (const s of svcs) {
-    if (!["claude", "codex"].includes(s.mode || "claude")) continue;
+    if (!["claude", "codex", "direct"].includes(s.mode || "claude")) continue;
     const comment = String(s.comment || "").trim();
     if (!comment) return "服务备注 comment 不能为空";
     if (seen.has(comment)) return "服务备注重复：" + comment;
