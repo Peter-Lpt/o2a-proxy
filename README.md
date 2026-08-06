@@ -10,7 +10,7 @@ Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发�
 - **多服务配置**：`config.json` 支持任意数量服务，每服务独立端口、独立启停
 - **费用与缓存统计**：JSONL 原始记录 + 小时聚合，命中率 / 覆盖率 / 费用估算
 - **桌面客户端**（`desktop/`）：托盘图标 + 右键菜单、悬浮看板、统计图表、配置管理、模型列表联想、深/浅主题，跨平台（Windows / macOS / Linux）
-- **兼容旧版**：`proxy.py`（线程版引擎）与 `mac/`（Electron 客户端）仍可运行
+- **兼容旧版**：`proxy.py`（线程版引擎）仍可运行
 
 ## 架构
 
@@ -46,7 +46,6 @@ flowchart LR
 | `proxy_async.py` | **推荐引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消 |
 | `proxy.py` | 旧版线程引擎（`ThreadingHTTPServer` + urllib），保留兼容，功能与新引擎一致 |
 | `desktop/` | Tauri 2 + Vue 3 桌面客户端：托盘启停、悬浮看板、统计面板、配置编辑器、模型列表联想 |
-| `mac/` | 旧版 Electron 菜单栏客户端（macOS），复用同一套统计文件 |
 | `cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
 | `pricing.json` | 模型定价数据，用于费用估算 |
 | `cache-stats.py` | 命令行统计查看工具 |
@@ -173,7 +172,6 @@ o2a-proxy/
 │   ├── src-tauri/          # Rust 后端（托盘 / 进程管理 / 统计聚合）
 │   ├── src/                # Vue 前端（面板 / 悬浮窗 / 图表）
 │   └── scripts/            # 图标生成等脚本
-├── mac/                    # 旧版 Electron 客户端（macOS）
 └── cache_stats/            # 统计数据（不提交）
 ```
 
