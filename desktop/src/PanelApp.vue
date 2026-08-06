@@ -13,8 +13,8 @@
         <button class="icon-btn" :title="theme === 'dark' ? '切换到浅色' : '切换到深色'" @click="onToggleTheme">
           <Icon :name="theme === 'dark' ? 'sun' : 'moon'" :size="14" />
         </button>
-        <button class="btn btn-sm" title="添加服务" :disabled="anyRunning" @click="addService"><Icon name="plus" :size="12" /> 添加服务</button>
-        <button class="float-btn" title="悬浮看板：置顶小窗实时查看" @click="api.toggleFloat()"><Icon name="float" :size="12" /> 悬浮</button>
+        <button class="btn btn-sm" title="添加服务" @click="addService"><Icon name="plus" :size="12" /> 添加服务</button>
+        <button class="float-btn" :title="floatService ? '为「' + floatService + '」开启悬浮看板' : '开启全部悬浮看板'" @click="api.toggleFloatFor(floatService)"><Icon name="float" :size="12" /> 悬浮</button>
       </div>
     </header>
 
@@ -61,15 +61,15 @@
         <div v-if="anyRunning" class="card live-card">
           <div class="live-head">
             <span class="live-title"><span class="live-dot"></span>实时调用</span>
-            <span>{{ liveRecords.length ? fmtNum(liveRecords[liveRecords.length - 1].output_tokens) + " tok / 最新" : "等待请求…" }}</span>
+            <span>{{ liveSum }}</span>
           </div>
           <Spark :points="liveSpark" :height="40" class="live-spark" />
           <div class="live-feed">
             <div v-for="(r, i) in liveFeed" :key="i" class="lf-row">
               <span class="t">{{ r.time }}</span>
-              <span class="k">{{ r.model }}</span>
-              <span class="h" :class="r.hit >= 0.3 ? 'good' : ''">{{ fmtPct(r.hit) }}</span>
-              <span class="h">{{ fmtNum(r.tokens) }}</span>
+              <span v-if="r.service" class="svc">{{ r.service }}</span>
+              <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+              <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
             </div>
           </div>
         </div>
@@ -98,7 +98,7 @@
             <button class="seg-btn" :class="{ active: range === 'month' }" @click="setRange('month')">本月</button>
           </div>
           <div class="chart-head-right">
-            <SelectBox v-model="modelFilter" :options="modelOptions" size="sm" placeholder="全部模型" title="按模型过滤（今日/本月）" />
+            <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" title="按模型过滤（今日/本月）" />
             <button class="icon-btn" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
           </div>
         </div>
@@ -122,8 +122,8 @@
         </div>
 
         <div class="card chart-box">
-          <div class="chart-title">缓存命中率 & Token 消耗（{{ range === 'today' ? '今日逐小时' : '本月逐日' }}）</div>
-          <LineChart :labels="chartLabels" :tokens="chartTokens" :hit-rate="chartHit" :theme="theme" />
+          <div class="chart-title">缓存命中率 & Token 消耗（{{ range === 'today' ? '今日逐分钟' : '本月逐日' }}）</div>
+          <LineChart :labels="chartLabels" :input="chartInput" :read="chartRead" :output="chartOutput" :hit-rate="chartHit" :theme="theme" />
           <div class="chart-note">* 命中率 = 缓存读 / (缓存读 + 输入)，对齐 Anthropic 官方口径</div>
         </div>
         <div class="updated">{{ stats.updatedAt ? "更新于 " + stats.updatedAt.replace('T', ' ').slice(0, 19) : "—" }}</div>
@@ -131,9 +131,9 @@
 
       <!-- 配置 -->
       <section v-show="page === 'config'" class="panel" :class="{ active: page === 'config' }">
-        <div v-if="anyRunning" class="cfg-lock">
-          <span class="cfg-lock-msg"><Icon name="lock" :size="13" /> 服务运行中，配置已锁定</span>
-          <button class="btn btn-sm" @click="stopAll()">停止代理以编辑</button>
+        <div v-if="activeSvcRunning" class="cfg-lock">
+          <span class="cfg-lock-msg"><Icon name="lock" :size="13" /> 服务「{{ activeSvc.comment }}」运行中，该服务配置已锁定</span>
+          <button class="btn btn-sm" @click="api.stopService(activeSvc.comment)">停止该代理以编辑</button>
         </div>
         <form @submit.prevent="saveConfig">
           <div class="card form-card">
@@ -142,25 +142,25 @@
               <span class="fc-sub">{{ selected !== ALL ? (activeSvc?.comment || "未配置") : "全部视图" }}</span>
             </div>
             <div v-if="activeSvc && selected !== ALL">
-              <label>备注 comment <input v-model="activeSvc.comment" type="text" :disabled="anyRunning" /></label>
+              <label>备注 comment <input v-model="activeSvc.comment" type="text" :disabled="activeSvcRunning" /></label>
               <label>模式 mode
-                <SelectBox v-model="activeSvc.mode" :options="modeOptions" :disabled="anyRunning" />
+                <SelectBox v-model="activeSvc.mode" :options="modeOptions" :disabled="activeSvcRunning" />
               </label>
-              <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="anyRunning" /></label>
-              <label>子模型 sub_model <SelectBox v-model="activeSvc.sub_model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="anyRunning" /></label>
-              <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="anyRunning" /></label>
-              <label>API 地址 openai_base_url <input v-model="activeSvc.openai_base_url" type="text" spellcheck="false" autocomplete="off" :disabled="anyRunning" @input="debounceFetchModels" /></label>
+              <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
+              <label>子模型 sub_model <SelectBox v-model="activeSvc.sub_model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
+              <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
+              <label>API 地址 openai_base_url <input v-model="activeSvc.openai_base_url" type="text" spellcheck="false" autocomplete="off" :disabled="activeSvcRunning" @input="debounceFetchModels" /></label>
               <label>API Key
                 <div class="field-row">
-                  <input v-model="activeSvc.openai_api_key" :type="showKey ? 'text' : 'password'" autocomplete="off" :disabled="anyRunning" @input="debounceFetchModels" />
+                  <input v-model="activeSvc.openai_api_key" :type="showKey ? 'text' : 'password'" autocomplete="off" :disabled="activeSvcRunning" @input="debounceFetchModels" />
                   <button type="button" class="icon-btn" @click="showKey = !showKey" :title="showKey ? '隐藏 API Key' : '显示 API Key'">
                     <Icon :name="showKey ? 'eye-off' : 'eye'" :size="13" />
                   </button>
                 </div>
               </label>
               <div class="grid2">
-                <label>max_tokens <input v-model="activeSvc.max_tokens" type="number" min="1" :disabled="anyRunning" /></label>
-                <label class="inline"><input v-model="activeSvc.context_1m" type="checkbox" :disabled="anyRunning" /><span>1M 上下文</span></label>
+                <label>max_tokens <input v-model="activeSvc.max_tokens" type="number" min="1" :disabled="activeSvcRunning" /></label>
+                <label class="inline"><input v-model="activeSvc.context_1m" type="checkbox" :disabled="activeSvcRunning" /><span>1M 上下文</span></label>
               </div>
             </div>
             <div v-else class="hint">
@@ -183,11 +183,11 @@
           </div>
 
           <div class="form-actions">
-            <button type="submit" class="btn btn-primary" :disabled="anyRunning">保存配置</button>
-            <button type="button" class="btn btn-danger" @click="removeSvc" :disabled="anyRunning || !activeSvc || selected === ALL">删除此服务</button>
+            <button type="submit" class="btn btn-primary" :disabled="activeSvcRunning">保存配置</button>
+            <button type="button" class="btn btn-danger" @click="removeSvc" :disabled="activeSvcRunning || !activeSvc || selected === ALL">删除此服务</button>
             <button type="button" class="btn" @click="api.openConfigFile()">打开 config.json</button>
           </div>
-          <p class="hint">每个服务监听各自端口：claude 走 Anthropic 转换，codex 走 OpenAI 透传，均记录统计。填写真实 API Key 后点击服务标签上的开关即可启动。</p>
+          <p class="hint">每个服务监听各自端口：claude 走 Anthropic 转换，codex 走 OpenAI 透传，direct 走 Anthropic 协议直连透传，均记录统计。填写真实 API Key 后点击服务标签上的开关即可启动。</p>
         </form>
       </section>
     </main>
@@ -324,10 +324,16 @@ const runningMap = computed<Record<string, boolean>>(() => {
   return m;
 });
 const anyRunning = computed(() => Object.values(runningMap.value).some(Boolean));
+const activeSvcRunning = computed(
+  () => !!activeSvc.value && !!runningMap.value[activeSvc.value.comment]
+);
 const activeSvc = computed(
   () => serviceList.value.find((s: any) => s.comment === selected.value) || serviceList.value[0]
 );
 const scopeLabel = computed(() => (selected.value === ALL ? "全部" : selected.value));
+const floatService = computed(() =>
+  selected.value === ALL ? "" : serviceList.value.find((s: any) => s.comment === selected.value)?.comment || ""
+);
 const statsService = computed(() => (selected.value === ALL ? "" : selected.value));
 
 const runningList = computed(() =>
@@ -399,15 +405,6 @@ async function toggleSvc(name: string) {
   } catch (e: any) {
     showToast("操作失败: " + e);
     offError.value = String(e);
-  }
-}
-
-async function stopAll() {
-  try {
-    await api.stopAll();
-    await loadStatus();
-  } catch (e: any) {
-    showToast("停止失败: " + e);
   }
 }
 
@@ -527,62 +524,89 @@ const modelOptions = computed(() => {
   return (arr as any[]).map((m: any) => m.model);
 });
 
+const filterOptions = computed(() => [
+  { value: "", label: "全部模型" },
+  ...modelOptions.value.map((m: any) => ({ value: m, label: m })),
+]);
+
 const modelStats = computed(() => {
   const arr = range.value === "today" ? stats.byModel || [] : stats.monthByModel || [];
   return (arr as any[]).filter((m: any) => !modelFilter.value || m.model === modelFilter.value);
 });
 
 const chartData = computed(() => {
+  const pick = (arr: any[]) => ({
+    labels: arr.map((x: any) =>
+      range.value === "today" ? (x.minute || "").slice(11) : (x.date || "").slice(5)
+    ),
+    input: arr.map((x: any) => Number(x.input || 0)),
+    read: arr.map((x: any) => Number(x.read || 0)),
+    output: arr.map((x: any) => Number(x.output || 0)),
+    hit: arr.map((x: any) => x.hitRate || 0),
+  });
   if (modelFilter.value) {
     if (range.value === "today") {
-      const arr = stats.todayMinuteByModel?.[modelFilter.value] || [];
-      return {
-        labels: arr.map((x: any) => (x.minute || "").slice(11)),
-        tokens: arr.map((x: any) => Number(x.input || 0) + Number(x.read || 0) + Number(x.output || 0)),
-        hit: arr.map((x: any) => x.hitRate || 0),
-      };
+      return pick(stats.todayMinuteByModel?.[modelFilter.value] || []);
     }
-    const arr = stats.monthDailyByModel?.[modelFilter.value] || [];
-    return {
-      labels: arr.map((x: any) => (x.date || "").slice(8)),
-      tokens: arr.map((x: any) => Number(x.input || 0) + Number(x.read || 0) + Number(x.output || 0)),
-      hit: arr.map((x: any) => x.hitRate || 0),
-    };
+    return pick(stats.monthDailyByModel?.[modelFilter.value] || []);
   }
   if (range.value === "today") {
-    const arr = stats.todayHourly || [];
-    return {
-      labels: arr.map((x: any) => x.hour),
-      tokens: arr.map((x: any) => Number(x.input || 0) + Number(x.read || 0) + Number(x.output || 0)),
-      hit: arr.map((x: any) => x.hitRate || 0),
-    };
+    return pick(stats.todayMinute || []);
   }
-  const arr = stats.monthDaily || [];
-  return {
-    labels: arr.map((x: any) => (x.date || "").slice(8)),
-    tokens: arr.map((x: any) => Number(x.input || 0) + Number(x.read || 0) + Number(x.output || 0)),
-    hit: arr.map((x: any) => x.hitRate || 0),
-  };
+  return pick(stats.monthDaily || []);
 });
 
 const chartLabels = computed(() => chartData.value.labels);
-const chartTokens = computed(() => chartData.value.tokens);
+const chartInput = computed(() => chartData.value.input);
+const chartRead = computed(() => chartData.value.read);
+const chartOutput = computed(() => chartData.value.output);
 const chartHit = computed(() => chartData.value.hit);
 
 const liveSpark = computed(() =>
-  liveRecords.value.slice(-40).map((r: any) => Number(r.output_tokens || 0))
+  liveRecords.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
 const liveFeed = computed(() =>
   liveRecords.value
-    .slice(-6)
-    .reverse()
-    .map((r: any) => ({
-      time: (r.timestamp || "").slice(11),
-      model: r.model || "?",
-      hit: r.cache_hit_rate || 0,
-      tokens: Number(r.output_tokens || 0),
-    }))
+    .slice(0, 30)
+    .map((r: any) => {
+      const rate = Number(r.cache_hit_rate || 0);
+      return {
+        time: String(r.timestamp || "").slice(11, 19),
+        service: r.service || "",
+        total:
+          Number(r.input_tokens || 0) +
+          Number(r.cache_read_tokens || 0) +
+          Number(r.cache_write_tokens || 0),
+        cacheRead: Number(r.cache_read_tokens || 0),
+        output: Number(r.output_tokens || 0),
+        hitPct: (rate * 100).toFixed(0),
+        hitCls: rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad",
+      };
+    })
 );
+
+// 近 5 分钟汇总（命中率用近 5 分钟 token 加权）
+const liveSum = computed(() => {
+  const pool = liveRecords.value;
+  if (!pool.length) return "等待请求…";
+  const now = Date.now();
+  let n = 0, inp = 0, rd = 0, wr = 0, out = 0;
+  for (const r of pool) {
+    const ts = Date.parse(r.timestamp);
+    if (isNaN(ts) || now - ts > 300000) continue;
+    n++;
+    inp += Number(r.input_tokens || 0);
+    rd += Number(r.cache_read_tokens || 0);
+    wr += Number(r.cache_write_tokens || 0);
+    out += Number(r.output_tokens || 0);
+  }
+  if (n > 0) {
+    const hr = rd + inp > 0 ? rd / (rd + inp) : 0;
+    return `近5min：${n} 次 · ${fmtNum(inp + rd + wr + out)} tok · 命中 ${(hr * 100).toFixed(0)}%`;
+  }
+  const last = pool[pool.length - 1];
+  return `最近一次 ${String(last.timestamp || "").slice(11, 19)}`;
+});
 
 function setRange(r: "today" | "month") {
   range.value = r;

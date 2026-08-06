@@ -166,11 +166,18 @@ fn position_panel(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> Result<
     #[cfg(target_os = "macos")]
     {
         if let Some(tray) = app.tray_by_id("main") {
-            if let Ok(Some(pos)) = tray.position() {
+            if let Ok(Some(rect)) = tray.rect() {
                 let size = win.outer_size().map_err(|e| e.to_string())?;
+                let pos = match rect.position {
+                    tauri::Position::Physical(p) => (p.x as f64, p.y as f64),
+                    tauri::Position::Logical(l) => {
+                        let scale = win.scale_factor().map_err(|e| e.to_string())?;
+                        (l.x * scale, l.y * scale)
+                    }
+                };
                 win.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                    x: pos.x - size.width as f64 / 2.0,
-                    y: pos.y + 12.0,
+                    x: (pos.0 - size.width as f64 / 2.0) as i32,
+                    y: (pos.1 + 12.0) as i32,
                 }))
                 .map_err(|e| e.to_string())?;
                 return Ok(());
@@ -489,6 +496,56 @@ fn toggle_float(app: tauri::AppHandle) -> Result<bool, String> {
     }
 }
 
+fn float_label(service: &str) -> String {
+    if service.is_empty() {
+        "float".to_string()
+    } else {
+        format!("float_{service}")
+    }
+}
+
+fn urlenc(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
+#[tauri::command]
+fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, String> {
+    let label = float_label(&service);
+    if let Some(w) = app.get_webview_window(&label) {
+        let visible = w.is_visible().map_err(|e| e.to_string())?;
+        if visible {
+            w.hide().map_err(|e| e.to_string())?;
+        } else {
+            w.show().map_err(|e| e.to_string())?;
+            w.set_focus().map_err(|e| e.to_string())?;
+        }
+        Ok(!visible)
+    } else {
+        let url = format!("index.html#/float?service={}", urlenc(&service));
+        let w = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+            .title("o2a-proxy 悬浮看板")
+            .inner_size(434.0, 234.0)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .always_on_top(true)
+            .skip_taskbar(true)
+            .visible(true)
+            .build()
+            .map_err(|e| e.to_string())?;
+        w.on_window_event(hide_on_close(app.clone(), label));
+        Ok(true)
+    }
+}
+
 #[tauri::command]
 fn get_float_state(app: tauri::AppHandle) -> Result<bool, String> {
     Ok(app
@@ -506,10 +563,10 @@ fn quit_app(app: tauri::AppHandle) {
 // App entry
 // ---------------------------------------------------------------------------
 
-fn hide_on_close(app: tauri::AppHandle, label: &'static str) -> impl Fn(&WindowEvent) + Send + 'static {
+fn hide_on_close(app: tauri::AppHandle, label: String) -> impl Fn(&WindowEvent) + Send + 'static {
     move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
-            if let Some(w) = app.get_webview_window(label) {
+            if let Some(w) = app.get_webview_window(label.as_str()) {
                 let _ = w.hide();
             }
             api.prevent_close();
@@ -556,6 +613,7 @@ pub fn run() {
             toggle_panel,
             hide_panel,
             toggle_float,
+            toggle_float_for,
             get_float_state,
             quit_app,
         ])
@@ -595,7 +653,7 @@ pub fn run() {
                 WebviewUrl::App("index.html#/float".into()),
             )
             .title("o2a-proxy 悬浮看板")
-            .inner_size(410.0, 210.0)
+            .inner_size(434.0, 234.0)
             .resizable(false)
             .decorations(false)
             .transparent(true)
@@ -603,7 +661,7 @@ pub fn run() {
             .skip_taskbar(true)
             .visible(false)
             .build()?;
-            float_win.on_window_event(hide_on_close(app.handle().clone(), "float"));
+            float_win.on_window_event(hide_on_close(app.handle().clone(), "float".to_string()));
 
             // 托盘菜单
             let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;

@@ -1,30 +1,30 @@
 <template>
-  <div class="float" :class="{ on: anyRunning }" data-tauri-drag-region>
-    <div class="head" data-tauri-drag-region>
+  <div class="float" :class="{ on: anyRunning }" data-tauri-drag-region="deep">
+    <div class="head">
       <span class="dot" :class="{ on: anyRunning }"></span>
-      <span class="ttl">o2a-proxy</span>
+      <span class="ttl">{{ floatTitle }}</span>
       <span class="sub">{{ statusText }}</span>
-      <button class="x" title="关闭悬浮看板" @click="api.toggleFloat()"><Icon name="x" :size="12" /></button>
+      <button class="x" title="关闭悬浮看板" @click="api.toggleFloatFor(floatService)"><Icon name="x" :size="12" /></button>
     </div>
     <div class="nums">
       <div class="num">
-        <b>{{ fmtNum(min1.requests) }}</b><span>近1min 请求</span>
+        <b>{{ fmtNum(min1.requests) }}</b><span>近5min 请求</span>
       </div>
       <div class="num">
-        <b>{{ fmtNum(min1.tokens) }}</b><span>近1min Token</span>
+        <b>{{ fmtNum(min1.tokens) }}</b><span>近5min Token</span>
       </div>
       <div class="num">
-        <b :class="hitCls">{{ now1min.length ? fmtPct(min1.hitRate) : "—" }}</b><span>近1min 命中</span>
+        <b :class="hitCls">{{ now1min.length ? fmtPct(min1.hitRate) : "—" }}</b><span>近5min 命中</span>
       </div>
     </div>
     <Spark :points="spark" :height="36" :color="sparkColor" />
-    <div class="feed">
-      <div v-if="!feed.length" class="empty">等待请求…</div>
-      <div v-for="(r, i) in feed" :key="i" class="row" :class="{ flash: i === 0 }">
+    <div class="feed" data-tauri-drag-region="false">
+      <div v-if="!liveFeed.length" class="empty">等待请求…</div>
+      <div v-for="(r, i) in liveFeed" :key="i" class="row" :class="{ flash: i === 0 }">
         <span class="t">{{ r.time }}</span>
-        <span class="k">{{ r.model }}</span>
-        <span class="h" :class="hitCls">{{ fmtPct(r.hit) }}</span>
-        <span class="h">{{ fmtNum(r.tokens) }}</span>
+        <span v-if="r.service" class="svc">{{ r.service }}</span>
+        <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+        <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
       </div>
     </div>
   </div>
@@ -42,9 +42,18 @@ const records = ref<any[]>([]);
 const theme = ref<"dark" | "light">(getTheme());
 let timers: any[] = [];
 
+// 从 URL 解析本悬浮窗对应的服务（#/float?service=xxx）
+const floatService = (() => {
+  const m = (window.location.hash || "").match(/[?&]service=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+})();
+const floatTitle = computed(() =>
+  floatService ? floatService + " · 悬浮看板" : "o2a-proxy · 全部"
+);
+
 const anyRunning = computed(() => (status.value.services || []).some((s: any) => s.running));
 const now1min = computed(() => {
-  const cutoff = Date.now() - 60_000;
+  const cutoff = Date.now() - 300_000;
   return (records.value || []).filter((r: any) => {
     const ts = new Date(String(r.timestamp || "").replace("T", " ")).getTime();
     return !isNaN(ts) && ts >= cutoff;
@@ -85,25 +94,33 @@ const min1 = computed(() => {
 const hitCls = computed(() => (min1.value.hitRate >= 0.3 ? "good" : min1.value.hitRate > 0 ? "mid" : ""));
 
 const spark = computed(() =>
-  (records.value || []).slice(-40).map((r: any) => Number(r.output_tokens || 0))
+  (records.value || []).slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
 
-const feed = computed(() =>
+const liveFeed = computed(() =>
   (records.value || [])
-    .slice(-6)
-    .reverse()
-    .map((r: any) => ({
-      time: (r.timestamp || "").slice(11),
-      model: r.model || "?",
-      hit: r.cache_hit_rate || 0,
-      tokens: Number(r.output_tokens || 0),
-    }))
+    .slice(0, 30)
+    .map((r: any) => {
+      const rate = Number(r.cache_hit_rate || 0);
+      return {
+        time: String(r.timestamp || "").slice(11, 19),
+        service: r.service || "",
+        total:
+          Number(r.input_tokens || 0) +
+          Number(r.cache_read_tokens || 0) +
+          Number(r.cache_write_tokens || 0),
+        cacheRead: Number(r.cache_read_tokens || 0),
+        output: Number(r.output_tokens || 0),
+        hitPct: (rate * 100).toFixed(0),
+        hitCls: rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad",
+      };
+    })
 );
 
 async function refresh() {
   try {
     status.value = await api.getStatus();
-    const d = await api.getLive("");
+    const d = await api.getLive(floatService);
     records.value = d?.records || [];
   } catch (e) {
     records.value = [];
@@ -135,18 +152,17 @@ onUnmounted(() => {
   backdrop-filter: blur(22px);
   -webkit-backdrop-filter: blur(22px);
   border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow);
-  transition: border-color 0.3s, box-shadow 0.3s;
+  box-shadow: none;
+  transition: border-color 0.3s;
   overflow: hidden;
   font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
   font-size: 12px;
-  -webkit-app-region: drag;
   user-select: none;
 }
 .float.on {
   border-color: rgba(52, 211, 153, 0.35);
-  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.4), 0 0 26px rgba(52, 211, 153, 0.1);
+  box-shadow: none;
 }
 .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4250; flex: none; }
@@ -155,7 +171,6 @@ onUnmounted(() => {
 .ttl { font-weight: 700; font-size: 12px; }
 .sub { color: var(--muted); font-size: 10.5px; margin-left: 2px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .x {
-  -webkit-app-region: no-drag;
   width: 18px; height: 18px; border: none; border-radius: 5px;
   background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; line-height: 1;
 }
@@ -166,7 +181,6 @@ onUnmounted(() => {
 .num b.mid { color: var(--amber); }
 .num span { font-size: 10px; color: var(--muted); }
 .feed {
-  -webkit-app-region: no-drag;
   max-height: 62px; overflow-y: auto;
   border-top: 1px solid var(--hairline);
   padding: 3px 10px 6px; font-size: 10.5px; font-variant-numeric: tabular-nums;
@@ -176,6 +190,7 @@ onUnmounted(() => {
 @keyframes flash { 0% { background: rgba(45,127,249,.14); } 100% { background: transparent; } }
 .t { color: var(--muted); flex: none; }
 .k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.svc { color: var(--muted); flex: none; font-size: 10px; }
 .h { flex: none; font-weight: 700; min-width: 36px; text-align: right; }
 .h.good { color: var(--green); }
 .h.mid { color: var(--amber); }

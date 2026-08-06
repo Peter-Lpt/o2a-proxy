@@ -42,7 +42,6 @@
       </button>
       <div v-if="!visibleOptions.length" class="sb-empty">无匹配项</div>
     </div>
-    <div v-if="open" class="sb-overlay" @click="close"></div>
   </div>
 </template>
 
@@ -143,6 +142,13 @@ function onViewportChange() {
   }
 }
 
+// 点击组件外部任意位置收起下拉（更可靠，不依赖 fixed 遮罩层）
+function onDocDown(e: MouseEvent) {
+  if (!open.value) return;
+  const root = rootEl.value;
+  if (root && !root.contains(e.target as Node)) close();
+}
+
 watch(
   () => props.modelValue,
   (v) => {
@@ -152,9 +158,11 @@ watch(
 
 window.addEventListener("scroll", onViewportChange, true);
 window.addEventListener("resize", onViewportChange);
+document.addEventListener("mousedown", onDocDown);
 onBeforeUnmount(() => {
   window.removeEventListener("scroll", onViewportChange, true);
   window.removeEventListener("resize", onViewportChange);
+  document.removeEventListener("mousedown", onDocDown);
 });
 </script>
 
@@ -289,10 +297,5 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--muted-2);
   text-align: center;
-}
-.sb-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 999;
 }
 </style>

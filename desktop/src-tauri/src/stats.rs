@@ -55,86 +55,130 @@ fn read_json(path: &Path) -> Option<Value> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn list_summary_sources(stats_dir: &Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    let summary_dir = stats_dir.join("summary");
-    let Ok(entries) = std::fs::read_dir(&summary_dir) else {
-        return out;
+fn load_pricing(stats_dir: &Path) -> Value {
+    let p = stats_dir
+        .parent()
+        .map(|d| d.join("pricing.json"))
+        .unwrap_or_else(|| Path::new("pricing.json").to_path_buf());
+    read_json(&p).unwrap_or(Value::Null)
+}
+
+/// 参考 proxy.py CacheStats._calc_cost：按当前 pricing.json 重算单次请求费用。
+/// 历史记录写入时可能缺少 cost 或定价表后补，读取时统一重算，保证口径一致。
+fn recalc_cost(
+    model: &str,
+    input: i64,
+    read: i64,
+    write: i64,
+    output: i64,
+    pricing: &Value,
+) -> f64 {
+    let Some(providers) = pricing.as_object() else {
+        return 0.0;
     };
-    let entries: Vec<_> = entries.flatten().collect();
-    for e in &entries {
-        let name = e.file_name().to_string_lossy().to_string();
-        if e.path().is_file() && name.ends_with(".json") {
-            out.push(("".into(), name.trim_end_matches(".json").to_string()));
-        }
-    }
-    for e in &entries {
-        if !e.path().is_dir() {
+    let mut price = None;
+    for (pname, pdata) in providers {
+        if pname.starts_with('_') {
             continue;
         }
-        let svc = e.file_name().to_string_lossy().to_string();
-        if let Ok(files) = std::fs::read_dir(e.path()) {
-            for f in files.flatten() {
-                let n = f.file_name().to_string_lossy().to_string();
-                if f.path().is_file() && n.ends_with(".json") {
-                    out.push((svc.clone(), n.trim_end_matches(".json").to_string()));
-                }
+        if let Some(models) = pdata.get("models").and_then(|m| m.as_object()) {
+            if let Some(m) = models.get(model) {
+                price = Some(m);
+                break;
             }
+        }
+    }
+    let Some(price) = price else { return 0.0 };
+    let Some(tier) = price
+        .get("tiers")
+        .and_then(|t| t.as_array())
+        .and_then(|a| a.first())
+    else {
+        return 0.0;
+    };
+    let input_price = tier.get("input").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let output_price = tier.get("output").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let input_cost = input as f64 * input_price / 1_000_000.0;
+    let output_cost = output as f64 * output_price / 1_000_000.0;
+    let cache_read_cost = if let Some(c) = tier.get("cache_hit").and_then(|v| v.as_f64()) {
+        read as f64 * c / 1_000_000.0
+    } else {
+        read as f64 * input_price * 0.2 / 1_000_000.0
+    };
+    let cache_write_cost = if let Some(c) = tier.get("cache_miss").and_then(|v| v.as_f64()) {
+        write as f64 * c / 1_000_000.0
+    } else {
+        write as f64 * input_price / 1_000_000.0
+    };
+    input_cost + output_cost + cache_read_cost + cache_write_cost
+}
+
+fn list_record_dates(stats_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(stats_dir) else {
+        return out;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if e.path().is_file() && name.ends_with(".jsonl") {
+            out.push(name.trim_end_matches(".jsonl").to_string());
         }
     }
     out
 }
 
-fn load_day(stats_dir: &Path, date_str: &str, service: &str, primary: &str) -> Option<Value> {
-    let include_legacy = !service.is_empty() && service == primary;
-    let sources = list_summary_sources(stats_dir);
-    let mut acc: BTreeMap<String, Agg> = BTreeMap::new();
-    for (svc, ds) in &sources {
-        if ds != date_str {
-            continue;
-        }
-        if !service.is_empty() && svc != service && !(include_legacy && svc.is_empty()) {
-            continue;
-        }
-        let p = if svc.is_empty() {
-            stats_dir.join("summary").join(format!("{date_str}.json"))
-        } else {
-            stats_dir.join("summary").join(svc).join(format!("{date_str}.json"))
-        };
-        let Some(raw) = read_json(&p) else { continue };
-        let Some(hours) = raw.get("hours").and_then(|h| h.as_object()) else {
-            continue;
-        };
-        for (hh, h) in hours {
-            let g = acc.entry(hh.clone()).or_default();
-            g.requests += h["requests"].as_i64().unwrap_or(0);
-            g.input += h["total_input_tokens"].as_i64().unwrap_or(0);
-            g.read += h["total_cache_read_tokens"].as_i64().unwrap_or(0);
-            g.write += h["total_cache_write_tokens"].as_i64().unwrap_or(0);
-            g.output += h["total_output_tokens"].as_i64().unwrap_or(0);
-            g.cost += h["total_cost"].as_f64().unwrap_or(0.0);
-        }
-    }
-    if acc.is_empty() {
-        return None;
-    }
-    let mut hours_map = Map::new();
-    let mut day = Agg::default();
-    for (hh, g) in &acc {
-        hours_map.insert(hh.clone(), g.to_json());
-        day.add_agg(g);
-    }
-    Some(json!({"date": date_str, "day": day.to_json(), "hours": hours_map}))
-}
-
-fn read_records(stats_dir: &Path, date_str: &str) -> Vec<Value> {
+/// 读取某天原始记录，并统一按当前定价重算 cost 字段。
+fn read_records(stats_dir: &Path, date_str: &str, pricing: &Value) -> Vec<Value> {
     let p = stats_dir.join(format!("{date_str}.jsonl"));
     let Ok(s) = std::fs::read_to_string(&p) else {
         return Vec::new();
     };
     s.lines()
         .filter_map(|l| serde_json::from_str(l.trim()).ok())
+        .map(|mut rec: Value| {
+            let model = rec["model"].as_str().unwrap_or("").to_string();
+            let input = rec["input_tokens"].as_i64().unwrap_or(0);
+            let read = rec["cache_read_tokens"].as_i64().unwrap_or(0);
+            let write = rec["cache_write_tokens"].as_i64().unwrap_or(0);
+            let output = rec["output_tokens"].as_i64().unwrap_or(0);
+            rec["cost"] = json!(recalc_cost(&model, input, read, write, output, pricing));
+            rec
+        })
         .collect()
+}
+
+/// 从原始记录按小时聚合某天数据（不再依赖容易过期的 summary 文件，
+/// 保证请求数、费用与记录口径一致）。
+fn load_day(
+    stats_dir: &Path,
+    date_str: &str,
+    service: &str,
+    primary: &str,
+    pricing: &Value,
+) -> Option<Value> {
+    let records = read_records(stats_dir, date_str, pricing);
+    let mut hours: BTreeMap<String, Agg> = BTreeMap::new();
+    let mut day = Agg::default();
+    for rec in &records {
+        if !matches_service(rec, service, primary) {
+            continue;
+        }
+        let ts = rec["timestamp"].as_str().unwrap_or("");
+        if ts.len() < 13 {
+            continue;
+        }
+        let hh = &ts[11..13];
+        hours.entry(hh.to_string()).or_default().add_record(rec);
+        day.add_record(rec);
+    }
+    if day.requests == 0 {
+        return None;
+    }
+    let mut hours_map = Map::new();
+    for (hh, g) in &hours {
+        hours_map.insert(hh.clone(), g.to_json());
+    }
+    Some(json!({"date": date_str, "day": day.to_json(), "hours": hours_map}))
 }
 
 fn matches_service(rec: &Value, service: &str, primary: &str) -> bool {
@@ -253,11 +297,12 @@ fn day_to_series(dd: &Value) -> Value {
 }
 
 pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
+    let pricing = load_pricing(dir);
     let now = chrono::Local::now();
     let today_str = now.format("%Y-%m-%d").to_string();
     let month_prefix = now.format("%Y-%m").to_string();
     let cur_hour = now.format("%H").to_string();
-    let today = load_day(&dir, &today_str, service, &primary);
+    let today = load_day(&dir, &today_str, service, &primary, &pricing);
     let current = today
         .as_ref()
         .and_then(|t| t.get("hours").and_then(|h| h.get(&cur_hour)))
@@ -282,23 +327,22 @@ pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
         }
     }
 
-    let records = read_records(&dir, &today_str);
+    let records = read_records(&dir, &today_str, &pricing);
     let today_minute = aggregate_minutes(&records, service, &primary);
     let today_minute_by_model = aggregate_minutes_by_model(&records, service, &primary);
     let by_model = sum_by_model(&records, service, &primary);
 
-    let day_files: Vec<String> = list_summary_sources(&dir)
-        .into_iter()
-        .map(|(_, d)| d)
-        .collect::<BTreeSet<_>>()
+    let day_files: Vec<String> = list_record_dates(&dir)
         .into_iter()
         .filter(|d| d.starts_with(&month_prefix))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect();
 
     let mut month_total = Agg::default();
     let mut days_map: BTreeMap<String, Value> = BTreeMap::new();
     for ds in &day_files {
-        if let Some(dd) = load_day(&dir, ds, service, &primary) {
+        if let Some(dd) = load_day(&dir, ds, service, &primary, &pricing) {
             if let Some(day) = dd.get("day") {
                 month_total.add_agg(&agg_from_json(day));
             }
@@ -321,7 +365,7 @@ pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     let mut month_by_model_map: BTreeMap<String, Agg> = BTreeMap::new();
     let mut month_daily_by_model: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     for ds in &day_files {
-        let recs = read_records(&dir, ds);
+        let recs = read_records(&dir, ds, &pricing);
         for g in sum_by_model(&recs, service, &primary) {
             let m = g["model"].as_str().unwrap_or("unknown").to_string();
             month_by_model_map.entry(m.clone()).or_default().add_agg(&agg_from_json(&g));
@@ -418,8 +462,9 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
+    let pricing = load_pricing(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let records: Vec<Value> = read_records(&dir, &today_str)
+    let records: Vec<Value> = read_records(&dir, &today_str, &pricing)
         .into_iter()
         .filter(|r| matches_service(r, service, &primary))
         .rev()
@@ -467,23 +512,27 @@ mod tests {
         )
         .unwrap();
 
-        let rec = json!({
-            "timestamp": format!("{date}T{hour}:12:00"),
-            "service": "svc1",
-            "model": "m1",
-            "input_tokens": 1000,
-            "cache_read_tokens": 400,
-            "cache_write_tokens": 100,
-            "output_tokens": 200,
-            "cache_hit_rate": 0.2857,
-            "cache_coverage": 0.2666,
-            "cost": 0.05
-        });
-        fs::write(
-            dir.join("cache_stats").join(format!("{date}.jsonl")),
-            format!("{}\n", serde_json::to_string(&rec).unwrap()),
-        )
-        .unwrap();
+        // 3 条同时段记录（聚合进当前小时），成本由读取时按定价重算，不受缺 cost 字段影响
+        let mut jsonl = String::new();
+        for (i, minute) in ["12", "13", "14"].iter().enumerate() {
+            jsonl.push_str(&format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "timestamp": format!("{date}T{hour}:{minute}:00"),
+                    "service": "svc1",
+                    "model": "m1",
+                    "input_tokens": 1000,
+                    "cache_read_tokens": 400,
+                    "cache_write_tokens": 100,
+                    "output_tokens": 200,
+                    "cache_hit_rate": 0.2857,
+                    "cache_coverage": 0.2666,
+                    "cost": 0.05 * (i as f64 + 1.0)
+                }))
+                .unwrap()
+            ));
+        }
+        fs::write(dir.join("cache_stats").join(format!("{date}.jsonl")), jsonl).unwrap();
         fs::write(
             dir.join("config.json"),
             json!({
@@ -501,14 +550,15 @@ mod tests {
         assert_eq!(out["todayHourly"].as_array().unwrap().len(), 24);
         assert_eq!(out["month"]["requests"], 3);
         assert_eq!(out["byModel"][0]["model"], "m1");
-        assert_eq!(out["byModel"][0]["requests"], 1);
-        assert_eq!(out["monthByModel"][0]["requests"], 1);
+        assert_eq!(out["byModel"][0]["requests"], 3);
+        assert_eq!(out["monthByModel"][0]["requests"], 3);
         assert!(out["monthDaily"].as_array().unwrap().len() >= 1);
-        assert_eq!(out["todayMinute"][0]["requests"], 1);
+        assert_eq!(out["todayMinute"].as_array().unwrap().len(), 3);
 
         let live = get_live(&dir.join("cache_stats"), "svc1", "svc1").unwrap();
-        assert_eq!(live["records"].as_array().unwrap().len(), 1);
+        assert_eq!(live["records"].as_array().unwrap().len(), 3);
 
         let _ = fs::remove_dir_all(&dir);
     }
+
 }

@@ -71,6 +71,7 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { background: transparent; }
+body.float-mode { background: transparent; }
 body {
   font-family: var(--font-ui);
   font-size: 13px;
@@ -296,6 +297,7 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 .st-row b { flex: 1; text-align: right; font-weight: 600; font-family: var(--font-mono); font-size: 11.5px; }
 .st-head { color: var(--muted-2); font-size: 10.5px; letter-spacing: 0.4px; text-transform: uppercase; padding-bottom: 7px; }
 .st-head span:first-child { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 11.5px; }
+.st-head span:not(:first-child) { flex: 1; text-align: right; }
 .st-row.hit b { color: var(--muted); }
 .st-row.hit b.good { color: var(--green); }
 .st-row.hit b.mid { color: var(--amber); }
@@ -358,19 +360,27 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   margin-top: 7px; font-size: 10.5px; color: var(--muted);
   display: flex; flex-direction: column; gap: 1px;
   font-family: var(--font-mono);
+  max-height: 120px; overflow-y: auto;
 }
+.live-feed::-webkit-scrollbar { width: 5px; }
+.live-feed::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+.live-feed::-webkit-scrollbar-track { background: transparent; }
 .lf-row {
   display: flex; gap: 8px; white-space: nowrap;
   padding: 1.5px 0; animation: feed-in 0.25s ease-out;
+  flex: none;
 }
 @keyframes feed-in {
   from { opacity: 0; transform: translateY(3px); }
   to { opacity: 1; transform: translateY(0); }
 }
 .lf-row .t { color: var(--muted-2); }
+.lf-row .svc { color: var(--green); font-size: 9.5px; }
 .lf-row .k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .lf-row .h { font-weight: 600; }
 .lf-row .h.good { color: var(--green); }
+.lf-row .h.mid { color: var(--amber); }
+.lf-row .h.bad { color: var(--muted-2); }
 
 /* ---------- 配置页 ---------- */
 .fc-h { font-weight: 700; font-size: 12.5px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: baseline; }
@@ -468,3 +478,38 @@ form input[type="checkbox"] { accent-color: var(--blue); width: 15px; height: 15
   background: #ffffff;
   border-color: #d9e0ec;
 }
+[data-theme="light"] .svc-tab.active {
+  background: var(--blue-dim);
+  border-color: var(--blue);
+  color: var(--blue);
+  font-weight: 600;
+}
+[data-theme="light"] .btn-primary {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+[data-theme="light"] .btn-primary:hover {
+  background: #4a86f0;
+  border-color: #4a86f0;
+}
+
+/* 图表 tooltip（LineChart 动态创建，挂在 body） */
+.chart-tip {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 9px;
+  font-size: 10.5px;
+  color: var(--text);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  min-width: 120px;
+}
+.chart-tip .tip-label { font-weight: 700; margin-bottom: 3px; }
+.chart-tip .tip-row { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); }
+.chart-tip .tip-row i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.chart-tip .tip-row span { margin-left: auto; padding-left: 12px; }
+.chart-tip .tip-total { border-top: 1px solid var(--hairline); margin-top: 4px; padding-top: 3px; display: flex; justify-content: space-between; font-weight: 600; }
