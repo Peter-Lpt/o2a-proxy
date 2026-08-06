@@ -15,6 +15,7 @@ Anthropic -> OpenAI 异步代理（asyncio + aiohttp 单进程版）
 
 import asyncio
 import json
+import os
 import sys
 import time
 
@@ -126,6 +127,16 @@ def upstream_timeout(*, total=None):
 # Claude 模式（Anthropic Messages -> OpenAI Chat Completions）
 # ---------------------------------------------------------------------------
 
+def _payload_summary(openai_request: dict, body: bytes) -> str:
+    """仅记录请求元信息，不输出 messages 内容，避免泄露对话。"""
+    msgs = openai_request.get("messages") or []
+    tools = openai_request.get("tools") or []
+    return (f"model={openai_request.get('model')} "
+            f"messages={len(msgs)} tools={len(tools)} "
+            f"has_thinking={'thinking' in openai_request} "
+            f"bytes={len(body)}")
+
+
 async def handle_claude_stream(request: web.Request, service: Service,
                                openai_request: dict, req_start: float):
     """流式请求：上游 SSE 逐行翻译为 Anthropic SSE 转发给客户端。"""
@@ -146,7 +157,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
             if up.status != 200:
                 err_body = await up.text()
                 logger.error(f"Upstream error {up.status}: {err_body}")
-                logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
+                logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
                 return error_response(up.status, f"upstream error: {err_body}")
 
             logger.info(f"[FWD] upstream connected status={up.status} "
@@ -506,7 +517,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"Upstream request failed: {err_body[:500]}")
-        logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
+        logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
         if resp is None:
             # 尚未发出响应头，可以正常返回 502
             return error_response(502, f"upstream error: {err_body[:300]}")
@@ -538,13 +549,13 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
             if up.status != 200:
                 err_body = await up.text()
                 logger.error(f"Upstream error {up.status}: {err_body}")
-                logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
+                logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
                 return error_response(up.status, f"upstream error: {err_body}")
             raw = await up.json(content_type=None)
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"Upstream request failed: {err_body[:500]}")
-        logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
+        logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
         return error_response(502, f"upstream error: {err_body[:300]}")
 
     logger.info(f"[NONSTREAM] completed elapsed={time.time()-req_start:.2f}s "
@@ -933,6 +944,15 @@ async def handle_get(request: web.Request, service: Service):
 # 服务启动
 # ---------------------------------------------------------------------------
 
+def _parent_watchdog(parent_pid: int) -> None:
+    """父进程退出后自动关闭代理，避免成为无法被管理的孤儿进程。"""
+    while True:
+        time.sleep(2.0)
+        # 直接父进程已退出（被重新挂到 PID 1，或 PID 已不存在）
+        if os.getppid() != parent_pid:
+            logger.info("检测到父进程已退出，代理自动关闭")
+            os._exit(0)
+
 async def serve(service_filter: str = None) -> int:
     services = load_config()
     enabled = [s for s in services if s.mode in ("claude", "codex", "direct") and s.api_key]
@@ -967,6 +987,9 @@ async def serve(service_filter: str = None) -> int:
                         f"target={svc.target_url} model={svc.model}")
 
         logger.info("asyncio 代理就绪，Ctrl+C 停止")
+        # 守护：父进程（桌面应用）退出后自动关闭，防止孤儿进程占用端口
+        parent_pid = os.getppid()
+        watchdog = asyncio.create_task(asyncio.to_thread(_parent_watchdog, parent_pid))
         while True:
             await asyncio.sleep(3600)
     except KeyboardInterrupt:

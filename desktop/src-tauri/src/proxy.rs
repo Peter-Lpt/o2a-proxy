@@ -1,7 +1,9 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use crate::AppState;
@@ -28,6 +30,30 @@ fn find_service<'a>(services: &'a [serde_json::Value], name: &str) -> Option<&'a
 
 fn is_alive(child: &mut std::process::Child) -> bool {
     child.try_wait().ok().flatten().is_none()
+}
+
+/// 把子进程一路输出同时写到日志文件（供面板查看）和当前终端（dev/前台运行）。
+fn tee_stream<R: Read + Send + 'static>(
+    mut reader: R,
+    file: Arc<Mutex<File>>,
+    mut term: Box<dyn Write + Send>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            let _ = term.write_all(&buf[..n]);
+            let _ = term.flush();
+            if let Ok(mut f) = file.lock() {
+                let _ = f.write_all(&buf[..n]);
+                let _ = f.flush();
+            }
+        }
+    });
 }
 
 fn log_path(state: &AppState, name: &str) -> PathBuf {
@@ -85,15 +111,16 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
         children.remove(name);
     }
     let log = log_path(state, name);
-    let file = File::create(&log).map_err(|e| format!("无法创建日志文件: {e}"))?;
-    let err_file = file.try_clone().map_err(|e| e.to_string())?;
+    let file = Arc::new(Mutex::new(
+        File::create(&log).map_err(|e| format!("无法创建日志文件: {e}"))?,
+    ));
     let mut cmd = Command::new(&state.python);
     cmd.arg("proxy_async.py")
         .arg("--service")
         .arg(name)
         .current_dir(&state.root)
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(err_file));
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     // 配置未显式指定统计目录时，把默认目录传给代理，保证两端路径一致
     let has_stats_dir = crate::read_config_value(state)
         .ok()
@@ -106,7 +133,12 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     if !has_stats_dir {
         cmd.env("CACHE_STATS_DIR", &state.default_stats_dir);
     }
-    let child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
+    // 代理日志同时输出到当前终端（pnpm tauri dev / 前台运行）和日志文件（面板查看）
+    if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
+        tee_stream(out, Arc::clone(&file), Box::new(std::io::stdout()));
+        tee_stream(err, Arc::clone(&file), Box::new(std::io::stderr()));
+    }
     children.insert(name.to_string(), child);
     // 短暂等待，确认进程没有因端口占用/缺 key 等立刻退出
     std::thread::sleep(Duration::from_millis(1200));
