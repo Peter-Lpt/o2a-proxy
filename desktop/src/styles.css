@@ -79,7 +79,8 @@ body {
   font-size: 13px;
   line-height: 1.45;
   color: var(--text);
-  background: var(--bg);
+  /* 背景透明，让 .popover 的圆角透出桌面；否则实色背景会填满四角显得直角 */
+  background: transparent;
   user-select: none;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;

@@ -99,6 +99,11 @@ def main() -> None:
         format="ICO",
         sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
     )
+
+    # 菜单栏（托盘）专属图标：与应用图标同款设计，尺寸适配菜单栏，避免渲染过小失真
+    save_scaled(os.path.join(OUT, "tray-icon.png"), 22)
+    save_scaled(os.path.join(OUT, "tray-icon@2x.png"), 44)
+
     print(f"icons regenerated in {OUT}")
 
 

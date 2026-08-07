@@ -680,7 +680,9 @@ pub fn run() {
             let menu = Menu::with_items(app, &[&panel_i, &float_i, &proxy_menu, &open_cfg_i, &quit_i])?;
 
             TrayIconBuilder::with_id("main")
-                .icon(app.default_window_icon().cloned().ok_or("no default icon")?)
+                // 用与应用图标同款的托盘图标（22x22/@2x），避免默认图标在菜单栏渲染过小失真
+                .icon(tauri::include_image!("icons/tray-icon.png"))
+                .icon_as_template(false)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
