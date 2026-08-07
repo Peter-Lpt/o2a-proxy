@@ -1,5 +1,5 @@
 <template>
-  <canvas ref="el"></canvas>
+  <canvas ref="el" :style="{ height: (height ?? 40) + 'px' }"></canvas>
 </template>
 
 <script setup lang="ts">
@@ -73,3 +73,10 @@ onUnmounted(() => {
 });
 watch(() => props.points, draw, { deep: true });
 </script>
+
+<style scoped>
+canvas {
+  display: block;
+  width: 100%; /* 铺满容器，随悬浮窗宽度自适应 */
+}
+</style>

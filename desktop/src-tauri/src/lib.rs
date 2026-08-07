@@ -663,6 +663,9 @@ pub fn run() {
             .always_on_top(true)
             .skip_taskbar(true)
             .visible(false)
+            // macOS 默认 acceptsFirstMouse=false：首次点击只会激活窗口而不会传递，
+            // 导致必须先点一次聚焦才能拖动。设为 true 后首次点击即可直接拖动。
+            .accept_first_mouse(true)
             .build()?;
             float_win.on_window_event(hide_on_close(app.handle().clone(), "float".to_string()));
 
