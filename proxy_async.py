@@ -30,6 +30,7 @@ from proxy import (
     _chat_to_responses_json,
     _convert_usage,
     _responses_to_chat,
+    _responses_url,
     _strip_cache_control,
     convert_request,
     detect_client,
@@ -633,6 +634,95 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
 
 
 # ---------------------------------------------------------------------------
+# Chat / Responses 整包透传（api=openai-completions 或 api=openai-responses+upstream=responses）
+# ---------------------------------------------------------------------------
+
+async def handle_passthrough(request: web.Request, service: Service,
+                             body: bytes, stream: bool, req_start: float,
+                             target: str = None, responses_usage: bool = False):
+    """整包透传：不重建请求体、不补字段，仅缺失 model 时注入服务配置。
+    响应原样返回（流式逐行、非流式整包），仅顺带提取 usage 记统计。
+    responses_usage=True 时从 response.completed 事件提取 usage（Responses 格式）。"""
+    session = request.app["session"]
+    if target is None:
+        target = build_target(service, request)
+    try:
+        payload = json.loads(body)
+        if not payload.get("model") and service.model:
+            payload["model"] = service.model
+            body = json.dumps(payload).encode("utf-8")
+        model = payload.get("model") or service.model
+    except json.JSONDecodeError:
+        return openai_error_response(400, "invalid json")
+    logger.info(f"[FWD][passthrough] stream={stream} model={model} "
+                f"url={target} payload_bytes={len(body)}")
+    try:
+        async with session.post(
+            target, data=body,
+            timeout=upstream_timeout(),
+            **upstream_kwargs(service),
+        ) as up:
+            if up.status != 200:
+                err = await up.text()
+                return openai_error_response(up.status, f"upstream error: {err[:300]}")
+            if not stream:
+                raw = await up.read()
+                try:
+                    data = json.loads(raw)
+                    converted = _convert_usage(data.get("usage") or {})
+                    if converted.get("input_tokens"):
+                        await record_stats(service, data.get("model") or model, converted)
+                except Exception:
+                    pass
+                logger.info(f"[passthrough] completed bytes={len(raw)}")
+                return web.Response(body=raw, status=200, content_type="application/json")
+            resp = web.StreamResponse(status=200, headers={
+                "Content-Type": "text/event-stream; charset=utf-8",
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            })
+            await resp.prepare(request)
+            latest_usage = None
+            try:
+                while True:
+                    line = await up.content.readline()
+                    if not line:
+                        break
+                    stripped = line.strip()
+                    if stripped.startswith(b"data:"):
+                        piece = stripped[5:].strip()
+                        if piece and piece != b"[DONE]":
+                            try:
+                                chunk = json.loads(piece.decode("utf-8", errors="replace"))
+                                if responses_usage:
+                                    # Responses：usage 在 response.completed 事件中
+                                    if chunk.get("type") == "response.completed":
+                                        u = (chunk.get("response") or {}).get("usage") or {}
+                                        if u:
+                                            latest_usage = _convert_usage(u)
+                                else:
+                                    usage = chunk.get("usage")
+                                    if usage:
+                                        latest_usage = _convert_usage(usage)
+                            except Exception:
+                                pass
+                    await stream_write(resp, line)
+            except ClientGone:
+                logger.info("Client disconnected (passthrough)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"[passthrough] stream error: {e}", exc_info=True)
+            finally:
+                await record_stats(service, model, latest_usage)
+            return resp
+    except aiohttp.ClientError as e:
+        err_body = str(e)
+        logger.error(f"[passthrough] upstream failed: {err_body[:500]}")
+        return openai_error_response(502, f"upstream error: {err_body[:300]}")
+
+
+# ---------------------------------------------------------------------------
 # Codex 模式（OpenAI Responses -> Chat Completions 透传）
 # ---------------------------------------------------------------------------
 
@@ -921,7 +1011,7 @@ async def handle_request(request: web.Request):
             return openai_error_response(400, "invalid json")
         return error_response(400, "invalid json")
 
-    # 确定分派模式（client=auto 时按路径/请求体识别入口协议）
+    # 确定分派模式（api 显式时直接采用推导，不再按请求体识别）
     mode = resolve_mode(service, request, payload)
     if mode is None:
         return openai_error_response(
@@ -929,13 +1019,23 @@ async def handle_request(request: web.Request):
             "该账号没有 OpenAI 端点，无法服务 OpenAI 客户端（Codex）。"
             "请为该账号配置 openai_url，或改用 Claude Code / Anthropic 客户端。",
         )
-    if service.client == "auto":
+    if service.client == "auto" and not service.api:
         service = service.with_mode(mode)
 
     if mode == "codex":
         stream = bool(payload.get("stream", False))
-        logger.info(f"[REQ][codex] model={service.model} stream={stream} "
-                    f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
+        logger.info(f"[REQ][codex] model={service.model} stream={stream} api={service.api or 'auto'} "
+                    f"upstream={service.upstream_api} bytes={len(body)} "
+                    f"elapsed={time.time()-req_start:.3f}s")
+        # api=openai-completions：Chat 整包透传（直连上游，零转换）
+        if service.api == "openai-completions":
+            return await handle_passthrough(request, service, body, stream, req_start)
+        # api=openai-responses + upstream=responses：Responses 整包透传（如 DeepSeek 官方）
+        if (service.api == "openai-responses"
+                and service.upstream_api == "openai-responses"):
+            target = _responses_url(service.account.openai_url)
+            return await handle_passthrough(request, service, body, stream, req_start,
+                                            target=target, responses_usage=True)
         chat = _responses_to_chat(payload, service)
         chat_body = json.dumps(chat).encode("utf-8")
         if stream:

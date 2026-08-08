@@ -11,7 +11,7 @@ Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发�
 - **多账号管理**：账号（API Key + OpenAI/Anthropic 端点）与服务分离，多服务可复用同一账号，账号级统计聚合
 - **费用与缓存统计**：JSONL 原始记录 + 小时聚合，命中率 / 覆盖率 / 费用估算
 - **桌面客户端**（`desktop/`）：托盘图标 + 右键菜单、悬浮看板、统计图表、配置管理、模型列表联想、深/浅主题，跨平台（Windows / macOS / Linux）
-- **兼容旧版**：`proxy.py`（线程版引擎）仍可运行
+- **显式协议声明**：服务配置 `api` 字段声明入口协议（chat / responses / anthropic），消除自动识别误判
 
 ## 架构
 
@@ -24,7 +24,7 @@ flowchart LR
     subgraph Proxy["o2a-proxy（本机）"]
         DESK["desktop/ 桌面客户端<br/>Tauri 2 + Vue 3"]
         ASYNC["proxy_async.py<br/>asyncio + aiohttp 引擎"]
-        LEGACY["proxy.py<br/>旧版线程引擎"]
+        CORE["proxy.py<br/>核心库（转换 / 配置 / 统计）"]
         STATS[("cache_stats/<br/>JSONL + 小时聚合")]
     end
     subgraph Upstream["上游模型服务"]
@@ -32,9 +32,8 @@ flowchart LR
     end
     CC -- "Anthropic Messages" --> ASYNC
     CX -- "OpenAI Responses" --> ASYNC
-    CC -. 兼容 .-> LEGACY
+    ASYNC -- "协议转换 / 配置 / 统计" --> CORE
     ASYNC -- "Chat Completions" --> DS
-    LEGACY -- "Chat Completions" --> DS
     DESK -- "启停 / 统计 / 配置" --> ASYNC
     DESK -- "读取统计文件" --> STATS
     ASYNC -- "写入统计" --> STATS
@@ -44,11 +43,12 @@ flowchart LR
 
 | 组件 | 说明 |
 |---|---|
-| `proxy_async.py` | **推荐引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消 |
-| `proxy.py` | 旧版线程引擎（`ThreadingHTTPServer` + urllib），保留兼容，功能与新引擎一致 |
+| `proxy_async.py` | **唯一引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消 |
+| `proxy.py` | **核心库**：协议转换、配置加载、缓存统计与定价等纯函数（线程版引擎已合并删除，保留文件名供桌面端探测与导入） |
 | `desktop/` | Tauri 2 + Vue 3 桌面客户端：托盘启停、悬浮看板、统计面板、配置编辑器、模型列表联想 |
 | `cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
-| `pricing.json` | 模型定价数据，用于费用估算 |
+| `pricing.json` | 模型定价数据，用于费用估算（支持按账号覆盖，见下文） |
+| `auth.json` | API Key 独立存放（对齐 pi 的 auth.json 模式，可选） |
 | `cache-stats.py` | 命令行统计查看工具 |
 
 ## 安装
@@ -58,7 +58,8 @@ flowchart LR
 ```bash
 pip install -r requirements.txt
 cp config.example.json config.json
-# 编辑 config.json 填入真实 API Key
+cp auth.example.json auth.json   # API Key 放这里，config.json 不存 Key
+# 编辑 auth.json 填入各账号 API Key；编辑 config.json 填账号端点与服务
 python proxy_async.py
 ```
 
@@ -114,7 +115,6 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
     {
       "id": "acc-1",
       "name": "DashScope",
-      "api_key": "sk-your-api-key",
       "openai_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
       "anthropic_url": ""
     }
@@ -132,6 +132,8 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 }
 ```
 
+> **Key 默认不写入 `config.json`**：账号 API Key 放在 `auth.json`（见下文）。`accounts[].api_key` 仅作为旧配置兼容保留，新配置不写。
+
 | 字段 | 说明 |
 |---|---|
 | `auth_token` | 认证令牌（可选，建议生产启用） |
@@ -140,12 +142,14 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `cache_stats_retention_days` | 统计保留天数 |
 | `accounts[].id` | 账号唯一 id（服务引用它，自动生成不可改） |
 | `accounts[].name` | 账号显示名 |
-| `accounts[].api_key` | 账号 API Key（同 Key 可用两端点） |
-| `accounts[].openai_url` | OpenAI 兼容端点（完整 chat/completions 地址或 base，可留空） |
+| `accounts[].api_key` | 账号 API Key（**旧配置兼容字段，新配置默认不写**，改放 `auth.json`） |
+| `accounts[].openai_url` | OpenAI 兼容端点（**base 或完整 chat/completions 地址均可**：`https://api.deepseek.com`、`…/v1`、`…/chat/completions` 都会归一化为完整 chat/completions 地址） |
 | `accounts[].anthropic_url` | Anthropic 兼容端点（如 `https://api.anthropic.com/v1/messages`，可留空） |
 | `services[].comment` | 服务备注（客户端里作为服务名） |
 | `services[].account` | 引用的账号 id |
-| `services[].client` | 客户端类型：`anthropic`（Claude Code）/ `openai`（Codex）/ `auto`（按请求自动识别，默认） |
+| `services[].api` | **入口协议（推荐显式声明）**：`openai-completions`（pi/常规 Chat）/ `openai-responses`（Codex）/ `anthropic-messages`（Claude Code）；未声明时回退 `client`/自动识别（旧配置兼容）。账号级 `accounts[].api` 可作为该账号所有服务的默认值 |
+| `services[].upstream_api` | **上游原生协议**（配合 `api=openai-responses`）：`openai-completions`（默认，上游只支持 Chat → 转换）/ `openai-responses`（上游原生支持 Responses，如 DeepSeek 官方 → 整包透传零转换） |
+| `services[].client` | 客户端类型（旧字段，`api` 未声明时生效）：`anthropic`（Claude Code）/ `openai`（Codex）/ `auto`（按请求自动识别，默认） |
 | `services[].model` | 主模型 |
 | `services[].sub_model` | 子模型（Claude Code 子 agent / Task 工具使用） |
 | `services[].listen_address` | 监听端口，每服务独立 |
@@ -153,6 +157,102 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `services[].max_tokens` | 最大输出 token（缺省 4096） |
 
 > **兼容**：旧格式（`services[].openai_base_url` / `openai_api_key` 内嵌，`mode` 字段）读取时自动迁移为账号结构，无需手动改配置。
+
+### 入口协议（api 字段，推荐显式声明）
+
+不同客户端使用不同协议：pi 常规用 `openai-completions`（Chat）、Codex 新 CLI 用 `openai-responses`、Claude Code 用 `anthropic-messages`。在服务上显式声明 `api` 后不再做请求体猜测（自动识别在部分客户端下不可靠）：
+
+```json
+{
+  "services": [
+    { "comment": "pi 直连", "account": "acc-3", "api": "openai-completions", "model": "deepseek-v4-flash", "listen_address": 11012 },
+    { "comment": "Claude Code", "account": "acc-2", "api": "anthropic-messages", "model": "claude-4", "listen_address": 11013 }
+  ]
+}
+```
+
+| api 值 | 入口 | 行为 |
+|---|---|---|
+| `openai-completions` | Chat Completions | **整包透传**（请求/响应零转换，直连上游，仅缺 model 时注入服务配置） |
+| `openai-responses` + `upstream_api: openai-responses` | Responses | **整包透传**（上游原生支持 Responses，如 DeepSeek 官方 `/v1/responses`，零转换） |
+| `openai-responses`（默认 upstream=chat） | Responses | 转 Chat 发送上游，响应转回 Responses 事件 |
+| `anthropic-messages` | Anthropic Messages | 账号有 anthropic 端点 → 透传（direct）；只有 openai 端点 → 转换发送（claude） |
+| 未声明 | — | 回退旧 `client` 字段；无 client 时按请求自动识别（兼容旧配置） |
+
+> **模型列表拿不到协议**：`/models` 接口只返回模型 id，不含协议类型（同一中转账号下三种协议的模型可能并存），所以协议必须在配置中显式声明——这正是 pi 中 `provider.api` 的做法。桌面客户端「服务配置」里也已提供 `api` 下拉。
+
+### Codex 接入（Responses 协议）
+
+Codex CLI 通过 **Responses API** 与模型交互（`wire_api = "responses"`），且 **DeepSeek 官方原生支持 Responses**（`base_url = https://api.deepseek.com`）。两种接入方式：
+
+**A. Codex → DeepSeek 官方（零转换透传，推荐）**：上游原生支持 Responses，配 `upstream_api: "openai-responses"` 直接透传：
+
+```json
+{
+  "services": [
+    { "comment": "codex-ds", "account": "acc-3", "api": "openai-responses", "upstream_api": "openai-responses", "model": "deepseek-v4-flash", "listen_address": 11013 }
+  ]
+}
+```
+
+Codex 侧 `~/.codex/config.toml`（参考 DeepSeek 官方接入文档，仅把 base_url 指向 o2a）：
+
+```toml
+model = "deepseek-v4-flash"
+model_provider = "o2a-ds"
+[model_providers.o2a-ds]
+name = "o2a-ds"
+base_url = "http://127.0.0.1:11013"
+wire_api = "responses"
+experimental_bearer_token = "qs-cc"
+```
+
+**B. Codex → 中转（仅支持 Chat，如 opencode.ai）**：默认 `upstream_api` 即可，o2a 自动做 Responses→Chat→Responses 转换：
+
+```json
+{ "comment": "codex-oc", "account": "acc-2", "api": "openai-responses", "model": "deepseek-v4-flash-free", "listen_address": 11014 }
+```
+
+> 同一账号可开多个服务（不同端口）分别服务不同客户端协议：pi 用 `openai-completions`（透传）、Codex 用 `openai-responses`（透传或转换）、Claude Code 用 `anthropic-messages`。
+
+> **兼容**：旧格式（`services[].openai_base_url` / `openai_api_key` 内嵌，`mode` 字段）读取时自动迁移为账号结构，无需手动改配置。
+
+### 密钥独立存放（auth.json，推荐）
+
+对齐 pi 的 `auth.json` 模式：敏感 API Key 默认不写入 `config.json`，统一放 `auth.json`，键可为账号 `id` 或 `name`（值支持 `{type, key}` 或纯字符串），已加入 `.gitignore`：
+
+```json
+{
+  "acc-1": { "type": "api_key", "key": "sk-your-api-key" },
+  "oc-zen": { "type": "api_key", "key": "public" }
+}
+```
+
+**加载优先级（向后兼容）：** `auth.json`（按 id → name） > `config.json` 的 `accounts[].api_key` > 旧 `services[].openai_api_key` 内嵌。`auth.json` 不存在或账号缺失时无缝回退旧配置，零破坏迁移。桌面客户端保存配置时也会自动把账号 Key 分流写入 `auth.json`，`config.json` 保持不含 Key。
+
+### 模型价格按账号配置（pricing.json 的 accounts 段）
+
+不同账号同一模型价格可能不同（如免费中转 vs 官方付费）。在 `pricing.json` 顶层加 `accounts` 段即可覆盖，键可为账号 `id` 或 `name`，结构与全局模型一致（`tiers[]`，CNY/百万 token）：
+
+```json
+{
+  "accounts": {
+    "acc-2": {
+      "models": {
+        "deepseek-v4-flash-free": { "tiers": [{ "input": 0, "output": 0 }] }
+      }
+    },
+    "acc-3": {
+      "models": {
+        "deepseek-v4-flash": { "tiers": [{ "input": 1, "output": 2, "cache_hit": 0.02, "cache_miss": 1 }] }
+      }
+    }
+  },
+  "deepseek": { "models": { "deepseek-v4-flash": { "tiers": [{ "input": 1, "output": 2 }] } } }
+}
+```
+
+**查找优先级：** `pricing.json["accounts"][账号 id/name][模型]` > 全局按模型名（provider 段）。未配置时价格为 0，与旧行为一致。计费同时生效于代理引擎与桌面统计面板（历史记录读取时按当前定价重算）。
 
 ### 转换矩阵（client × 账号端点）
 
@@ -185,8 +285,8 @@ python cache-stats.py day
 
 ```text
 o2a-proxy/
-├── proxy_async.py          # asyncio 引擎（推荐）
-├── proxy.py                # 旧版线程引擎（兼容）
+├── proxy_async.py          # asyncio 引擎（唯一引擎）
+├── proxy.py                # 核心库（转换/配置/统计纯函数）
 ├── config.example.json     # 配置模板
 ├── pricing.json            # 模型定价
 ├── requirements.txt        # Python 依赖
@@ -201,9 +301,12 @@ o2a-proxy/
 测试：
 
 ```bash
-cd desktop/src-tauri && cargo test   # Rust 单测（统计聚合 / 进程管理 / 模型列表）
+cd desktop/src-tauri && cargo test   # Rust 单测（统计聚合 / 进程管理 / 模型列表 / key 分流）
 python test_cache_stats.py           # 统计逻辑测试
+python test_codex_direct.py          # 端到端：Chat 整包透传 / Responses 透传 / Responses→Chat 转换（mock 上游，两引擎）
 ```
+
+> `test_codex_direct.py` 复用真实 `config.json` 中 ds 服务的账号配置，把上游指向本地 mock 服务器，不产生真实调用。
 
 ## 常见问题
 

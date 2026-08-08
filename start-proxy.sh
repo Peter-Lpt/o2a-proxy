@@ -162,4 +162,4 @@ fi
 echo "启动代理..."
 echo "按 Ctrl+C 停止代理"
 echo ""
-exec python3 "$PROXY_DIR/proxy.py"
+exec python3 "$PROXY_DIR/proxy_async.py"

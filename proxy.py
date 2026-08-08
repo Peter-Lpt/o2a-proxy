@@ -1,25 +1,17 @@
 #!/usr/bin/env python3
-"""
-Anthropic -> OpenAI 协议转换代理（完整流式支持）
-将 Claude Code 发出的 Anthropic Messages API 请求转换为 OpenAI 格式，
-转发给 OpenAI 兼容 API，再将响应转回 Anthropic 格式。
+"""o2a-proxy 核心库（协议转换 / 配置加载 / 缓存统计 / 定价）。
+
+线程版 HTTP 引擎已合并删除，代理引擎统一为 proxy_async.py（asyncio + aiohttp）。
+本文件保留文件名供桌面端路径探测与测试引用，内部只提供纯函数与数据模型。
 """
 
 import json
 import logging
 import os
-import select
-import socket
-import sys
 import time
-import ssl
 import threading
 import uuid
 from datetime import datetime, timedelta
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
-from urllib.request import Request, urlopen
-from urllib.error import URLError
 
 # fcntl is Unix-only, provide fallback for Windows
 try:
@@ -53,6 +45,19 @@ logging.basicConfig(
 logger = logging.getLogger("proxy")
 
 
+def _normalize_openai_url(url):
+    """OpenAI 端点归一化为完整 chat/completions 地址（o2a 出口统一走 Chat）。
+
+    - "https://api.deepseek.com"        -> "https://api.deepseek.com/chat/completions"
+    - "https://.../compatible-mode/v1"  -> "https://.../compatible-mode/v1/chat/completions"
+    - "https://.../v1/chat/completions" -> 原样（已是完整地址）
+    """
+    url = (url or "").strip().rstrip("/")
+    if not url or url.endswith("/chat/completions"):
+        return url
+    return url + "/chat/completions"
+
+
 class Account:
     """账号：凭证 + 端点。一个 key 最多两个端点（openai / anthropic），均可选填。
 
@@ -61,14 +66,18 @@ class Account:
     - anthropic：只有 anthropic 端点（Claude Code 透传）
     - both：双协议（中转站同 key 两端点）
     - invalid：两端点皆空
+
+    api：该账号默认入口协议（openai-completions / openai-responses / anthropic-messages），
+    可被 services[].api 覆盖；空表示未声明（回退 client/auto 识别）。
     """
 
-    def __init__(self, id, name, api_key, openai_url="", anthropic_url=""):
+    def __init__(self, id, name, api_key, openai_url="", anthropic_url="", api=""):
         self.id = id
         self.name = name
         self.api_key = api_key or ""
-        self.openai_url = (openai_url or "").strip()
+        self.openai_url = _normalize_openai_url(openai_url)
         self.anthropic_url = (anthropic_url or "").strip()
+        self.api = (api or "").strip()
 
     @property
     def kind(self):
@@ -98,16 +107,26 @@ class Account:
 
 
 class Service:
-    """单个服务（接入点）：独立端口 + 引用账号 + 客户端类型。
+    """单个服务（接入点）：独立端口 + 引用账号 + 客户端类型 + 入口协议。
 
-    client: anthropic(Claude Code) | openai(Codex) | auto(按请求识别)
-    mode 由 client × 账号端点自动推导（兼容旧字段语义）：
+    api（入口协议，显式声明，对齐 pi 的 provider.api）：
+    - "anthropic-messages"：Anthropic Messages（Claude Code）
+    - "openai-completions"：OpenAI Chat Completions（pi 常规 / OpenAI 兼容客户端）
+    - "openai-responses"：OpenAI Responses（Codex 新 CLI）
+    - ""：未声明 → 回退旧 client / auto 识别（旧配置兼容）
+
+    upstream_api（上游原生协议，配合 api=openai-responses 使用）：
+    - "openai-completions"（默认）：上游只支持 Chat → Responses 入转 Chat 发，响应转回 Responses
+    - "openai-responses"：上游原生支持 Responses（如 DeepSeek 官方）→ Responses 整包透传（零转换）
+
+    client: 旧字段，api 未声明时的兼容入口（anthropic/openai/auto）。
+    mode 由 api × 账号端点推导：
     - claude：Anthropic 入口 → 转换发送 OpenAI 端点
-    - codex：OpenAI 入口 → 发送 OpenAI 端点
+    - codex：OpenAI 入口（chat 透传 / responses 透传或转换）→ 发送 OpenAI 端点
     - direct：Anthropic 入口 → 透传发送 Anthropic 端点
     """
 
-    def __init__(self, name, account, client, host, port, model, sub_model, max_tokens, proxy):
+    def __init__(self, name, account, client, host, port, model, sub_model, max_tokens, proxy, api="", upstream_api=""):
         self.name = name
         self.account = account
         self.client = client
@@ -117,6 +136,8 @@ class Service:
         self.sub_model = sub_model
         self.max_tokens = max_tokens
         self.proxy = proxy or ""
+        self.api = (api or "").strip()
+        self.upstream_api = (upstream_api or "openai-completions").strip()
         self._mode_override = None  # auto 服务每次请求识别后临时指定
 
     @property
@@ -129,9 +150,20 @@ class Service:
 
     @property
     def mode(self):
-        """推导出的分派模式（claude / codex / direct / auto）。"""
+        """推导出的分派模式（claude / codex / direct / auto）。
+
+        api 显式声明时按声明推导（不再做请求体猜测）；
+        api 未声明时回退旧 client 推导，auto 则每次请求识别。
+        """
         if self._mode_override:
             return self._mode_override
+        if self.api:
+            if self.api == "anthropic-messages":
+                return "direct" if self.kind in ("anthropic", "both") else "claude"
+            if self.api in ("openai-completions", "openai-responses"):
+                return "codex"
+            logger.warning(f"[config] 未知 api 协议 '{self.api}'（服务 {self.name}），回退 auto 识别")
+            return "auto"
         c = self.client
         if c == "openai":
             return "codex"
@@ -150,19 +182,75 @@ class Service:
     def with_mode(self, mode):
         """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
         s = Service(self.name, self.account, self.client, self.host, self.port,
-                    self.model, self.sub_model, self.max_tokens, self.proxy)
+                    self.model, self.sub_model, self.max_tokens, self.proxy, self.api,
+                    self.upstream_api)
         s._mode_override = mode
         return s
+
+
+_OPENAI_API_VALUES = ("", "anthropic-messages", "openai-completions", "openai-responses")
+_UPSTREAM_API_VALUES = ("openai-completions", "openai-responses")
+
+
+def _responses_url(chat_url):
+    """从归一化的 chat/completions 地址推导同基座的 responses 端点。
+
+    - https://api.deepseek.com/chat/completions      -> https://api.deepseek.com/v1/responses
+    - https://x.com/v1/chat/completions              -> https://x.com/v1/responses
+    """
+    base = chat_url[: -len("/chat/completions")] if chat_url.endswith("/chat/completions") else chat_url.rstrip("/")
+    if base.endswith("/v1"):
+        return base + "/responses"
+    return base + "/v1/responses"
+
+
+def load_auth():
+    """从 auth.json 读取账号密钥（对齐 pi 的 auth.json 模式，敏感凭证独立存放）。
+
+    格式（键可为账号 id 或 name，也兼容简单字符串值）：
+    {
+      "acc-1": {"type": "api_key", "key": "sk-xxx"},
+      "我的账号": "sk-yyy"
+    }
+
+    文件不存在或解析失败时返回空 dict（回退 config.json 内嵌 api_key）。
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for k, v in (data or {}).items():
+        if k.startswith("_"):
+            continue  # 跳过 _readme 等元键
+        if isinstance(v, dict):
+            out[k] = v.get("key", "")
+        elif isinstance(v, str):
+            out[k] = v
+    return out
+
+
+def _resolve_api_key(auth, acc_id, acc_name, embedded):
+    """解析账号 api_key：auth.json 优先（按 id，再按 name），回退配置内嵌（旧配置兼容）。"""
+    if acc_id and acc_id in auth and auth[acc_id]:
+        return auth[acc_id]
+    if acc_name and acc_name in auth and auth[acc_name]:
+        return auth[acc_name]
+    return embedded
 
 
 def load_config():
     """从 config.json 读取账号与服务列表；文件不存在时回退到环境变量（单服务）。
 
-    支持两种结构：
+    支持三种结构（向后兼容）：
     - 新结构：accounts[]（账号）+ services[].account（引用 id）+ client
     - 旧结构：services[] 内嵌 openai_base_url/openai_api_key —— 自动迁移为账号
+    - 密钥分离：auth.json 按账号 id/name 提供 api_key，优先于 config.json 内嵌
     """
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    auth = load_auth()
     services = []
     if os.path.exists(config_path):
         try:
@@ -190,9 +278,10 @@ def load_config():
                 acc = Account(
                     id=a.get("id") or f"acc-{i + 1}",
                     name=a.get("name") or a.get("id") or f"账号{i + 1}",
-                    api_key=a.get("api_key", ""),
+                    api_key=_resolve_api_key(auth, a.get("id"), a.get("name"), a.get("api_key", "")),
                     openai_url=a.get("openai_url", ""),
                     anthropic_url=a.get("anthropic_url", ""),
+                    api=a.get("api", ""),
                 )
                 accounts[acc.id] = acc
 
@@ -208,11 +297,22 @@ def load_config():
                     acc = Account(
                         id=f"acc-{i + 1}",
                         name=svc.get("comment") or f"账号{i + 1}",
-                        api_key=svc.get("openai_api_key", ""),
+                        api_key=_resolve_api_key(auth, f"acc-{i + 1}", svc.get("comment"),
+                                                 svc.get("openai_api_key", "")),
                         openai_url=svc.get("openai_base_url", ""),
                         anthropic_url=svc.get("anthropic_base_url", ""),
+                        api=svc.get("api", ""),
                     )
                     accounts[acc.id] = acc
+                # 入口协议：服务级 api 优先，回退账号级 api
+                api = svc.get("api") or acc.api or ""
+                if api not in _OPENAI_API_VALUES:
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 api '{api}' 不是已知协议，回退 auto")
+                    api = ""
+                upstream_api = svc.get("upstream_api", "openai-completions")
+                if upstream_api not in _UPSTREAM_API_VALUES:
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 upstream_api '{upstream_api}' 非法，回退 openai-completions")
+                    upstream_api = "openai-completions"
                 client = svc.get("client") or mode_to_client.get(mode, "auto")
                 if client not in ("anthropic", "openai", "auto"):
                     client = "auto"
@@ -226,6 +326,8 @@ def load_config():
                     sub_model=svc.get("sub_model", svc.get("model", "qwen-plus")),
                     max_tokens=int(svc.get("max_tokens", 1000000 if svc.get("context_1m") else 4096)),
                     proxy=os.environ.get("HTTP_PROXY", ""),
+                    api=api,
+                    upstream_api=upstream_api,
                 ))
     if not services and API_KEY:
         # 回退：环境变量配置（单服务）
@@ -239,10 +341,6 @@ def load_config():
             proxy=PROXY,
         ))
     return services
-
-
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
 
 
 class CacheStats:
@@ -304,20 +402,46 @@ class CacheStats:
             self._pricing = {}
         return self._pricing
 
-    def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens):
-        """计算单次请求的费用（CNY）。"""
+    def _account_pricing(self, account, model):
+        """在 pricing.json["accounts"] 中按账号 id/name 匹配模型价格，未命中返回 None。
+
+        键可为账号 id 或 name（auth.json 同样支持两种键）。"""
+        accounts_pricing = self._load_pricing().get("accounts")
+        if not isinstance(accounts_pricing, dict) or not account:
+            return None
+        direct = accounts_pricing.get(account)
+        if isinstance(direct, dict):
+            m = (direct.get("models") or {}).get(model)
+            if m is not None:
+                return m
+        # 通过 config.json 的账号列表把 id 映射到 name 再匹配
+        for svc in load_config():
+            acc = svc.account
+            if acc.id == account and acc.name in accounts_pricing:
+                m = (accounts_pricing[acc.name].get("models") or {}).get(model)
+                if m is not None:
+                    return m
+        return None
+
+    def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens, account=None):
+        """计算单次请求的费用（CNY）。
+
+        account 为账号 id（也可识别 name）；有账号级定价
+        （pricing.json["accounts"][账号 id/name]）时优先，否则回退全局按模型名查找。
+        """
         pricing = self._load_pricing()
         if not pricing:
             return 0.0
-        # 查找模型定价
-        price = None
-        for provider in pricing:
-            if provider.startswith("_"):
-                continue
-            models = pricing[provider].get("models", {})
-            if model in models:
-                price = models[model]
-                break
+        # 查找模型定价：账号级优先，全局兜底
+        price = self._account_pricing(account, model)
+        if price is None:
+            for provider in pricing:
+                if provider.startswith("_") or provider == "accounts":
+                    continue
+                models = pricing[provider].get("models", {})
+                if model in models:
+                    price = models[model]
+                    break
         if not price:
             return 0.0
         # 使用第一档价格（单次请求无法判断 tier）
@@ -362,7 +486,8 @@ class CacheStats:
         cache_hit_rate, cache_coverage = self._compute_rates(
             input_tokens, cache_read, cache_write
         )
-        cost = self._calc_cost(model, input_tokens, cache_read, cache_write, output_tokens)
+        cost = self._calc_cost(model, input_tokens, cache_read, cache_write, output_tokens,
+                               account=self.account)
         return {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "service": self.service,
@@ -669,9 +794,13 @@ def detect_client(request, payload):
 def resolve_mode(service, request=None, payload=None):
     """确定一次请求的分派模式（claude / codex / direct）。
 
-    client 显式时直接推导；auto 时先识别入口协议，再按账号端点选转换或透传。
+    api 显式声明时直接采用推导结果，不再做请求体猜测（避免误判）；
+    client 显式时按旧逻辑推导；auto 时先识别入口协议，再按账号端点选转换或透传。
     返回 None 表示该组合不支持（OpenAI 客户端 + 无 OpenAI 端点的账号）。
     """
+    if service.api:
+        # api 已显式声明（openai-completions / openai-responses / anthropic-messages）
+        return service.mode
     if service.client == "auto":
         client = detect_client(request, payload)
         if client == "anthropic":
@@ -697,7 +826,7 @@ def get_account_summary(account_id, period="day"):
         }
         days = []
         for svc in matched:
-            s = get_stats(svc.name).get_summary("all")
+            s = get_stats(svc.name, svc.account.id).get_summary("all")
             for d in s.get("days", []):
                 for k, v in d.get("daily_total", {}).items():
                     if k in total:
@@ -711,7 +840,7 @@ def get_account_summary(account_id, period="day"):
     }
     hours = {}
     for svc in matched:
-        s = get_stats(svc.name).get_summary(period)
+        s = get_stats(svc.name, svc.account.id).get_summary(period)
         daily = s.get("daily_total") if period == "day" else s
         if not daily:
             continue
@@ -1427,966 +1556,8 @@ def convert_request(req, service):
 # 不再使用 raw socket，统一用 urllib
 
 
-class _ProxyHandler(BaseHTTPRequestHandler):
-    protocol_version = "HTTP/1.1"
-
-    def log_message(self, format, *args):
-        logger.info(format % args)
-
-    def _w(self, data: bytes):
-        """直接写原始数据到 wfile，不触发 chunked 编码。"""
-        self.wfile.write(data)
-        self.wfile.flush()
-
-    def do_POST(self):
-        svc = getattr(self, "service", None)
-        mode = svc.mode if svc else "claude"
-        if mode == "auto":
-            # client=auto：读 body 识别入口协议后确定分派模式
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            try:
-                payload = json.loads(body)
-            except json.JSONDecodeError:
-                payload = None
-            mode = resolve_mode(svc, self, payload)
-            if mode is None:
-                self._send_error(400, "该账号没有 OpenAI 端点，无法服务 OpenAI 客户端（Codex）")
-                return
-            self._cached_body = body
-            self.service = svc.with_mode(mode)
-        if mode == "codex":
-            self._handle_openai_post()
-        elif mode == "direct":
-            self._handle_direct_post()
-        else:
-            self._handle_claude_post()
-
-    def _handle_claude_post(self):
-        req_start = time.time()
-        body = getattr(self, "_cached_body", None)
-        if body is None:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-
-        try:
-            anthropic_request = json.loads(body)
-        except json.JSONDecodeError:
-            self._send_error(400, "invalid json")
-            return
-
-        logger.debug(f"Request: {json.dumps(anthropic_request)[:500]}")
-
-        stream = anthropic_request.get("stream", False)
-        logger.info(f"[REQ] received model={anthropic_request.get('model')} stream={stream} "
-                    f"bytes={content_length} messages={len(anthropic_request.get('messages', []))} "
-                    f"tools={len(anthropic_request.get('tools', []))} "
-                    f"has_thinking={'thinking' in anthropic_request} "
-                    f"elapsed={time.time()-req_start:.3f}s")
-        openai_request = convert_request(anthropic_request, self.service)
-        # 移除 cache_control（DashScope 不支持）
-        openai_request = _strip_cache_control(openai_request)
-        logger.debug(f"Converted: {json.dumps(openai_request)[:500]}")
-        self._req_start = req_start
-
-        if stream:
-            self._handle_stream(openai_request)
-        else:
-            self._handle_non_stream(openai_request)
-
-    def _handle_openai_post(self):
-        """OpenAI Responses (codex) 请求：Responses -> Chat 转换后转发，响应再转回 Responses。"""
-        req_start = time.time()
-        body = getattr(self, "_cached_body", None)
-        if body is None:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-        try:
-            req = json.loads(body)
-        except json.JSONDecodeError:
-            self._send_openai_error(400, "invalid json")
-            return
-        stream = req.get("stream", False)
-        logger.info(f"[REQ][codex] model={req.get('model')} stream={stream} "
-                    f"bytes={content_length} elapsed={time.time()-req_start:.3f}s")
-        chat = _responses_to_chat(req, self.service)
-        chat_body = json.dumps(chat).encode("utf-8")
-        if stream:
-            self._handle_openai_stream(req, chat_body)
-        else:
-            self._handle_openai_non_stream(req, chat_body)
-
-    def _handle_direct_post(self):
-        """Anthropic 原生透传：原样转发请求、原样返回响应，抓取 usage 记统计。"""
-        req_start = time.time()
-        body = getattr(self, "_cached_body", None)
-        if body is None:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-        try:
-            req = json.loads(body)
-        except json.JSONDecodeError:
-            self._send_error(400, "invalid json")
-            return
-        stream = req.get("stream", False)
-        logger.info(f"[REQ][direct] model={req.get('model')} stream={stream} "
-                    f"bytes={content_length} elapsed={time.time()-req_start:.3f}s")
-
-        target = self.service.target_url
-        if self.path and "?" in self.path:
-            target += "?" + self.path.split("?", 1)[1]
-        try:
-            r = Request(target, method="POST")
-            r.add_header("Content-Type", "application/json")
-            r.add_header("Authorization", f"Bearer {self.service.api_key}")
-            r.add_header("x-api-key", self.service.api_key)
-            r.add_header("anthropic-version", "2023-06-01")
-            if self.service.proxy:
-                proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
-                r.set_proxy(proxy_host, "https")
-            response = urlopen(r, body, timeout=120)
-            status = response.getcode()
-        except Exception as e:
-            if hasattr(e, "read"):
-                try:
-                    err = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    err = str(e)
-            else:
-                err = str(e)
-            logger.error(f"[direct] upstream failed: {err[:500]}")
-            self._send_error(502, f"upstream error: {err[:300]}")
-            return
-        if status != 200:
-            err = response.read().decode("utf-8", errors="replace")
-            self._send_raw(status, err.encode("utf-8"))
-            return
-
-        if stream:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-            self.send_header("Cache-Control", "no-cache")
-            self.end_headers()
-            latest_usage = None
-            try:
-                while True:
-                    line = response.readline()
-                    if not line:
-                        break
-                    self._w(line)
-                    if line.startswith(b"data:"):
-                        data_str = line[5:].strip().decode("utf-8", errors="replace")
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            ev = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-                        if ev.get("type") == "message_start":
-                            latest_usage = (ev.get("message") or {}).get("usage") or {}
-                        elif ev.get("type") == "message_delta":
-                            u = ev.get("usage") or {}
-                            if u:
-                                if latest_usage is None:
-                                    latest_usage = {}
-                                latest_usage.update(u)
-            finally:
-                if latest_usage and is_cache_stats_enabled():
-                    model = req.get("model") or self.service.model
-                    get_stats(self.service.name).record(model, latest_usage)
-            return
-
-        raw = response.read()
-        try:
-            data = json.loads(raw)
-            usage = data.get("usage") or {}
-            if usage.get("input_tokens") and is_cache_stats_enabled():
-                model = data.get("model") or self.service.model
-                get_stats(self.service.name).record(model, usage)
-        except Exception as e:
-            logger.warning(f"[direct] response parse failed: {e}")
-        logger.info(f"[direct][nonstream] completed bytes={len(raw)}")
-        self._send_raw(200, raw)
-
-    def _forward_openai(self, body):
-        target = self.service.target_url
-        if self.path and "?" in self.path:
-            target += "?" + self.path.split("?", 1)[1]
-        req = Request(target, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {self.service.api_key}")
-        if self.service.proxy:
-            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
-            req.set_proxy(proxy_host, "https")
-        return urlopen(req, body, timeout=120)
-
-    def _handle_openai_non_stream(self, req, body):
-        try:
-            response = self._forward_openai(body)
-            status = response.getcode()
-        except Exception as e:
-            if hasattr(e, "read"):
-                try:
-                    err = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    err = str(e)
-            else:
-                err = str(e)
-            logger.error(f"[codex] upstream failed: {err[:500]}")
-            self._send_openai_error(502, f"upstream error: {err[:300]}")
-            return
-        if status != 200:
-            err = response.read().decode("utf-8", errors="replace")
-            self._send_raw(status, err.encode("utf-8"))
-            return
-        raw = response.read()
-        try:
-            data = json.loads(raw)
-            # 记录缓存（复用 OpenAI usage 解析）
-            converted = _convert_usage(data.get("usage") or {})
-            if converted.get("input_tokens") and is_cache_stats_enabled():
-                model = data.get("model") or req.get("model") or self.service.model
-                get_stats(self.service.name).record(model, converted)
-            # 转回 Responses API 格式
-            out = _chat_to_responses_json(data, req.get("model") or self.service.model)
-            raw = json.dumps(out).encode("utf-8")
-        except Exception as e:
-            logger.warning(f"[codex] response convert failed: {e}")
-        logger.info(f"[codex][nonstream] completed bytes={len(raw)}")
-        self._send_raw(200, raw)
-
-    def _handle_openai_stream(self, req, body):
-        try:
-            response = self._forward_openai(body)
-            status = response.getcode()
-        except Exception as e:
-            if hasattr(e, "read"):
-                try:
-                    err = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    err = str(e)
-            else:
-                err = str(e)
-            logger.error(f"[codex] upstream failed: {err[:500]}")
-            self._send_openai_error(502, f"upstream error: {err[:300]}")
-            return
-        if status != 200:
-            err = response.read().decode("utf-8", errors="replace")
-            self._send_raw(status, err.encode("utf-8"))
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
-        model = req.get("model") or self.service.model
-        latest_usage = None
-        translator = _ResponsesStreamTranslator(model)
-        try:
-            while True:
-                line = response.readline()
-                if not line:
-                    break
-                if line.startswith(b"data:"):
-                    data_str = line[5:].strip().decode("utf-8", errors="replace")
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data_str)
-                        usage = chunk.get("usage")
-                        if usage:
-                            latest_usage = _convert_usage(usage)
-                    except Exception:
-                        continue
-                    for ev in translator.translate(chunk):
-                        self._chunk_write(sse_event(ev).encode())
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            if latest_usage and latest_usage.get("input_tokens") and is_cache_stats_enabled():
-                get_stats(self.service.name).record(model, latest_usage)
-            try:
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                pass
-            response.close()
-
-    def _chunk_write(self, data: bytes):
-        if not data:
-            return
-        chunk_size = format(len(data), "x").encode()
-        self.wfile.write(chunk_size + b"\r\n" + data + b"\r\n")
-        self.wfile.flush()
-
-    def _send_raw(self, status_code, data):
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _send_openai_error(self, status_code, message):
-        self._send_raw(status_code, json.dumps({
-            "error": {"message": message, "type": "api_error"},
-        }).encode("utf-8"))
-
-    def _handle_stream(self, openai_request):
-        """处理流式请求，使用 urllib 的流式读取（自动处理 HTTP chunked encoding）。"""
-        from urllib.request import Request, urlopen
-
-        target = self.service.target_url
-        # 转发查询参数（如 ?beta=true）
-        if self.path and "?" in self.path:
-            target += "?" + self.path.split("?", 1)[1]
-        req = Request(target, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {self.service.api_key}")
-        if self.service.proxy:
-            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
-            req.set_proxy(proxy_host, "https")
-
-        body = json.dumps(openai_request).encode("utf-8")
-        conn_start = time.time()
-        logger.info(f"[FWD] forwarding stream model={openai_request.get('model')} "
-                    f"url={target} timeout=120s payload_bytes={len(body)} "
-                    f"elapsed_since_req={time.time()-(getattr(self, '_req_start', None) or conn_start):.3f}s")
-
-        try:
-            response = urlopen(req, body, timeout=120)
-            status_code = response.getcode()
-            logger.info(f"[FWD] upstream connected status={status_code} "
-                        f"connect_time={time.time()-conn_start:.2f}s "
-                        f"elapsed_since_req={time.time()-(getattr(self, '_req_start', None) or conn_start):.2f}s")
-        except Exception as e:
-            if hasattr(e, 'read'):
-                try:
-                    err_body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    err_body = str(e)
-            else:
-                err_body = str(e)
-            logger.error(f"Upstream request failed: {err_body[:500]}")
-            logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
-            self._send_error(502, f"upstream error: {err_body[:300]}")
-            return
-
-        if status_code != 200:
-            err_body = response.read().decode("utf-8", errors="replace")
-            logger.error(f"Upstream error {status_code}: {err_body}")
-            logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
-            self._send_error(status_code, f"upstream error: {err_body}")
-            return
-
-        # 发送响应头给客户端，使用 chunked transfer encoding
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Accel-Buffering", "no")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.end_headers()
-        logger.info(f"[STREAM] response headers sent to client model={self.service.model}")
-
-        message_id = "proxy-msg-stream"
-        model = self.service.model
-        started = False
-        finished = False
-        input_tokens = 0
-        output_tokens = 0
-        cached_tokens = 0
-        cache_write_tokens = 0
-        reasoning_tokens = 0
-        latest_usage = {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-        }
-        content_block_idx = 0
-        content_block_open = False
-        thinking_block_open = False
-        pending_finish_reason = None  # 保存待处理的 finish_reason
-        tool_input_buf = {}  # 本地变量，避免多线程竞争
-        tool_index_to_block_index = {}
-        client_disconnected = False  # 跟踪客户端连接状态
-        n_chunks = 0
-        reasoning_bytes = 0
-        text_bytes = 0
-        first_chunk_ts = None
-        last_prog_ts = time.time()
-
-        def write_chunk(data: bytes) -> bool:
-            """写入一个 chunk（HTTP chunked encoding 格式）
-            返回 True 表示写入成功，False 表示客户端已断开
-            """
-            nonlocal client_disconnected
-            if client_disconnected:
-                return False
-            if data:
-                try:
-                    chunk_size = format(len(data), 'x').encode()
-                    self.wfile.write(chunk_size + b"\r\n" + data + b"\r\n")
-                    self.wfile.flush()
-                except (BrokenPipeError, ConnectionResetError):
-                    client_disconnected = True
-                    return False
-            return True
-
-        def end_chunked():
-            """结束 chunked 响应"""
-            nonlocal client_disconnected
-            if client_disconnected:
-                return
-            try:
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                client_disconnected = True
-
-        try:
-            while True:
-                line = response.readline()
-                if not line:
-                    break
-                line = line.decode("utf-8").strip()
-                if not line.startswith("data:"):
-                    continue
-
-                n_chunks += 1
-                if first_chunk_ts is None:
-                    first_chunk_ts = time.time()
-                    logger.info(f"[STREAM] first upstream chunk received "
-                                f"time_to_first_token={first_chunk_ts - conn_start:.2f}s "
-                                f"elapsed_since_req={first_chunk_ts - (getattr(self, '_req_start', None) or conn_start):.2f}s")
-                now = time.time()
-                req_elapsed = now - (getattr(self, '_req_start', None) or conn_start)
-                if req_elapsed > STREAM_TIMEOUT:
-                    logger.warning(f"[STREAM] timeout after {req_elapsed:.1f}s "
-                                   f"(limit={STREAM_TIMEOUT}s) chunks={n_chunks} "
-                                   f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes}")
-                    # 关闭未关闭的 block
-                    if thinking_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        thinking_block_open = False
-                    if content_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        content_block_open = False
-                    # 发送超时错误给客户端
-                    if started:
-                        write_chunk(sse_event({
-                            "type": "message_delta",
-                            "delta": {"stop_reason": "max_tokens"},
-                            "usage": latest_usage,
-                        }).encode())
-                    write_chunk(sse_event({"type": "message_stop"}).encode())
-                    finished = True
-                    break
-                if now - last_prog_ts >= 5.0:
-                    last_prog_ts = now
-                    logger.info(f"[STREAM] progress chunks={n_chunks} "
-                                f"elapsed={req_elapsed:.1f}s "
-                                f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes}")
-
-                data_str = line[5:].strip()
-                if data_str == "[DONE]":
-                    if not finished and started:
-                        # 关闭未关闭的 thinking block
-                        if thinking_block_open:
-                            write_chunk(sse_event({
-                                "type": "content_block_stop",
-                                "index": content_block_idx,
-                            }).encode())
-                            thinking_block_open = False
-                        if content_block_open:
-                            write_chunk(sse_event({
-                                "type": "content_block_stop",
-                                "index": content_block_idx,
-                            }).encode())
-                            content_block_open = False
-                        # 使用保存的 finish_reason，如果没有则默认为 stop
-                        stop_reason = _anthropic_stop_reason(pending_finish_reason)
-                        write_chunk(sse_event({
-                            "type": "message_delta",
-                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                            "usage": latest_usage,
-                        }).encode())
-                        write_chunk(sse_event({"type": "message_stop"}).encode())
-                        finished = True
-                        # 记录缓存统计
-                        if is_cache_stats_enabled() and latest_usage and latest_usage.get("input_tokens"):
-                            get_stats(self.service.name).record(model, latest_usage)
-                    logger.info(f"[STREAM] completed finished={finished} chunks={n_chunks} "
-                                f"total_elapsed={time.time() - (getattr(self, '_req_start', None) or conn_start):.2f}s "
-                                f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes} "
-                                f"input={latest_usage.get('input_tokens')} output={latest_usage.get('output_tokens')}")
-                    break
-
-                try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
-                    continue
-
-                usage = chunk.get("usage", {})
-                if usage:
-                    # 调试日志：原始数据
-                    logger.debug(f"[DEBUG] Raw usage: {json.dumps(usage)}")
-
-                    converted_usage = _convert_usage(usage)
-                    input_tokens = converted_usage["input_tokens"]
-                    output_tokens = converted_usage["output_tokens"] or output_tokens
-                    cached_tokens = converted_usage["cache_read_input_tokens"]
-                    cache_write_tokens = converted_usage["cache_creation_input_tokens"]
-                    reasoning_tokens = converted_usage["reasoning_tokens"]
-                    latest_usage = {
-                        "input_tokens": input_tokens,
-                        "output_tokens": output_tokens,
-                        "cache_creation_input_tokens": cache_write_tokens,
-                        "cache_read_input_tokens": cached_tokens,
-                    }
-                    
-                    # 调试日志
-                    logger.debug(f"[DEBUG] cached_tokens={cached_tokens}, cache_write_tokens={cache_write_tokens}, input_tokens={input_tokens}, prompt_total={converted_usage['prompt_total']}, reasoning_tokens={reasoning_tokens}")
-
-                choices = chunk.get("choices", [])
-                if not choices:
-                    # 最后一个 chunk（choices 为空）包含 usage，发送结束事件
-                    if pending_finish_reason and not finished:
-                        stop_reason = _anthropic_stop_reason(pending_finish_reason)
-                        write_chunk(sse_event({
-                            "type": "message_delta",
-                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                            "usage": latest_usage,
-                        }).encode())
-                        write_chunk(sse_event({"type": "message_stop"}).encode())
-                        finished = True
-                        # 记录缓存统计
-                        if is_cache_stats_enabled() and latest_usage and latest_usage.get("input_tokens"):
-                            get_stats(self.service.name).record(model, latest_usage)
-                    continue
-
-                choice = choices[0]
-                delta = choice.get("delta", {})
-                finish_reason = choice.get("finish_reason")
-
-                if not started:
-                    started = True
-                    message_id = chunk.get("id", message_id)
-                    model = chunk.get("model", model)
-
-                    write_chunk(sse_event({
-                        "type": "message_start",
-                        "message": {
-                            "id": message_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "content": [],
-                            "model": model,
-                            "stop_reason": None,
-                            "stop_sequence": None,
-                            "usage": {
-                                "input_tokens": input_tokens,
-                                "output_tokens": 0,
-                                "cache_creation_input_tokens": cache_write_tokens,
-                                "cache_read_input_tokens": cached_tokens,
-                            },
-                        },
-                    }).encode())
-
-                # 处理思考内容 (reasoning_content -> thinking block)
-                reasoning_content = delta.get("reasoning_content", "")
-                if reasoning_content:
-                    if not thinking_block_open:
-                        # 关闭已打开的文本块
-                        if content_block_open:
-                            write_chunk(sse_event({
-                                "type": "content_block_stop",
-                                "index": content_block_idx,
-                            }).encode())
-                            content_block_open = False
-                            content_block_idx += 1
-                        # 开启 thinking block
-                        write_chunk(sse_event({
-                            "type": "content_block_start",
-                            "index": content_block_idx,
-                            "content_block": {"type": "thinking", "thinking": ""},
-                        }).encode())
-                        thinking_block_open = True
-                    write_chunk(sse_event({
-                        "type": "content_block_delta",
-                        "index": content_block_idx,
-                        "delta": {"type": "thinking_delta", "thinking": reasoning_content},
-                    }).encode())
-                    reasoning_bytes += len(reasoning_content)
-                elif thinking_block_open and not reasoning_content:
-                    # reasoning_content 结束，关闭 thinking block
-                    write_chunk(sse_event({
-                        "type": "content_block_stop",
-                        "index": content_block_idx,
-                    }).encode())
-                    thinking_block_open = False
-                    content_block_idx += 1
-
-                # 处理文本内容
-                content = delta.get("content", "")
-                if content:
-                    # 如果 thinking block 还开着，先关闭
-                    if thinking_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        thinking_block_open = False
-                        content_block_idx += 1
-                    if not content_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_start",
-                            "index": content_block_idx,
-                            "content_block": {"type": "text", "text": ""},
-                        }).encode())
-                        content_block_open = True
-                    write_chunk(sse_event({
-                        "type": "content_block_delta",
-                        "index": content_block_idx,
-                        "delta": {"type": "text_delta", "text": content},
-                    }).encode())
-                    text_bytes += len(content)
-
-                # 处理 tool_calls
-                tool_calls = delta.get("tool_calls", [])
-                for tc in tool_calls:
-                    tool_call_index = int(tc.get("index", len(tool_index_to_block_index)))
-                    tc_id = tc.get("id", "")
-                    tc_func = tc.get("function", {})
-                    tc_name = tc_func.get("name", "")
-                    tc_args = tc_func.get("arguments", "")
-
-                    # 如果有 id，说明是新的 tool_use 开始
-                    if tc_id:
-                        # 关闭之前的 thinking block
-                        if thinking_block_open:
-                            write_chunk(sse_event({
-                                "type": "content_block_stop",
-                                "index": content_block_idx,
-                            }).encode())
-                            thinking_block_open = False
-                            content_block_idx += 1
-                        # 关闭之前的文本内容块
-                        if content_block_open:
-                            write_chunk(sse_event({
-                                "type": "content_block_stop",
-                                "index": content_block_idx,
-                            }).encode())
-                            content_block_open = False
-                            content_block_idx += 1
-
-                        block_idx = content_block_idx
-                        tool_index_to_block_index[tool_call_index] = block_idx
-                        write_chunk(sse_event({
-                            "type": "content_block_start",
-                            "index": block_idx,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tc_id,
-                                "name": tc_name,
-                                "input": {},
-                            },
-                        }).encode())
-                        # 初始化 tool_use 输入（后续 chunks 会累积）
-                        tool_input_buf[block_idx] = {
-                            "id": tc_id,
-                            "name": tc_name,
-                            "input_str": tc_args,
-                        }
-                        content_block_idx += 1
-                    elif tc_args:
-                        # 同一 tool_use 的参数片段累积
-                        idx = tool_index_to_block_index.get(tool_call_index, content_block_idx)
-                        if idx in tool_input_buf:
-                            tool_input_buf[idx]["input_str"] += tc_args
-                        else:
-                            tool_input_buf[idx] = {
-                                "id": "",
-                                "name": tc_name,
-                                "input_str": tc_args,
-                            }
-                    # 发送 content_block_delta（OpenAI 的 tool_calls 对应 Anthropic 的 input_json_delta）
-                    if tc_args:
-                        write_chunk(sse_event({
-                            "type": "content_block_delta",
-                            "index": tool_index_to_block_index.get(tool_call_index, content_block_idx),
-                            "delta": {"type": "input_json_delta", "partial_json": tc_args},
-                        }).encode())
-                        text_bytes += len(tc_args)
-
-                if finish_reason and not finished:
-                    # 保存 finish_reason，等待 usage 或 [DONE] 时再发送结束事件
-                    pending_finish_reason = finish_reason
-                    # 关闭未关闭的 thinking block
-                    if thinking_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        thinking_block_open = False
-                    # 关闭未关闭的 tool_use content_block
-                    for idx, tool_info in tool_input_buf.items():
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": idx,
-                        }).encode())
-                    tool_input_buf.clear()
-
-                    if content_block_open:
-                        write_chunk(sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        content_block_open = False
-
-            if not finished:
-                logger.info(f"[STREAM] upstream closed without [DONE] chunks={n_chunks} "
-                            f"elapsed={time.time()-(getattr(self, '_req_start', None) or conn_start):.2f}s "
-                            f"finished={finished} client_disconnected={client_disconnected}")
-        except (BrokenPipeError, ConnectionResetError) as e:
-            # 客户端断开连接，不是错误
-            client_disconnected = True
-            logger.info(f"Client disconnected: {e}")
-        except Exception as e:
-            logger.error(f"Stream error: {e}", exc_info=True)
-            if not finished and started and not client_disconnected:
-                write_chunk(sse_event({
-                    "type": "error",
-                    "error": {"type": "api_error", "message": str(e)},
-                }).encode())
-            elif not started and not client_disconnected:
-                self._send_error(502, str(e))
-        finally:
-            end_chunked()
-            response.close()
-
-    def _handle_non_stream(self, openai_request):
-        """处理非流式请求。"""
-        target = self.service.target_url
-        # 转发查询参数（如 ?beta=true）
-        if self.path and "?" in self.path:
-            target += "?" + self.path.split("?", 1)[1]
-        req = Request(target, method="POST")
-        req.add_header("Content-Type", "application/json")
-        req.add_header("Authorization", f"Bearer {self.service.api_key}")
-        if self.service.proxy:
-            proxy_host = self.service.proxy.replace("http://", "").replace("https://", "")
-            req.set_proxy(proxy_host, "https")
-
-        body = json.dumps(openai_request).encode("utf-8")
-        conn_start = time.time()
-        logger.info(f"[FWD] forwarding(non-stream) model={openai_request.get('model')} "
-                    f"url={target} timeout=120s payload_bytes={len(body)} "
-                    f"elapsed_since_req={time.time()-(getattr(self, '_req_start', None) or conn_start):.3f}s")
-
-        try:
-            response = urlopen(req, body, timeout=120)
-            status_code = response.getcode()
-            logger.info(f"[FWD] upstream connected status={status_code} "
-                        f"connect_time={time.time()-conn_start:.2f}s "
-                        f"elapsed_since_req={time.time()-(getattr(self, '_req_start', None) or conn_start):.2f}s")
-        except Exception as e:
-            if hasattr(e, 'read'):
-                try:
-                    err_body = e.read().decode("utf-8", errors="replace")
-                except Exception:
-                    err_body = str(e)
-            else:
-                err_body = str(e)
-            logger.error(f"Upstream request failed: {err_body[:500]}")
-            logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
-            self._send_error(502, f"upstream error: {err_body[:300]}")
-            return
-
-        if status_code != 200:
-            err_body = response.read().decode("utf-8", errors="replace")
-            logger.error(f"Upstream error {status_code}: {err_body}")
-            logger.error(f"Sent payload (first 1000 chars): {body[:1000]}")
-            self._send_error(status_code, f"upstream error: {err_body}")
-            return
-
-        raw = json.loads(response.read().decode("utf-8"))
-        logger.info(f"[NONSTREAM] completed elapsed={time.time()-(getattr(self, '_req_start', None) or conn_start):.2f}s "
-                    f"model={raw.get('model')} usage={raw.get('usage')}")
-
-        content = ""
-        finish_reason = "stop"
-        tool_calls = []
-        if raw.get("choices"):
-            choice = raw["choices"][0]
-            message = choice.get("message", {})
-            content = message.get("content", "")
-            finish_reason = choice.get("finish_reason", "stop")
-
-            # 处理非流式 tool_calls
-            raw_tool_calls = message.get("tool_calls", [])
-            for tc in raw_tool_calls:
-                try:
-                    tc_input = json.loads(tc.get("function", {}).get("arguments", "{}"))
-                except (json.JSONDecodeError, ValueError):
-                    tc_input = tc.get("function", {}).get("arguments", "{}")
-                tool_calls.append({
-                    "type": "tool_use",
-                    "id": tc.get("id", ""),
-                    "name": tc.get("function", {}).get("name", ""),
-                    "input": tc_input,
-                })
-
-        usage = raw.get("usage", {})
-        converted_usage = _convert_usage(usage)
-        input_tokens = converted_usage["input_tokens"]
-        output_tokens = converted_usage["output_tokens"]
-        cached_tokens = converted_usage["cache_read_input_tokens"]
-        cache_write_tokens = converted_usage["cache_creation_input_tokens"]
-        reasoning_tokens = converted_usage["reasoning_tokens"]
-
-        content_list = []
-        # 添加 thinking block（如果有思考内容）
-        reasoning_content = ""
-        if raw.get("choices"):
-            choice = raw["choices"][0]
-            message = choice.get("message", {})
-            reasoning_content = message.get("reasoning_content", "")
-        if reasoning_content:
-            content_list.append({"type": "thinking", "thinking": reasoning_content})
-        if content:
-            content_list.append({"type": "text", "text": content})
-        content_list.extend(tool_calls)
-
-        stop_reason = _anthropic_stop_reason(finish_reason, bool(tool_calls))
-
-        # 记录缓存统计
-        if is_cache_stats_enabled() and converted_usage and converted_usage.get("input_tokens"):
-            response_model = raw.get("model", self.service.model)
-            get_stats(self.service.name).record(response_model, converted_usage)
-
-        self._send_json(200, {
-            "id": raw.get("id", "proxy-msg"),
-            "type": "message",
-            "role": "assistant",
-            "content": content_list if content_list else [],
-            "model": raw.get("model", self.service.model),
-            "stop_reason": stop_reason,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_creation_input_tokens": cache_write_tokens,
-                "cache_read_input_tokens": cached_tokens,
-            },
-        })
-
-    def _send_json(self, status_code, data):
-        response = json.dumps(data).encode("utf-8")
-        self.send_response(status_code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(response)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(response)
-
-    def _send_error(self, status_code, message):
-        try:
-            self._send_json(status_code, {
-                "type": "error",
-                "error": {"type": "api_error", "message": message},
-            })
-        except Exception:
-            pass
-
-    def _get_query_param(self, name, default=""):
-        """解析 URL 查询参数。"""
-        if "?" not in self.path:
-            return default
-        query = self.path.split("?", 1)[1]
-        for part in query.split("&"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                if k == name:
-                    return v
-            elif part == name:
-                return "true"
-        return default
-
-    def do_GET(self):
-        path = self.path.split("?")[0]
-        if path == "/stats":
-            if not is_cache_stats_enabled():
-                self._send_json(200, {"error": "cache stats is disabled"})
-                return
-            period = self._get_query_param("period", "day")
-            account_id = self._get_query_param("account", "")
-            if account_id:
-                summary = get_account_summary(account_id, period)
-            else:
-                summary = get_stats(self.service.name).get_summary(period)
-            self._send_json(200, summary)
-        elif path == "/health":
-            self._send_json(200, {"status": "ok"})
-        else:
-            self._send_json(200, {
-                "status": "ok",
-                "mode": getattr(self, "service", None).mode if getattr(self, "service", None) else "",
-                "target": self.service.target_url,
-                "endpoints": ["/stats?period=hour|day|all", "/health"],
-            })
-
-
-def make_handler(service):
-    """为每个服务生成一个绑定其配置的 handler 类。"""
-    class _Handler(_ProxyHandler):
-        pass
-    _Handler.service = service
-    return _Handler
-
-
-def main():
-    # 支持 --service <comment|port> 只启动指定的单个服务（供 mac UI 按服务独立启停）
-    service_filter = None
-    if "--service" in sys.argv:
-        i = sys.argv.index("--service")
-        if i + 1 < len(sys.argv):
-            service_filter = sys.argv[i + 1]
-
-    services = load_config()
-    enabled = [s for s in services if s.mode in ("claude", "codex", "direct") and s.api_key]
-    if service_filter:
-        enabled = [s for s in enabled
-                   if s.name == service_filter or str(s.port) == service_filter]
-    if not enabled:
-        logger.error("没有可用的服务（请检查 config.json 的 services 与 API key）")
-        sys.exit(1)
-
-    servers = []
-    for svc in enabled:
-        handler = make_handler(svc)
-        server = ThreadedHTTPServer((svc.host, svc.port), handler)
-        servers.append(server)
-        logger.info(f"代理启动: http://{svc.host}:{svc.port} mode={svc.mode} "
-                    f"target={svc.target_url} model={svc.model}")
-
-    for s in servers:
-        threading.Thread(target=s.serve_forever, daemon=True).start()
-
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        logger.info("收到中断信号，关闭代理")
-        for s in servers:
-            s.shutdown()
-
-
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    print("proxy.py 现为核心库（协议转换 / 配置 / 统计），不包含代理引擎。")
+    print("请运行：python proxy_async.py [--service <名称|端口>]")
+    _sys.exit(1)

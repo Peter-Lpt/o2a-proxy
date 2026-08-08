@@ -1,5 +1,6 @@
 # Config files (secrets)
 config.json
+auth.json
 
 # IDE / tool settings
 .claude/

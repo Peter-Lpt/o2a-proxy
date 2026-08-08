@@ -63,8 +63,31 @@ fn load_pricing(stats_dir: &Path) -> Value {
     read_json(&p).unwrap_or(Value::Null)
 }
 
+/// 读取 config.json 的 accounts，构建账号 id -> name 别名映射（用于定价按 name 匹配）。
+fn load_account_aliases(stats_dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let p = stats_dir
+        .parent()
+        .map(|d| d.join("config.json"))
+        .unwrap_or_else(|| Path::new("config.json").to_path_buf());
+    if let Some(cfg) = read_json(&p) {
+        if let Some(accounts) = cfg.get("accounts").and_then(|a| a.as_array()) {
+            for a in accounts {
+                if let (Some(id), Some(name)) = (
+                    a.get("id").and_then(|v| v.as_str()),
+                    a.get("name").and_then(|v| v.as_str()),
+                ) {
+                    out.insert(id.to_string(), name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 参考 proxy.py CacheStats._calc_cost：按当前 pricing.json 重算单次请求费用。
 /// 历史记录写入时可能缺少 cost 或定价表后补，读取时统一重算，保证口径一致。
+/// 账号级定价（pricing.json["accounts"]，键可为账号 id 或 name）优先，全局兜底。
 fn recalc_cost(
     model: &str,
     input: i64,
@@ -72,19 +95,47 @@ fn recalc_cost(
     write: i64,
     output: i64,
     pricing: &Value,
+    account: &str,
+    aliases: &BTreeMap<String, String>,
 ) -> f64 {
-    let Some(providers) = pricing.as_object() else {
+    let Some(pricing_obj) = pricing.as_object() else {
         return 0.0;
     };
     let mut price = None;
-    for (pname, pdata) in providers {
-        if pname.starts_with('_') {
-            continue;
+    // 1. 账号级：pricing.json["accounts"]，键可为账号 id 或 name
+    if !account.is_empty() {
+        if let Some(acc_map) = pricing_obj.get("accounts").and_then(|v| v.as_object()) {
+            let mut keys: Vec<String> = vec![account.to_string()];
+            if let Some(name) = aliases.get(account) {
+                if !name.is_empty() {
+                    keys.push(name.clone());
+                }
+            }
+            for k in keys {
+                if let Some(models) = acc_map
+                    .get(&k)
+                    .and_then(|v| v.get("models"))
+                    .and_then(|v| v.as_object())
+                {
+                    if let Some(m) = models.get(model) {
+                        price = Some(m);
+                        break;
+                    }
+                }
+            }
         }
-        if let Some(models) = pdata.get("models").and_then(|m| m.as_object()) {
-            if let Some(m) = models.get(model) {
-                price = Some(m);
-                break;
+    }
+    // 2. 全局按模型名兜底
+    if price.is_none() {
+        for (pname, pdata) in pricing_obj {
+            if pname.starts_with('_') || pname == "accounts" {
+                continue;
+            }
+            if let Some(models) = pdata.get("models").and_then(|m| m.as_object()) {
+                if let Some(m) = models.get(model) {
+                    price = Some(m);
+                    break;
+                }
             }
         }
     }
@@ -128,7 +179,12 @@ fn list_record_dates(stats_dir: &Path) -> Vec<String> {
 }
 
 /// 读取某天原始记录，并统一按当前定价重算 cost 字段。
-fn read_records(stats_dir: &Path, date_str: &str, pricing: &Value) -> Vec<Value> {
+fn read_records(
+    stats_dir: &Path,
+    date_str: &str,
+    pricing: &Value,
+    aliases: &BTreeMap<String, String>,
+) -> Vec<Value> {
     let p = stats_dir.join(format!("{date_str}.jsonl"));
     let Ok(s) = std::fs::read_to_string(&p) else {
         return Vec::new();
@@ -141,7 +197,8 @@ fn read_records(stats_dir: &Path, date_str: &str, pricing: &Value) -> Vec<Value>
             let read = rec["cache_read_tokens"].as_i64().unwrap_or(0);
             let write = rec["cache_write_tokens"].as_i64().unwrap_or(0);
             let output = rec["output_tokens"].as_i64().unwrap_or(0);
-            rec["cost"] = json!(recalc_cost(&model, input, read, write, output, pricing));
+            let account = rec["account"].as_str().unwrap_or("").to_string();
+            rec["cost"] = json!(recalc_cost(&model, input, read, write, output, pricing, &account, aliases));
             rec
         })
         .collect()
@@ -155,8 +212,9 @@ fn load_day(
     service: &str,
     primary: &str,
     pricing: &Value,
+    aliases: &BTreeMap<String, String>,
 ) -> Option<Value> {
-    let records = read_records(stats_dir, date_str, pricing);
+    let records = read_records(stats_dir, date_str, pricing, aliases);
     let mut hours: BTreeMap<String, Agg> = BTreeMap::new();
     let mut day = Agg::default();
     for rec in &records {
@@ -298,11 +356,12 @@ fn day_to_series(dd: &Value) -> Value {
 
 pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     let pricing = load_pricing(dir);
+    let aliases = load_account_aliases(dir);
     let now = chrono::Local::now();
     let today_str = now.format("%Y-%m-%d").to_string();
     let month_prefix = now.format("%Y-%m").to_string();
     let cur_hour = now.format("%H").to_string();
-    let today = load_day(&dir, &today_str, service, &primary, &pricing);
+    let today = load_day(&dir, &today_str, service, &primary, &pricing, &aliases);
     let current = today
         .as_ref()
         .and_then(|t| t.get("hours").and_then(|h| h.get(&cur_hour)))
@@ -327,7 +386,7 @@ pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
         }
     }
 
-    let records = read_records(&dir, &today_str, &pricing);
+    let records = read_records(&dir, &today_str, &pricing, &aliases);
     let today_minute = aggregate_minutes(&records, service, &primary);
     let today_minute_by_model = aggregate_minutes_by_model(&records, service, &primary);
     let by_model = sum_by_model(&records, service, &primary);
@@ -342,7 +401,7 @@ pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     let mut month_total = Agg::default();
     let mut days_map: BTreeMap<String, Value> = BTreeMap::new();
     for ds in &day_files {
-        if let Some(dd) = load_day(&dir, ds, service, &primary, &pricing) {
+        if let Some(dd) = load_day(&dir, ds, service, &primary, &pricing, &aliases) {
             if let Some(day) = dd.get("day") {
                 month_total.add_agg(&agg_from_json(day));
             }
@@ -365,7 +424,7 @@ pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     let mut month_by_model_map: BTreeMap<String, Agg> = BTreeMap::new();
     let mut month_daily_by_model: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
     for ds in &day_files {
-        let recs = read_records(&dir, ds, &pricing);
+        let recs = read_records(&dir, ds, &pricing, &aliases);
         for g in sum_by_model(&recs, service, &primary) {
             let m = g["model"].as_str().unwrap_or("unknown").to_string();
             month_by_model_map.entry(m.clone()).or_default().add_agg(&agg_from_json(&g));
@@ -463,8 +522,9 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 
 pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     let pricing = load_pricing(dir);
+    let aliases = load_account_aliases(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let records: Vec<Value> = read_records(&dir, &today_str, &pricing)
+    let records: Vec<Value> = read_records(&dir, &today_str, &pricing, &aliases)
         .into_iter()
         .filter(|r| matches_service(r, service, &primary))
         .rev()

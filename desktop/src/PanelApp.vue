@@ -19,7 +19,7 @@
     </header>
 
     <div class="svc-bar">
-      <div class="svc-tabs">
+      <div class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel">
         <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selected = '__all__'">
           <span class="dot" :class="{ on: anyRunning }"></span>全部
         </button>
@@ -178,6 +178,12 @@
                 <label>客户端类型 client
                   <SelectBox v-model="activeSvc.client" :options="clientOptions" :disabled="activeSvcRunning" />
                 </label>
+                <label>入口协议 api <span class="fc-sub" style="font-weight:400">（推荐显式声明）</span>
+                  <SelectBox v-model="activeSvc.api" :options="apiOptions" placeholder="默认（回退 client/自动识别）" allow-custom :disabled="activeSvcRunning" />
+                </label>
+                <label v-if="activeSvc.api === 'openai-responses'" class="upstream-api-label">上游协议 upstream_api <span class="fc-sub" style="font-weight:400">（上游原生支持 Responses 时选透传）</span>
+                  <SelectBox v-model="activeSvc.upstream_api" :options="upstreamApiOptions" :disabled="activeSvcRunning" />
+                </label>
                 <div class="proto-row"><span class="proto-lbl">入口协议</span><span class="proto-val">{{ entryProto }}</span></div>
                 <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
                 <label>子模型 sub_model <SelectBox v-model="activeSvc.sub_model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
@@ -282,6 +288,54 @@ const status = reactive<any>({ services: [] });
 const stats = reactive<any>({});
 const liveRecords = ref<any[]>([]);
 const selected = ref<string>(ALL);
+const svcTabs = ref<HTMLElement | null>(null);
+let tabsDrag: { startX: number; startScroll: number; moved: boolean } | null = null;
+
+// 服务标签栏：鼠标拖拽横向滚动 + 滚轮横向滚动（服务多时避免难用的窄滚动条）
+function onTabsDown(e: MouseEvent) {
+  // 启停按钮上的按下不触发拖动，保留点击语义
+  if ((e.target as HTMLElement).closest(".power")) return;
+  tabsDrag = { startX: e.clientX, startScroll: svcTabs.value?.scrollLeft || 0, moved: false };
+  // 注意：不在 mousedown 时加 dragging 类（pointer-events:none 会吞掉 mouseup/click，导致标签无法切换）
+  const onMove = (ev: MouseEvent) => {
+    const d = tabsDrag;
+    if (!d || !svcTabs.value) return;
+    const dx = ev.clientX - d.startX;
+    // 超过阈值才算拖动：此时才加 dragging 类（防 hover 闪烁）并开始滚动
+    if (!d.moved && Math.abs(dx) > 4) {
+      d.moved = true;
+      svcTabs.value.classList.add("dragging");
+    }
+    if (d.moved) svcTabs.value.scrollLeft = d.startScroll - dx;
+  };
+  const onUp = () => {
+    const wasDrag = tabsDrag?.moved;
+    tabsDrag = null;
+    svcTabs.value?.classList.remove("dragging");
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+    if (wasDrag) {
+      // 拖动结束不选中服务：拦截本次 click
+      document.addEventListener(
+        "click",
+        (ev) => {
+          ev.stopPropagation();
+          ev.preventDefault();
+        },
+        { capture: true, once: true }
+      );
+    }
+  };
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
+function onTabsWheel(e: WheelEvent) {
+  const el = svcTabs.value;
+  if (!el) return;
+  const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+  el.scrollLeft += dx;
+}
 const page = ref<"stats" | "config" | "accounts">("stats");
 const range = ref<"today" | "month">("today");
 const modelFilter = ref<string>("");
@@ -296,6 +350,15 @@ const clientOptions = [
   { value: "auto", label: "auto（自动识别协议）" },
   { value: "anthropic", label: "anthropic（Claude Code）" },
   { value: "openai", label: "openai（Codex / OpenAI 兼容）" },
+];
+const apiOptions = [
+  { value: "openai-completions", label: "openai-completions（pi / 常规 Chat，整包透传）" },
+  { value: "openai-responses", label: "openai-responses（Codex 专属 Responses）" },
+  { value: "anthropic-messages", label: "anthropic-messages（Claude Code）" },
+];
+const upstreamApiOptions = [
+  { value: "openai-completions", label: "openai-completions（上游只支持 Chat → 自动转换）" },
+  { value: "openai-responses", label: "openai-responses（上游原生支持 Responses，如 DeepSeek → 整包透传）" },
 ];
 const editingAcc = ref<string | null>(null);
 const accHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
@@ -536,20 +599,45 @@ function goAccounts() {
 }
 const scopeLabel = computed(() => (selected.value === ALL ? "全部" : selected.value));
 
-// 服务出口提示：按 client × 账号端点推导实际出口
+// 服务入口提示：api 显式声明优先，回退 client / 自动识别
 const entryProto = computed(() => {
+  const api = activeSvc.value?.api || "";
+  if (api === "anthropic-messages") return "入口 /v1/messages（Anthropic Messages）";
+  if (api === "openai-responses") return "入口 /v1/responses（OpenAI Responses）";
+  if (api === "openai-completions") return "入口 /chat/completions（Chat Completions）";
   const c = activeSvc.value?.client || "auto";
-  if (c === "anthropic") return "/v1/messages（Anthropic Messages）";
-  if (c === "openai") return "/v1/responses · /v1/chat/completions（OpenAI 兼容）";
-  return "自动识别：/v1/messages · /v1/responses · /v1/chat/completions";
+  if (c === "anthropic") return "入口 /v1/messages（Anthropic Messages）";
+  if (c === "openai") return "入口 /v1/responses · /chat/completions（OpenAI 兼容）";
+  return "自动识别：/v1/messages · /v1/responses · /chat/completions";
 });
 const outHint = computed(() => {
   const s = activeSvc.value;
   const acc = accountById(s?.account);
   if (!s || !acc) return "请先绑定账号";
-  const c = s.client || "auto";
   const o = String(acc.openai_url || "").trim();
   const a = String(acc.anthropic_url || "").trim();
+  const api = s.api || "";
+  if (api === "openai-completions") {
+    return o
+      ? `入口 Chat → 出口 ${o}（整包透传，零转换）`
+      : "⚠ 该账号未配置 OpenAI 端点";
+  }
+  if (api === "openai-responses") {
+    if (!o) return "⚠ 该账号未配置 OpenAI 端点";
+    const up = s.upstream_api || "openai-completions";
+    return up === "openai-responses"
+      ? `入口 Responses → 出口 ${o}（上游原生支持，整包透传）`
+      : `入口 Responses → 出口 ${o}（转 Chat 发送，响应转回 Responses）`;
+  }
+  if (api === "anthropic-messages") {
+    return a
+      ? `入口 /v1/messages → 出口 ${a}（直连透传）`
+      : o
+        ? `入口 /v1/messages → 出口 ${o}（转换发送）`
+        : "⚠ 该账号未配置任何端点";
+  }
+  // 未声明 api：回退 client 推导
+  const c = s.client || "auto";
   if (c === "openai") {
     return o
       ? `入口 /v1/responses · /chat/completions → 出口 ${o}（透传）`
@@ -751,6 +839,8 @@ function normalizeConfig() {
       s.max_tokens = Number(s.max_tokens);
     }
     s.context_1m = !!s.context_1m;
+    if (!s.api) delete s.api;
+    if (!s.upstream_api || s.upstream_api === "openai-completions") delete s.upstream_api;
     delete s.openai_base_url;
     delete s.openai_api_key;
     delete s.anthropic_base_url;

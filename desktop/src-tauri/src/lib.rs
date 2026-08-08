@@ -82,6 +82,41 @@ fn config_path(state: &AppState) -> PathBuf {
     state.root.join("config.json")
 }
 
+fn auth_path(state: &AppState) -> PathBuf {
+    state.root.join("auth.json")
+}
+
+fn read_auth(state: &AppState) -> serde_json::Value {
+    let p = auth_path(state);
+    std::fs::read_to_string(p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// 从 auth.json 按账号 id → name 顺序取 key（值支持 {type, key} 或纯字符串）。
+fn auth_key_for(auth: &serde_json::Value, id: &str, name: &str) -> Option<String> {
+    let obj = auth.as_object()?;
+    for k in [id, name] {
+        if k.is_empty() {
+            continue;
+        }
+        if let Some(v) = obj.get(k) {
+            let key = if v.is_string() {
+                v.as_str().map(String::from)
+            } else {
+                v.get("key").and_then(|x| x.as_str()).map(String::from)
+            };
+            if let Some(k2) = key {
+                if !k2.is_empty() {
+                    return Some(k2);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// 统计目录解析：配置里显式指定（相对路径基于项目根）则用之，否则用系统用户数据目录。
 fn stats_dir(state: &AppState) -> PathBuf {
     match read_config_value(state)
@@ -117,11 +152,34 @@ fn primary_service(state: &AppState) -> String {
 
 fn read_config_value(state: &AppState) -> Result<serde_json::Value, String> {
     let p = config_path(state);
-    if !p.exists() {
-        return Ok(serde_json::json!({}));
+    let mut cfg = if !p.exists() {
+        serde_json::json!({})
+    } else {
+        let s = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+        serde_json::from_str(&s).map_err(|e| e.to_string())?
+    };
+    // 合并 auth.json 的 Key（供界面显示）；config.json 本身不含 Key
+    let auth = read_auth(state);
+    if let Some(accounts) = cfg.get_mut("accounts").and_then(|a| a.as_array_mut()) {
+        for acc in accounts {
+            let id = acc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = acc
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if let Some(key) = auth_key_for(&auth, &id, &name) {
+                if let Some(o) = acc.as_object_mut() {
+                    o.insert("api_key".to_string(), serde_json::json!(key));
+                }
+            }
+        }
     }
-    let s = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    serde_json::from_str(&s).map_err(|e| e.to_string())
+    Ok(cfg)
 }
 
 fn open_path(p: &Path) -> Result<(), String> {
@@ -224,10 +282,62 @@ fn read_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> 
     read_config_value(&state)
 }
 
+/// 将 cfg 中 accounts[].api_key 抽取到 auth 映射（按账号 id），并从 cfg 移除。
+/// key 为空时同步删除 auth 中对应条目（含 name 键），保证清空后不残留旧 Key。
+fn split_account_keys(
+    cfg: &mut serde_json::Value,
+    auth: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if let Some(accounts) = cfg.get_mut("accounts").and_then(|a| a.as_array_mut()) {
+        for acc in accounts.iter_mut() {
+            let id = acc
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let key = acc
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            // 从 config 移除 api_key（新配置不存 Key）
+            if let Some(o) = acc.as_object_mut() {
+                o.remove("api_key");
+            }
+            if id.is_empty() {
+                continue;
+            }
+            if key.trim().is_empty() {
+                // 清空 Key：同步移除 auth.json 对应条目（按 id 与 name）
+                auth.remove(&id);
+                if let Some(name) = acc.get("name").and_then(|v| v.as_str()) {
+                    if !name.is_empty() {
+                        auth.remove(name);
+                    }
+                }
+            } else {
+                auth.insert(
+                    id.clone(),
+                    serde_json::json!({ "type": "api_key", "key": key }),
+                );
+            }
+        }
+    }
+}
+
 #[tauri::command]
-fn save_config(state: State<'_, AppState>, cfg: serde_json::Value) -> Result<(), String> {
+fn save_config(state: State<'_, AppState>, mut cfg: serde_json::Value) -> Result<(), String> {
+    // Key 分流：accounts[].api_key → auth.json；config.json 保持不含 Key（新版本默认）
+    let mut auth_obj = read_auth(&state)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    split_account_keys(&mut cfg, &mut auth_obj);
     let s = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
-    std::fs::write(config_path(&state), s).map_err(|e| e.to_string())
+    std::fs::write(config_path(&state), s).map_err(|e| e.to_string())?;
+    let auth_json = serde_json::Value::Object(auth_obj);
+    let s2 = serde_json::to_string_pretty(&auth_json).map_err(|e| e.to_string())?;
+    std::fs::write(auth_path(&state), s2).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -400,6 +510,52 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn split_account_keys_moves_and_keeps() {
+        let mut cfg = serde_json::json!({
+            "accounts": [
+                {"id": "acc-1", "name": "A", "api_key": "sk-1", "openai_url": "x"},
+                {"id": "acc-2", "name": "B", "api_key": ""}
+            ]
+        });
+        let mut auth = serde_json::Map::new();
+        auth.insert(
+            "acc-0".to_string(),
+            serde_json::json!({ "type": "api_key", "key": "old" }),
+        );
+        split_account_keys(&mut cfg, &mut auth);
+        // config 不再含 api_key
+        assert!(cfg["accounts"][0].get("api_key").is_none());
+        assert!(cfg["accounts"][1].get("api_key").is_none());
+        // 有 key 的账号写入 auth（按 id）
+        assert_eq!(auth["acc-1"]["key"], "sk-1");
+        assert_eq!(auth["acc-1"]["type"], "api_key");
+        // 空 key 不产生条目
+        assert!(auth.get("acc-2").is_none());
+        // 已有条目保留
+        assert_eq!(auth["acc-0"]["key"], "old");
+    }
+
+    #[test]
+    fn split_account_keys_clears_removed_key() {
+        let mut cfg = serde_json::json!({
+            "accounts": [{"id": "acc-1", "name": "A", "api_key": ""}]
+        });
+        let mut auth = serde_json::Map::new();
+        auth.insert(
+            "acc-1".to_string(),
+            serde_json::json!({ "type": "api_key", "key": "sk-old" }),
+        );
+        auth.insert(
+            "A".to_string(),
+            serde_json::json!({ "type": "api_key", "key": "sk-old-name" }),
+        );
+        split_account_keys(&mut cfg, &mut auth);
+        // 清空 key 后，auth 中 id 与 name 键一并移除
+        assert!(auth.get("acc-1").is_none());
+        assert!(auth.get("A").is_none());
+    }
 
     #[test]
     fn models_url_derivation() {

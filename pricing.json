@@ -2,6 +2,7 @@
   "_meta": {
     "currency": "CNY",
     "billing_unit": "每百万 Token",
+    "account_pricing_note": "accounts 段按账号（id 或 name）覆盖模型价格，优先于全局价格；键值可为账号 id 或 name，与 auth.json 一致。",
     "cache_rules": {
       "explicit": {
         "write_multiplier": 1.25,
@@ -21,6 +22,36 @@
       "qianwen_pricing_api": "https://platform-home.qianwenai.com/data/api.json?product=AliyunDeliveryService&action=GetSeriesModel",
       "qianwen_model_page": "https://www.qianwenai.com/models/{model-id}",
       "qianwen_pricing_api_note": "需要 sec_token (CSRF) + session cookie，非公开接口；dataId 对应模型系列页"
+    }
+  },
+
+  "accounts": {
+    "acc-2": {
+      "note": "oc-zen 免费模型（仅账号级定价，全局未收录）",
+      "models": {
+        "deepseek-v4-flash-free": {
+          "category": "text",
+          "tiers": [
+            { "range": "unlimited", "input": 0, "output": 0 }
+          ],
+          "cache": false,
+          "free": true
+        }
+      }
+    },
+    "acc-3": {
+      "note": "DeepSeek 官方直连（覆盖全局 deepseek 段同模型价格）",
+      "models": {
+        "deepseek-v4-flash": {
+          "category": "text",
+          "tiers": [
+            { "range": "unlimited", "input": 1, "output": 2, "cache_hit": 0.02, "cache_miss": 1 }
+          ],
+          "cache": true,
+          "context_length": "1M",
+          "max_output": "384K"
+        }
+      }
     }
   },
 

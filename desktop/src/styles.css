@@ -198,8 +198,15 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* ---------- 服务标签 ---------- */
 .svc-bar { padding: 0 14px 9px; }
-.svc-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
-.svc-tabs::-webkit-scrollbar { height: 3px; }
+.svc-tabs {
+  display: flex; gap: 6px; overflow-x: auto;
+  padding-bottom: 4px;
+  user-select: none; cursor: grab;
+  scrollbar-width: none; /* 隐藏滚动条：拖拽 / 滚轮 / 触摸滑动即可横向滚动 */
+}
+.svc-tabs::-webkit-scrollbar { display: none; }
+.svc-tabs.dragging { cursor: grabbing; }
+.svc-tabs.dragging .svc-tab { pointer-events: none; }
 .svc-tab {
   display: inline-flex; align-items: center; gap: 6px;
   padding: 4px 11px; border-radius: 999px;

@@ -1,0 +1,5 @@
+{
+  "_readme": "API Key 独立存放（对齐 pi 的 auth.json 模式），与 config.example.json 的账号对应。键可为账号 id 或 name，值可为 {type, key} 或纯字符串。该文件已被 .gitignore 忽略。加载优先级：auth.json（按 id → name）> config.json accounts[].api_key > 旧 services[].openai_api_key。文件不存在时完全回退旧配置。",
+  "acc-1": { "type": "api_key", "key": "sk-your-dashscope-key" },
+  "acc-2": { "type": "api_key", "key": "sk-ant-your-anthropic-key" }
+}
