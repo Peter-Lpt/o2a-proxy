@@ -504,6 +504,38 @@ fn float_label(service: &str) -> String {
     }
 }
 
+// 创建悬浮窗。必须在 setup 阶段（事件循环启动前）创建：
+// Windows 上运行时动态创建透明 WebView2 窗口，其 wait_with_pump 消息泵
+// 会与主事件循环的 GetMessage 竞争，导致 WebView2 初始化回调丢失 ——
+// 表现为窗口空白、应用事件循环卡死（点击退出/托盘退出均无效）。
+fn create_float_window(
+    app: &tauri::AppHandle,
+    label: &str,
+    service: &str,
+) -> Result<tauri::WebviewWindow, tauri::Error> {
+    let url = if service.is_empty() {
+        "index.html#/float".to_string()
+    } else {
+        format!("index.html#/float?service={}", urlenc(service))
+    };
+    let w = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
+        .title("o2a-proxy 悬浮看板")
+        .inner_size(434.0, 234.0)
+        .min_inner_size(300.0, 170.0)
+        .resizable(true)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .visible(false)
+        // macOS 默认 acceptsFirstMouse=false：首次点击只会激活窗口而不会传递，
+        // 导致必须先点一次聚焦才能拖动。设为 true 后首次点击即可直接拖动。
+        .accept_first_mouse(true)
+        .build()?;
+    w.on_window_event(hide_on_close(app.clone(), label.to_string()));
+    Ok(w)
+}
+
 fn urlenc(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
@@ -529,20 +561,11 @@ fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, Stri
         }
         Ok(!visible)
     } else {
-        let url = format!("index.html#/float?service={}", urlenc(&service));
-        let w = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-            .title("o2a-proxy 悬浮看板")
-            .inner_size(434.0, 234.0)
-            .min_inner_size(300.0, 170.0)
-            .resizable(true)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(true)
-            .build()
-            .map_err(|e| e.to_string())?;
-        w.on_window_event(hide_on_close(app.clone(), label));
+        // 兜底：config 中新添加的服务（setup 阶段未预创建，仅 Windows 有预创建）。
+        // 动态创建后需显式 show，否则窗口保持隐藏。
+        let w = create_float_window(&app, &label, &service).map_err(|e| e.to_string())?;
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
         Ok(true)
     }
 }
@@ -649,25 +672,35 @@ pub fn run() {
                 panel.set_focus()?;
             }
 
-            let float_win = WebviewWindowBuilder::new(
-                app,
-                "float",
-                WebviewUrl::App("index.html#/float".into()),
-            )
-            .title("o2a-proxy 悬浮看板")
-            .inner_size(434.0, 234.0)
-            .min_inner_size(300.0, 170.0)
-            .resizable(true)
-            .decorations(false)
-            .transparent(true)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .visible(false)
-            // macOS 默认 acceptsFirstMouse=false：首次点击只会激活窗口而不会传递，
-            // 导致必须先点一次聚焦才能拖动。设为 true 后首次点击即可直接拖动。
-            .accept_first_mouse(true)
-            .build()?;
-            float_win.on_window_event(hide_on_close(app.handle().clone(), "float".to_string()));
+            let _float_win = create_float_window(app.handle(), "float", "")?;
+
+            // Windows 专用：预创建各服务的悬浮窗（隐藏）。
+            // 运行时动态创建透明 WebView2 窗口会与主事件循环消息泵竞争
+            // （见 create_float_window 注释），导致窗口空白、退出失效；
+            // setup 阶段创建则无此问题。macOS/Linux 无此问题，保持原有
+            // 按需创建行为，不在此预创建。
+            #[cfg(target_os = "windows")]
+            {
+                let state = app.state::<AppState>();
+                if let Ok(cfg) = read_config_value(&state) {
+                    if let Some(services) = cfg.get("services").and_then(|v| v.as_array()) {
+                        for s in services {
+                            let name = s
+                                .get("comment")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if name.is_empty() {
+                                continue;
+                            }
+                            let label = float_label(&name);
+                            if app.get_webview_window(&label).is_none() {
+                                let _ = create_float_window(app.handle(), &label, &name);
+                            }
+                        }
+                    }
+                }
+            }
 
             // 托盘菜单
             let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;

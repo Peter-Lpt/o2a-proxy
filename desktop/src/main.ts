@@ -6,5 +6,7 @@ import { applyTheme } from "./theme";
 
 applyTheme();
 const isFloat = window.location.hash.startsWith("#/float");
-if (isFloat) document.body.classList.add("float-mode");
+if (isFloat) {
+  document.body.classList.add("float-mode");
+}
 createApp(isFloat ? FloatApp : PanelApp).mount("#app");

@@ -4,7 +4,7 @@
       <span class="dot" :class="{ on: anyRunning }"></span>
       <span class="ttl">{{ floatTitle }}</span>
       <span class="sub">{{ statusText }}</span>
-      <button class="x" title="关闭悬浮看板" @click="api.toggleFloatFor(floatService)"><Icon name="x" :size="12" /></button>
+      <button class="x" title="关闭悬浮看板" data-tauri-drag-region="false" @click="api.toggleFloatFor(floatService)"><Icon name="x" :size="12" /></button>
     </div>
 
     <div class="stats">
@@ -20,7 +20,7 @@
     </div>
 
     <div class="spark-box">
-      <Spark :points="spark" :height="36" />
+      <Spark :points="spark" :height="36" class="spark-canvas" />
       <div class="spark-meta">
         <span class="sm">{{ sparkRange[0] }}</span>
         <span class="sm-lbl">缓存命中 · {{ spark.length }} 次</span>
@@ -146,14 +146,27 @@ function onStorage() {
   theme.value = applyTheme();
 }
 
+function onVisibility() {
+  if (!document.hidden) {
+    refresh();
+  }
+}
+
 onMounted(() => {
   theme.value = applyTheme();
   window.addEventListener("storage", onStorage);
+  document.addEventListener("visibilitychange", onVisibility);
   refresh();
-  timers.push(setInterval(refresh, 3000));
+  // 预创建的悬浮窗初始为隐藏：隐藏时不轮询，可见时才拉数据，避免空转
+  timers.push(
+    setInterval(() => {
+      if (!document.hidden) refresh();
+    }, 3000)
+  );
 });
 onUnmounted(() => {
   window.removeEventListener("storage", onStorage);
+  document.removeEventListener("visibilitychange", onVisibility);
   timers.forEach(clearInterval);
 });
 </script>
@@ -168,7 +181,8 @@ onUnmounted(() => {
      改用接近不透明的实色背景，保证拖动流畅 */
   background: var(--float-bg, rgba(13, 18, 32, 0.97));
   border: 1px solid var(--glass-border);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
+  /* 透明窗口四周只留 6px，阴影模糊必须能放进这个边距，否则会被窗口边缘硬切出矩形轮廓 */
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
   overflow: hidden;
   font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);
@@ -195,6 +209,9 @@ onUnmounted(() => {
 .num b.mid { color: var(--amber); }
 .num span { font-size: 10px; color: var(--muted); }
 .spark-box { flex: none; padding: 0 10px 2px; }
+/* 悬浮窗里没有外层宽度约束（主面板用 .live-spark 的 width:100%），
+   必须给 canvas 固定 CSS 尺寸；否则画布会按 dpr 逐次放大，在高分屏下撑爆布局 */
+.spark-canvas { display: block; width: 100%; height: 36px; }
 .spark-meta { display: flex; justify-content: space-between; align-items: center; font-size: 9.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; margin-top: 1px; }
 .sm-lbl { color: var(--muted); }
 .feed-wrap {
