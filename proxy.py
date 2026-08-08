@@ -53,25 +53,115 @@ logging.basicConfig(
 logger = logging.getLogger("proxy")
 
 
-class Service:
-    """单个服务的配置。mode: claude(Anthropic 转换) 或 codex(OpenAI 透传)。"""
+class Account:
+    """账号：凭证 + 端点。一个 key 最多两个端点（openai / anthropic），均可选填。
 
-    def __init__(self, name, mode, host, port, target_url, api_key,
-                 model, sub_model, max_tokens, proxy):
+    kind 自动推导：
+    - openai：只有 openai 端点（Codex 直连 / Claude 转 OpenAI）
+    - anthropic：只有 anthropic 端点（Claude Code 透传）
+    - both：双协议（中转站同 key 两端点）
+    - invalid：两端点皆空
+    """
+
+    def __init__(self, id, name, api_key, openai_url="", anthropic_url=""):
+        self.id = id
         self.name = name
-        self.mode = mode
+        self.api_key = api_key or ""
+        self.openai_url = (openai_url or "").strip()
+        self.anthropic_url = (anthropic_url or "").strip()
+
+    @property
+    def kind(self):
+        has_o = bool(self.openai_url)
+        has_a = bool(self.anthropic_url)
+        if has_o and has_a:
+            return "both"
+        if has_o:
+            return "openai"
+        if has_a:
+            return "anthropic"
+        return "invalid"
+
+    @property
+    def valid(self):
+        """账号是否可服务：有 key 且至少一个端点。"""
+        return self.kind != "invalid" and bool(self.api_key)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "api_key": self.api_key,
+            "openai_url": self.openai_url,
+            "anthropic_url": self.anthropic_url,
+        }
+
+
+class Service:
+    """单个服务（接入点）：独立端口 + 引用账号 + 客户端类型。
+
+    client: anthropic(Claude Code) | openai(Codex) | auto(按请求识别)
+    mode 由 client × 账号端点自动推导（兼容旧字段语义）：
+    - claude：Anthropic 入口 → 转换发送 OpenAI 端点
+    - codex：OpenAI 入口 → 发送 OpenAI 端点
+    - direct：Anthropic 入口 → 透传发送 Anthropic 端点
+    """
+
+    def __init__(self, name, account, client, host, port, model, sub_model, max_tokens, proxy):
+        self.name = name
+        self.account = account
+        self.client = client
         self.host = host
         self.port = port
-        self.target_url = target_url
-        self.api_key = api_key
         self.model = model
         self.sub_model = sub_model
         self.max_tokens = max_tokens
         self.proxy = proxy or ""
+        self._mode_override = None  # auto 服务每次请求识别后临时指定
+
+    @property
+    def api_key(self):
+        return self.account.api_key
+
+    @property
+    def kind(self):
+        return self.account.kind
+
+    @property
+    def mode(self):
+        """推导出的分派模式（claude / codex / direct / auto）。"""
+        if self._mode_override:
+            return self._mode_override
+        c = self.client
+        if c == "openai":
+            return "codex"
+        if c == "anthropic":
+            # 账号有 anthropic 端点 → 透传；只有 openai 端点 → 转换
+            return "direct" if self.kind in ("anthropic", "both") else "claude"
+        return "auto"
+
+    @property
+    def target_url(self):
+        """出口端点（完整 URL）。direct 用 anthropic 端点，其余用 openai 端点。"""
+        if self.mode == "direct":
+            return self.account.anthropic_url
+        return self.account.openai_url
+
+    def with_mode(self, mode):
+        """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
+        s = Service(self.name, self.account, self.client, self.host, self.port,
+                    self.model, self.sub_model, self.max_tokens, self.proxy)
+        s._mode_override = mode
+        return s
 
 
 def load_config():
-    """从 config.json 读取服务列表；文件不存在时回退到环境变量（单服务）。"""
+    """从 config.json 读取账号与服务列表；文件不存在时回退到环境变量（单服务）。
+
+    支持两种结构：
+    - 新结构：accounts[]（账号）+ services[].account（引用 id）+ client
+    - 旧结构：services[] 内嵌 openai_base_url/openai_api_key —— 自动迁移为账号
+    """
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
     services = []
     if os.path.exists(config_path):
@@ -88,17 +178,50 @@ def load_config():
                                   config.get("cache_stats_dir", "cache_stats"))
             os.environ.setdefault("CACHE_STATS_RETENTION_DAYS",
                                   str(config.get("cache_stats_retention_days", 30)))
-            for svc in config.get("services", []):
+
+            services_raw = config.get("services", [])
+            accounts_raw = config.get("accounts", [])
+            legacy = not accounts_raw and any(
+                ("openai_base_url" in s or "openai_api_key" in s) for s in services_raw
+            )
+
+            accounts = {}
+            for i, a in enumerate(accounts_raw):
+                acc = Account(
+                    id=a.get("id") or f"acc-{i + 1}",
+                    name=a.get("name") or a.get("id") or f"账号{i + 1}",
+                    api_key=a.get("api_key", ""),
+                    openai_url=a.get("openai_url", ""),
+                    anthropic_url=a.get("anthropic_url", ""),
+                )
+                accounts[acc.id] = acc
+
+            mode_to_client = {"claude": "anthropic", "codex": "openai", "direct": "anthropic"}
+            for i, svc in enumerate(services_raw):
                 mode = svc.get("mode", "claude")
-                if mode not in ("claude", "codex", "direct"):
+                if mode not in ("claude", "codex", "direct", "auto"):
                     continue  # 未知模式跳过
+                acc_id = svc.get("account")
+                acc = accounts.get(acc_id) if acc_id else None
+                if acc is None:
+                    # 自动迁移：旧格式（services 内嵌 url/key）或引用缺失时按服务生成账号
+                    acc = Account(
+                        id=f"acc-{i + 1}",
+                        name=svc.get("comment") or f"账号{i + 1}",
+                        api_key=svc.get("openai_api_key", ""),
+                        openai_url=svc.get("openai_base_url", ""),
+                        anthropic_url=svc.get("anthropic_base_url", ""),
+                    )
+                    accounts[acc.id] = acc
+                client = svc.get("client") or mode_to_client.get(mode, "auto")
+                if client not in ("anthropic", "openai", "auto"):
+                    client = "auto"
                 services.append(Service(
                     name=svc.get("comment") or svc.get("model") or mode,
-                    mode=mode,
+                    account=acc,
+                    client=client,
                     host=svc.get("listen_host", "127.0.0.1"),
                     port=int(svc.get("listen_address", "8317")),
-                    target_url=svc.get("openai_base_url", ""),
-                    api_key=svc.get("openai_api_key", ""),
                     model=svc.get("model", "qwen-plus"),
                     sub_model=svc.get("sub_model", svc.get("model", "qwen-plus")),
                     max_tokens=int(svc.get("max_tokens", 1000000 if svc.get("context_1m") else 4096)),
@@ -107,9 +230,12 @@ def load_config():
     if not services and API_KEY:
         # 回退：环境变量配置（单服务）
         services.append(Service(
-            name="default", mode="claude", host=LISTEN_HOST, port=LISTEN_PORT,
-            target_url=TARGET_URL, api_key=API_KEY, model=PROXY_MODEL,
-            sub_model=SUB_PROXY_MODEL, max_tokens=PROXY_MAX_TOKENS,
+            name="default",
+            account=Account(id="acc-env", name="环境变量账号", api_key=API_KEY,
+                            openai_url=TARGET_URL, anthropic_url=""),
+            client="auto",
+            host=LISTEN_HOST, port=LISTEN_PORT,
+            model=PROXY_MODEL, sub_model=SUB_PROXY_MODEL, max_tokens=PROXY_MAX_TOKENS,
             proxy=PROXY,
         ))
     return services
@@ -122,10 +248,11 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 class CacheStats:
     """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。"""
 
-    def __init__(self, stats_dir="cache_stats", retention_days=30, service=None):
+    def __init__(self, stats_dir="cache_stats", retention_days=30, service=None, account=None):
         self.stats_dir = stats_dir
         self.retention_days = retention_days
         self.service = service or ""
+        self.account = account or ""
         self._lock = threading.Lock()
         self._last_hour = None
         self._pricing = None
@@ -239,6 +366,7 @@ class CacheStats:
         return {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "service": self.service,
+            "account": self.account,
             "model": model,
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read,
@@ -497,7 +625,7 @@ _stats = {}
 _stats_lock = threading.Lock()
 
 
-def get_stats(service=None):
+def get_stats(service=None, account=None):
     """获取 CacheStats 实例（线程安全的懒初始化，按服务区分）。"""
     key = service or "default"
     if key not in _stats:
@@ -506,8 +634,123 @@ def get_stats(service=None):
                 stats_dir = os.environ.get("CACHE_STATS_DIR", "cache_stats")
                 retention = int(os.environ.get("CACHE_STATS_RETENTION_DAYS", "30"))
                 _stats[key] = CacheStats(stats_dir=stats_dir, retention_days=retention,
-                                         service=service)
+                                         service=service, account=account)
     return _stats[key]
+
+
+def detect_client(request, payload):
+    """自动识别入口协议：anthropic（Claude Code）还是 openai（Codex）。
+
+    先看路径（/v1/messages、/v1/responses、/chat/completions），
+    再看请求体特征（Anthropic 必有 max_tokens/system，OpenAI Responses 有 input）。
+    """
+    path = getattr(request, "path", "") or ""
+    p = path.lower()
+    if "/v1/messages" in p:
+        return "anthropic"
+    if "/responses" in p or "/chat/completions" in p or "/completions" in p:
+        return "openai"
+    if isinstance(payload, dict):
+        if "input" in payload and "messages" not in payload:
+            return "openai"  # OpenAI Responses
+        if "max_tokens" in payload and "system" in payload:
+            return "anthropic"  # Anthropic Messages
+        if "messages" in payload:
+            msgs = payload.get("messages") or []
+            # Anthropic 的 content 是 block 列表（text/tool_use/tool_result）
+            if msgs and isinstance(msgs[0], dict) and isinstance(msgs[0].get("content"), list):
+                return "anthropic"
+            return "openai"
+        if "max_tokens" in payload:
+            return "anthropic"
+    return "openai"  # 默认
+
+
+def resolve_mode(service, request=None, payload=None):
+    """确定一次请求的分派模式（claude / codex / direct）。
+
+    client 显式时直接推导；auto 时先识别入口协议，再按账号端点选转换或透传。
+    返回 None 表示该组合不支持（OpenAI 客户端 + 无 OpenAI 端点的账号）。
+    """
+    if service.client == "auto":
+        client = detect_client(request, payload)
+        if client == "anthropic":
+            return "direct" if service.kind in ("anthropic", "both") else "claude"
+        return "codex" if service.kind != "anthropic" else None
+    # 显式 client
+    if service.client == "openai":
+        return "codex" if service.kind != "anthropic" else None
+    # anthropic 客户端
+    return "direct" if service.kind in ("anthropic", "both") else "claude"
+
+
+def get_account_summary(account_id, period="day"):
+    """按账号聚合其下所有服务的统计（服务级 summary 动态归并，避免双写一致性问题）。"""
+    services = load_config()
+    matched = [s for s in services if s.account.id == account_id]
+    if not matched:
+        return {"period": period, "account": account_id, "requests": 0}
+    if period == "all":
+        total = {
+            "requests": 0, "total_input_tokens": 0, "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0, "total_output_tokens": 0, "total_cost": 0.0,
+        }
+        days = []
+        for svc in matched:
+            s = get_stats(svc.name).get_summary("all")
+            for d in s.get("days", []):
+                for k, v in d.get("daily_total", {}).items():
+                    if k in total:
+                        total[k] += v
+                days.append(d)
+        return {"period": "all", "account": account_id, "days": days, "total": total}
+    # day / hour：合并 daily_total，hours 按时间排序叠加
+    agg_daily = {
+        "requests": 0, "total_input_tokens": 0, "total_cache_read_tokens": 0,
+        "total_cache_write_tokens": 0, "total_output_tokens": 0, "total_cost": 0.0,
+    }
+    hours = {}
+    for svc in matched:
+        s = get_stats(svc.name).get_summary(period)
+        daily = s.get("daily_total") if period == "day" else s
+        if not daily:
+            continue
+        for k, v in daily.items():
+            if k in agg_daily:
+                agg_daily[k] += v
+        for h in s.get("hours", []):
+            hid = h.get("hour", "")
+            if hid in hours:
+                cur = hours[hid]
+                cur["requests"] += h.get("requests", 0)
+                cur["total_input_tokens"] += h.get("total_input_tokens", 0)
+                cur["total_cache_read_tokens"] += h.get("total_cache_read_tokens", 0)
+                cur["total_cache_write_tokens"] += h.get("total_cache_write_tokens", 0)
+                cur["total_output_tokens"] += h.get("total_output_tokens", 0)
+                cur["total_cost"] += h.get("total_cost", 0.0)
+                cur["avg_cache_hit_rate"] = (
+                    (cur["avg_cache_hit_rate"] + h.get("avg_cache_hit_rate", 0.0)) / 2
+                )
+                cur["avg_cache_coverage"] = (
+                    (cur["avg_cache_coverage"] + h.get("avg_cache_coverage", 0.0)) / 2
+                )
+            else:
+                hours[hid] = dict(h)
+    agg_daily["avg_cache_hit_rate"] = (
+        agg_daily["total_cache_read_tokens"]
+        / (agg_daily["total_cache_read_tokens"] + agg_daily["total_input_tokens"])
+        if (agg_daily["total_cache_read_tokens"] + agg_daily["total_input_tokens"]) > 0 else 0.0
+    )
+    agg_daily["avg_cache_coverage"] = (
+        agg_daily["total_cache_read_tokens"]
+        / (agg_daily["total_cache_read_tokens"] + agg_daily["total_cache_write_tokens"])
+        if (agg_daily["total_cache_read_tokens"] + agg_daily["total_cache_write_tokens"]) > 0 else 0.0
+    )
+    return {
+        "period": period, "account": account_id,
+        "hours": [hours[h] for h in sorted(hours)],
+        "daily_total": agg_daily,
+    }
 
 
 def is_cache_stats_enabled():
@@ -675,7 +918,12 @@ def _responses_content_to_text(content):
 
 
 def _responses_to_chat(req, service):
-    """将 OpenAI Responses API 请求转成 Chat Completions 请求。"""
+    """将 OpenAI Responses API 请求转成 Chat Completions 请求。
+
+    兼容两种入参格式（Codex / pi 等客户端可能发任一种）：
+    - Responses 格式：req 含 input（字符串或 item 数组）
+    - Chat Completions 格式：req 含 messages —— 直通，仅做 role 规范化
+    """
     messages = []
     pending_calls = []  # 连续 function_call 项合并为一条 assistant 消息
 
@@ -688,32 +936,55 @@ def _responses_to_chat(req, service):
             })
             del pending_calls[:]
 
-    for item in req.get("input", []):
-        if not isinstance(item, dict):
-            continue
-        itype = item.get("type")
-        if itype == "function_call":
-            pending_calls.append({
-                "id": item.get("call_id") or item.get("id") or "",
-                "type": "function",
-                "function": {
-                    "name": item.get("name", ""),
-                    "arguments": item.get("arguments", ""),
-                },
-            })
-        elif itype == "function_call_output":
-            flush_calls()
-            messages.append({
-                "role": "tool",
-                "tool_call_id": item.get("call_id") or item.get("id") or "",
-                "content": item.get("output", ""),
-            })
-        elif "role" in item:
-            flush_calls()
-            role = item.get("role")
-            if role == "developer":
-                role = "system"
-            messages.append({"role": role, "content": _responses_content_to_text(item.get("content", ""))})
+    if not req.get("input"):
+        # Chat Completions 直通：整包透传（保留 stream/tools/stop 等全部字段），仅替换 model、规范化 role
+        chat = {k: v for k, v in req.items() if k != "model"}
+        msgs = []
+        for msg in chat.get("messages", []):
+            if not isinstance(msg, dict):
+                continue
+            m = dict(msg)
+            if m.get("role") == "developer":
+                m["role"] = "system"
+            msgs.append(m)
+        chat["messages"] = msgs
+        # 透传客户端请求的模型名（同一端口可服务多个模型），缺省回退服务配置
+        chat["model"] = req.get("model") or service.model
+        if not chat.get("max_tokens") and not chat.get("max_output_tokens"):
+            # 没带 max_tokens 时用服务默认，但封顶上游支持的 131072，避免 1M 上下文默认值触发上游 400
+            chat["max_tokens"] = min(service.max_tokens, 131072)
+        return chat
+    else:
+        raw_input = req.get("input", [])
+        if isinstance(raw_input, str):
+            # Responses 规范允许 input 为纯字符串
+            raw_input = [{"role": "user", "content": raw_input}]
+        for item in raw_input:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "function_call":
+                pending_calls.append({
+                    "id": item.get("call_id") or item.get("id") or "",
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": item.get("arguments", ""),
+                    },
+                })
+            elif itype == "function_call_output":
+                flush_calls()
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": item.get("call_id") or item.get("id") or "",
+                    "content": item.get("output", ""),
+                })
+            elif "role" in item:
+                flush_calls()
+                role = item.get("role")
+                if role == "developer":
+                    role = "system"
+                messages.append({"role": role, "content": _responses_content_to_text(item.get("content", ""))})
     flush_calls()
 
     instructions = req.get("instructions", "")
@@ -721,7 +992,7 @@ def _responses_to_chat(req, service):
         messages.insert(0, {"role": "system", "content": instructions})
 
     chat = {
-        "model": service.model,
+        "model": req.get("model") or service.model,
         "messages": messages,
         "stream": req.get("stream", False),
     }
@@ -1168,7 +1439,22 @@ class _ProxyHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
-        mode = getattr(self, "service", None).mode if getattr(self, "service", None) else "claude"
+        svc = getattr(self, "service", None)
+        mode = svc.mode if svc else "claude"
+        if mode == "auto":
+            # client=auto：读 body 识别入口协议后确定分派模式
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                payload = None
+            mode = resolve_mode(svc, self, payload)
+            if mode is None:
+                self._send_error(400, "该账号没有 OpenAI 端点，无法服务 OpenAI 客户端（Codex）")
+                return
+            self._cached_body = body
+            self.service = svc.with_mode(mode)
         if mode == "codex":
             self._handle_openai_post()
         elif mode == "direct":
@@ -1178,8 +1464,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
 
     def _handle_claude_post(self):
         req_start = time.time()
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+        body = getattr(self, "_cached_body", None)
+        if body is None:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
 
         try:
             anthropic_request = json.loads(body)
@@ -1209,8 +1497,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _handle_openai_post(self):
         """OpenAI Responses (codex) 请求：Responses -> Chat 转换后转发，响应再转回 Responses。"""
         req_start = time.time()
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+        body = getattr(self, "_cached_body", None)
+        if body is None:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
         try:
             req = json.loads(body)
         except json.JSONDecodeError:
@@ -1229,8 +1519,10 @@ class _ProxyHandler(BaseHTTPRequestHandler):
     def _handle_direct_post(self):
         """Anthropic 原生透传：原样转发请求、原样返回响应，抓取 usage 记统计。"""
         req_start = time.time()
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+        body = getattr(self, "_cached_body", None)
+        if body is None:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
         try:
             req = json.loads(body)
         except json.JSONDecodeError:
@@ -2034,7 +2326,11 @@ class _ProxyHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"error": "cache stats is disabled"})
                 return
             period = self._get_query_param("period", "day")
-            summary = get_stats(self.service.name).get_summary(period)
+            account_id = self._get_query_param("account", "")
+            if account_id:
+                summary = get_account_summary(account_id, period)
+            else:
+                summary = get_stats(self.service.name).get_summary(period)
             self._send_json(200, summary)
         elif path == "/health":
             self._send_json(200, {"status": "ok"})

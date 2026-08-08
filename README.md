@@ -8,6 +8,7 @@ Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发�
 - **流式响应**：完整支持 SSE 流式输出，thinking / tool_calls / usage 逐段透传
 - **异步引擎**：asyncio + aiohttp，单进程多服务、连接池复用、客户端断连即取消上游
 - **多服务配置**：`config.json` 支持任意数量服务，每服务独立端口、独立启停
+- **多账号管理**：账号（API Key + OpenAI/Anthropic 端点）与服务分离，多服务可复用同一账号，账号级统计聚合
 - **费用与缓存统计**：JSONL 原始记录 + 小时聚合，命中率 / 覆盖率 / 费用估算
 - **桌面客户端**（`desktop/`）：托盘图标 + 右键菜单、悬浮看板、统计图表、配置管理、模型列表联想、深/浅主题，跨平台（Windows / macOS / Linux）
 - **兼容旧版**：`proxy.py`（线程版引擎）仍可运行
@@ -109,15 +110,23 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
   "cache_stats_enabled": true,
   "cache_stats_dir": "cache_stats",
   "cache_stats_retention_days": 30,
+  "accounts": [
+    {
+      "id": "acc-1",
+      "name": "DashScope",
+      "api_key": "sk-your-api-key",
+      "openai_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "anthropic_url": ""
+    }
+  ],
   "services": [
     {
       "comment": "dashscope",
-      "mode": "claude",
+      "account": "acc-1",
+      "client": "anthropic",
       "model": "qwen-plus",
       "sub_model": "qwen-plus",
-      "listen_address": 11011,
-      "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      "openai_api_key": "sk-your-api-key"
+      "listen_address": 11011
     }
   ]
 }
@@ -129,15 +138,29 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `cache_stats_enabled` | 是否记录缓存统计 |
 | `cache_stats_dir` | 统计目录；**留空默认 `<项目根>/cache_stats`**（应用所在位置的相对目录），显式填写时相对路径基于项目根解析 |
 | `cache_stats_retention_days` | 统计保留天数 |
+| `accounts[].id` | 账号唯一 id（服务引用它，自动生成不可改） |
+| `accounts[].name` | 账号显示名 |
+| `accounts[].api_key` | 账号 API Key（同 Key 可用两端点） |
+| `accounts[].openai_url` | OpenAI 兼容端点（完整 chat/completions 地址或 base，可留空） |
+| `accounts[].anthropic_url` | Anthropic 兼容端点（如 `https://api.anthropic.com/v1/messages`，可留空） |
 | `services[].comment` | 服务备注（客户端里作为服务名） |
-| `services[].mode` | `claude`（Anthropic 转换）/ `codex`（OpenAI 透传）/ `direct`（Anthropic 原生透传） |
+| `services[].account` | 引用的账号 id |
+| `services[].client` | 客户端类型：`anthropic`（Claude Code）/ `openai`（Codex）/ `auto`（按请求自动识别，默认） |
 | `services[].model` | 主模型 |
 | `services[].sub_model` | 子模型（Claude Code 子 agent / Task 工具使用） |
 | `services[].listen_address` | 监听端口，每服务独立 |
-| `services[].openai_base_url` | 上游 OpenAI 兼容 API 地址 |
-| `services[].openai_api_key` | 上游 API Key |
 | `services[].context_1m` | 1M 上下文模式（影响默认 `max_tokens`） |
 | `services[].max_tokens` | 最大输出 token（缺省 4096） |
+
+> **兼容**：旧格式（`services[].openai_base_url` / `openai_api_key` 内嵌，`mode` 字段）读取时自动迁移为账号结构，无需手动改配置。
+
+### 转换矩阵（client × 账号端点）
+
+| client | 账号只有 OpenAI 端点 | 账号只有 Anthropic 端点 | 双协议端点 |
+|---|---|---|---|
+| `anthropic`（Claude Code） | Anthropic→OpenAI 转换发送 | Anthropic 原生透传 | 透传 |
+| `openai`（Codex） | Responses→Chat 透传 | **报错**（无 OpenAI 端点） | 透传 |
+| `auto` | 按请求路径/格式自动识别 | 同左 | 同左 |
 
 ## 统计与费用
 

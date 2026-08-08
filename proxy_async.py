@@ -32,10 +32,13 @@ from proxy import (
     _responses_to_chat,
     _strip_cache_control,
     convert_request,
+    detect_client,
+    get_account_summary,
     get_stats,
     is_cache_stats_enabled,
     load_config,
     logger,
+    resolve_mode,
     sse_event,
 )
 
@@ -112,7 +115,9 @@ async def stream_write(resp: web.StreamResponse, data: bytes) -> None:
 async def record_stats(service: Service, model: str, usage: dict) -> None:
     """记录缓存统计（写盘放到线程池，避免阻塞事件循环）。"""
     if is_cache_stats_enabled() and usage and usage.get("input_tokens"):
-        await asyncio.to_thread(get_stats(service.name).record, model, usage)
+        await asyncio.to_thread(
+            get_stats(service.name, service.account.id).record, model, usage
+        )
 
 
 def upstream_timeout(*, total=None):
@@ -570,7 +575,7 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
         content = message.get("content", "")
         finish_reason = choice.get("finish_reason", "stop")
 
-        for tc in message.get("tool_calls", []):
+        for tc in message.get("tool_calls") or []:
             try:
                 tc_input = json.loads(tc.get("function", {}).get("arguments", "{}"))
             except (json.JSONDecodeError, ValueError):
@@ -638,6 +643,9 @@ async def handle_openai_stream(request: web.Request, service: Service,
     logger.info(f"[FWD][codex] forwarding stream model={service.model} "
                 f"url={target} payload_bytes={len(chat_body)}")
 
+    # 请求格式决定响应方向：Responses 入（有 input）→ 转 Responses 出；
+    # Chat Completions 入（messages）→ 上游 SSE 原样透传
+    is_responses = bool(req.get("input"))
     resp = None
     try:
         async with session.post(
@@ -658,12 +666,28 @@ async def handle_openai_stream(request: web.Request, service: Service,
 
             model = service.model
             latest_usage = None
-            translator = _ResponsesStreamTranslator(req.get("model") or service.model)
+            if is_responses:
+                translator = _ResponsesStreamTranslator(req.get("model") or service.model)
             try:
                 while True:
                     line = await up.content.readline()
                     if not line:
                         break
+                    if not is_responses:
+                        # Chat 直通：原样转发每行，仅顺带提取 usage 供统计
+                        stripped = line.strip()
+                        if stripped.startswith(b"data:") :
+                            piece = stripped[5:].strip()
+                            if piece and piece != b"[DONE]":
+                                try:
+                                    chunk = json.loads(piece.decode("utf-8", errors="replace"))
+                                    usage = chunk.get("usage")
+                                    if usage:
+                                        latest_usage = _convert_usage(usage)
+                                except Exception:
+                                    pass
+                        await stream_write(resp, line)
+                        continue
                     if line.startswith(b"data:"):
                         data_str = line[5:].strip().decode("utf-8", errors="replace")
                         if data_str == "[DONE]":
@@ -725,7 +749,12 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         converted = _convert_usage(data.get("usage") or {})
         if converted.get("input_tokens") and is_cache_stats_enabled():
             model = service.model
-            await asyncio.to_thread(get_stats(service.name).record, model, converted)
+            await asyncio.to_thread(
+                get_stats(service.name, service.account.id).record, model, converted
+            )
+        if not req.get("input"):
+            # Chat 直通：上游本就是 chat.completion，原样返回
+            return web.Response(body=raw, status=200, content_type="application/json")
         out = _chat_to_responses_json(data, req.get("model") or service.model)
         raw = json.dumps(out).encode("utf-8")
     except Exception as e:
@@ -780,7 +809,9 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
         if "prompt_tokens" in usage or "completion_tokens" in usage:
             usage = _convert_usage(usage)
         if (usage.get("input_tokens") or usage.get("output_tokens")) and is_cache_stats_enabled():
-            await asyncio.to_thread(get_stats(service.name).record, model, usage)
+            await asyncio.to_thread(
+                get_stats(service.name, service.account.id).record, model, usage
+            )
     except Exception as e:
         logger.warning(f"[direct] response parse failed: {e}")
 
@@ -890,7 +921,18 @@ async def handle_request(request: web.Request):
             return openai_error_response(400, "invalid json")
         return error_response(400, "invalid json")
 
-    if service.mode == "codex":
+    # 确定分派模式（client=auto 时按路径/请求体识别入口协议）
+    mode = resolve_mode(service, request, payload)
+    if mode is None:
+        return openai_error_response(
+            400,
+            "该账号没有 OpenAI 端点，无法服务 OpenAI 客户端（Codex）。"
+            "请为该账号配置 openai_url，或改用 Claude Code / Anthropic 客户端。",
+        )
+    if service.client == "auto":
+        service = service.with_mode(mode)
+
+    if mode == "codex":
         stream = bool(payload.get("stream", False))
         logger.info(f"[REQ][codex] model={service.model} stream={stream} "
                     f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
@@ -928,15 +970,22 @@ async def handle_get(request: web.Request, service: Service):
         if not is_cache_stats_enabled():
             return json_response({"error": "cache stats is disabled"})
         period = request.query.get("period", "day")
-        summary = await asyncio.to_thread(get_stats(service.name).get_summary, period)
+        account_id = request.query.get("account")
+        if account_id:
+            # 账号级聚合：归并该账号下所有服务的 summary
+            summary = await asyncio.to_thread(get_account_summary, account_id, period)
+        else:
+            summary = await asyncio.to_thread(get_stats(service.name).get_summary, period)
         return json_response(summary)
     if path == "/health":
         return json_response({"status": "ok"})
     return json_response({
         "status": "ok",
         "mode": service.mode,
+        "client": service.client,
+        "account": service.account.name,
         "target": service.target_url,
-        "endpoints": ["/stats?period=hour|day|all", "/health"],
+        "endpoints": ["/stats?period=hour|day|all", "/stats?account=<账号id>&period=day", "/health"],
     })
 
 
@@ -955,7 +1004,7 @@ def _parent_watchdog(parent_pid: int) -> None:
 
 async def serve(service_filter: str = None) -> int:
     services = load_config()
-    enabled = [s for s in services if s.mode in ("claude", "codex", "direct") and s.api_key]
+    enabled = [s for s in services if s.account.valid]
     if service_filter:
         enabled = [s for s in enabled
                    if s.name == service_filter or str(s.port) == service_filter]

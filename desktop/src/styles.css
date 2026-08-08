@@ -390,22 +390,23 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 /* ---------- 配置页 ---------- */
 .fc-h { font-weight: 700; font-size: 12.5px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: baseline; }
 .fc-sub { color: var(--muted); font-weight: 400; font-size: 11px; font-family: var(--font-mono); }
-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); margin-bottom: 9px; }
-form label.inline { flex-direction: row; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
-form input[type="text"], form input[type="number"], form input[type="password"], form select {
+form label, .acc-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); margin-bottom: 9px; }
+form label.inline, .acc-edit label.inline { flex-direction: row; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
+form input[type="text"], form input[type="number"], form input[type="password"], form select,
+.acc-edit input[type="text"], .acc-edit input[type="password"], .acc-edit select {
   width: 100%;
   background-color: var(--bg);
   border: 1px solid var(--border-soft); border-radius: 8px;
   padding: 7px 9px; font-size: 12px; color: var(--text); outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
 }
-form select {
+form select, .acc-edit select {
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2393a0b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 9px center;
   padding-right: 26px;
 }
-[data-theme="light"] form select {
+[data-theme="light"] form select, [data-theme="light"] .acc-edit select {
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235d6c88' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 input[type="number"]::-webkit-outer-spin-button,
@@ -413,11 +414,11 @@ input[type="number"]::-webkit-inner-spin-button {
   -webkit-appearance: none;
   margin: 0;
 }
-form input:focus, form select:focus {
+form input:focus, form select:focus, .acc-edit input:focus, .acc-edit select:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.15);
 }
-form input[type="checkbox"] { accent-color: var(--blue); width: 15px; height: 15px; }
+form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: var(--blue); width: 15px; height: 15px; }
 .field-row { display: flex; gap: 6px; }
 .field-row input { flex: 1; }
 .field-row .icon-btn { flex: none; }
@@ -518,3 +519,57 @@ form input[type="checkbox"] { accent-color: var(--blue); width: 15px; height: 15
 .chart-tip .tip-row i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .chart-tip .tip-row span { margin-left: auto; padding-left: 12px; }
 .chart-tip .tip-total { border-top: 1px solid var(--hairline); margin-top: 4px; padding-top: 3px; display: flex; justify-content: space-between; font-weight: 600; }
+
+/* ---------- 账号页 ---------- */
+.acc-card { margin-bottom: 10px; }
+.acc-name { font-weight: 700; font-size: 12.5px; }
+.acc-kind { font-size: 10px; padding: 2px 7px; border-radius: 20px; font-weight: 600; }
+.acc-kind.openai { background: rgba(16, 185, 129, 0.14); color: var(--green); }
+.acc-kind.anthropic { background: rgba(217, 119, 6, 0.14); color: var(--amber); }
+.acc-kind.both { background: rgba(99, 102, 241, 0.16); color: #818cf8; }
+.acc-kind.none { background: var(--bg2); color: var(--muted); }
+.acc-endpoints { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted); margin-bottom: 9px; }
+.acc-endpoints div { display: flex; gap: 8px; padding: 2px 0; }
+.ep-lbl { flex: none; color: var(--muted-2); width: 76px; display: inline-flex; align-items: center; gap: 6px; }
+.ep-val { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ep-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.ep-dot.oa { background: var(--green); }
+.ep-dot.an { background: var(--amber); }
+/* 账号编辑态：端点分组与标签 */
+.acc-edit { display: flex; flex-direction: column; }
+.acc-edit .ep-grid { display: flex; flex-direction: column; gap: 9px; margin-bottom: 9px; }
+.acc-edit .ep-field { margin-bottom: 0; }
+.acc-edit .ep-tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10px; font-weight: 600; padding: 1px 8px; border-radius: 20px;
+  align-self: flex-start;
+}
+.acc-edit .ep-tag.oa { background: rgba(16, 185, 129, 0.13); color: var(--green); }
+.acc-edit .ep-tag.an { background: rgba(217, 119, 6, 0.13); color: var(--amber); }
+.acc-edit .ep-tag.oa::before, .acc-edit .ep-tag.an::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+}
+.acc-edit .ep-tag.oa::before { background: var(--green); }
+.acc-edit .ep-tag.an::before { background: var(--amber); }
+.acc-edit-tip { margin-left: auto; font-size: 10px; color: var(--muted-2); align-self: center; }
+.acc-hint-row { display: flex; align-items: flex-start; gap: 6px; font-size: 10.5px; }
+.acc-edit .model-hint { margin-top: 0; margin-bottom: 8px; }
+/* 服务视图：所属账号摘要 */
+.acc-mini {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  background: var(--bg2); border: 1px dashed var(--border-soft); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 11px; font-size: 10.5px;
+}
+.acc-mini-title { color: var(--muted-2); font-weight: 600; }
+.acc-mini-ep { font-family: var(--font-mono); color: var(--muted); max-width: 38%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acc-mini .link-btn { margin-left: auto; }
+/* 全部视图：概览 */
+.ov-rows { display: flex; flex-direction: column; gap: 7px; }
+.ov-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.ov-row .ov-k { color: var(--muted); width: 60px; }
+.ov-row b { color: var(--text); font-size: 14px; }
+.ov-row .ov-sub { color: var(--muted-2); font-size: 10.5px; margin-left: auto; }
+/* 服务视图：入口协议说明 */
+.proto-row { display: flex; align-items: baseline; gap: 8px; font-size: 10.5px; margin: -4px 0 9px; }
+.proto-lbl { color: var(--muted-2); flex: none; }
+.proto-val { color: var(--muted); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

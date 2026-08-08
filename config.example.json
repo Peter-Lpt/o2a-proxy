@@ -1,25 +1,42 @@
 {
+  "auth_token": "qs-cc",
   "cache_stats_enabled": true,
   "cache_stats_dir": "cache_stats",
   "cache_stats_retention_days": 30,
   "stream_timeout": 600,
+  "accounts": [
+    {
+      "id": "acc-1",
+      "name": "示例：阿里云 DashScope",
+      "api_key": "sk-your-api-key-here",
+      "openai_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "anthropic_url": ""
+    },
+    {
+      "id": "acc-2",
+      "name": "示例：Anthropic 官方",
+      "api_key": "sk-ant-your-anthropic-key",
+      "openai_url": "",
+      "anthropic_url": "https://api.anthropic.com/v1/messages"
+    }
+  ],
   "services": [
     {
-      "comment": "示例：阿里云 DashScope（claude 转换）",
-      "mode": "claude",
+      "comment": "Claude Code 主力（DashScope，Anthropic→OpenAI 转换）",
+      "account": "acc-1",
+      "client": "anthropic",
       "model": "qwen-plus",
       "sub_model": "qwen-plus",
       "listen_address": "11011",
-      "openai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-      "openai_api_key": "sk-your-api-key-here"
+      "max_tokens": 1000000,
+      "context_1m": true
     },
     {
-      "comment": "示例：Anthropic 直连透传（direct）",
-      "mode": "direct",
+      "comment": "Claude Code 直连（Anthropic 透传）",
+      "account": "acc-2",
+      "client": "anthropic",
       "model": "claude-4",
-      "listen_address": "11013",
-      "openai_base_url": "https://api.anthropic.com/v1/messages",
-      "openai_api_key": "sk-ant-your-anthropic-key"
+      "listen_address": "11012"
     }
   ]
 }

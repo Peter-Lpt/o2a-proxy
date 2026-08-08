@@ -175,14 +175,15 @@ onUnmounted(() => {
 * { margin: 0; padding: 0; box-sizing: border-box; }
 .float {
   position: absolute;
-  inset: 6px; /* 铺满窗口（留 6px 边距），随窗口缩放自适应 */
+  inset: 6px; /* 铺满窗口（留 6px 边距，保证 border 完整显示），随窗口缩放自适应 */
   border-radius: 14px; /* 与主面板 .popover 一致 */
   /* 不用 backdrop-filter：透明置顶窗口上每帧采样/模糊桌面是拖动卡顿主因，
      改用接近不透明的实色背景，保证拖动流畅 */
   background: var(--float-bg, rgba(13, 18, 32, 0.97));
   border: 1px solid var(--glass-border);
-  /* 透明窗口四周只留 6px，阴影模糊必须能放进这个边距，否则会被窗口边缘硬切出矩形轮廓 */
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  /* 不加 box-shadow：透明窗口的 CSS 阴影只能渲染在窗口内 6px 边距里，
+     在 Windows WebView2 上会形成一圈半透明的"第二层边"（Mac WKWebView
+     合成不明显）；悬浮窗不投真实阴影到桌面，去掉后与主面板一致 */
   overflow: hidden;
   font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: var(--text);

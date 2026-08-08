@@ -19,7 +19,7 @@ fn config_services(state: &AppState) -> Vec<serde_json::Value> {
 fn find_service<'a>(services: &'a [serde_json::Value], name: &str) -> Option<&'a serde_json::Value> {
     services.iter().find(|s| {
         let mode = s.get("mode").and_then(|m| m.as_str()).unwrap_or("claude");
-        if mode != "claude" && mode != "codex" && mode != "direct" {
+        if mode != "claude" && mode != "codex" && mode != "direct" && mode != "auto" {
             return false;
         }
         let comment = s.get("comment").and_then(|c| c.as_str()).unwrap_or("");

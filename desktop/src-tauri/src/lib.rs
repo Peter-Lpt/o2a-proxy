@@ -239,7 +239,7 @@ fn get_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     if let Some(arr) = services.as_array() {
         for s in arr {
             let mode = s.get("mode").and_then(|m| m.as_str()).unwrap_or("claude");
-            if mode != "claude" && mode != "codex" && mode != "direct" {
+            if mode != "claude" && mode != "codex" && mode != "direct" && mode != "auto" {
                 continue;
             }
             let name = s
