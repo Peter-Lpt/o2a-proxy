@@ -2,12 +2,10 @@
   <div class="float" :class="{ on: anyRunning }" data-tauri-drag-region="deep">
     <div class="head">
       <span class="dot" :class="{ on: anyRunning }"></span>
-      <!-- Windows 单共享悬浮窗：下拉在窗口内直接切换服务（保持打开）；
-           macOS/Linux 每服务独立窗口，不显示切换器 -->
-      <div v-if="isWindows" class="svc-sel" data-tauri-drag-region="false" title="切换服务（窗口内直接切换）">
+      <!-- 全平台统一：单悬浮窗，下拉在窗口内直接切换服务（保持打开） -->
+      <div class="svc-sel" data-tauri-drag-region="false" title="切换服务（窗口内直接切换）">
         <SelectBox v-model="selValue" :options="floatOptions" size="sm" placeholder="全部" />
       </div>
-      <span v-else class="ttl">{{ floatTitle }}</span>
       <span class="sub">{{ statusText }}</span>
       <button class="x" title="关闭悬浮看板" data-tauri-drag-region="false" @click="closeFloat"><Icon name="x" :size="12" /></button>
     </div>
@@ -61,20 +59,19 @@ const records = ref<any[]>([]);
 const theme = ref<"dark" | "light">(getTheme());
 let timers: any[] = [];
 
-// 初始服务从 URL 解析（#/float?service=xxx；Windows 共享窗口初始为全部）；
-// Windows 上由 Rust 发 float-switch 事件在共享窗口内切换服务；
-// macOS/Linux 上每服务独立窗口，URL 固定携带各自服务。
+// 初始服务从 URL 解析（#/float?service=xxx；共享窗口初始为全部）；
+// 由 Rust 发 float-switch 事件在共享窗口内切换服务。
 const floatService = ref<string>(
   (() => {
     const m = (window.location.hash || "").match(/[?&]service=([^&]+)/);
     return m ? decodeURIComponent(m[1]) : "";
   })()
 );
-// 与 Rust 端窗口 label 一致：Windows 为 float；macOS/Linux 为 float_{service}，
-// 由创建时 URL 参数传入，用于过滤各自窗口的事件。
+// 与 Rust 端窗口 label 一致（统一为 float），由创建时 URL 参数传入，
+// 用于过滤各自窗口的事件。
 const floatLabel = (() => {
   const m = (window.location.hash || "").match(/[?&]label=([^&]+)/);
-  return m ? decodeURIComponent(m[1]) : "float_0";
+  return m ? decodeURIComponent(m[1]) : "float";
 })();
 // 可见性守卫：隐藏时暂停轮询（Rust 发 float-visible 事件 + document.hidden 双保险）
 const floatVisible = ref(!document.hidden);
@@ -88,13 +85,8 @@ function onFloatVisible(visible: boolean) {
     refresh();
   }
 }
-const floatTitle = computed(() =>
-  floatService.value ? floatService.value + " · 悬浮看板" : "o2a-proxy · 全部"
-);
 
-// Windows 共享悬浮窗：标题栏下拉在窗口内直接切换服务（保持打开，不先关再开）。
-// macOS/Linux 为每服务独立窗口，不显示切换下拉。
-const isWindows = navigator.userAgent.includes("Windows");
+// 全平台统一：单共享悬浮窗，标题栏下拉在窗口内直接切换服务（保持打开，不先关再开）。
 const selValue = ref(floatService.value);
 watch(floatService, (v) => {
   selValue.value = v;
@@ -195,7 +187,7 @@ async function refresh() {
   }
 }
 
-// 关闭本悬浮窗（Windows：隐藏共享窗口；macOS/Linux：隐藏独立窗口）
+// 关闭本悬浮窗（隐藏共享窗口）
 async function closeFloat() {
   try {
     await api.toggleFloatFor(floatService.value);
@@ -270,7 +262,6 @@ onUnmounted(() => {
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4250; flex: none; }
 .dot.on { background: var(--green); animation: blink 1.6s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: 0.3; } }
-.ttl { font-weight: 700; font-size: 12px; }
 /* 服务切换下拉：融入悬浮窗配色——按钮透明背景 + 浮窗同款边框（--glass-border），
    hover 轻亮；菜单用浮窗底色（--float-bg），避免与面板输入框风格割裂 */
 .svc-sel { flex: none; }

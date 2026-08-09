@@ -30,7 +30,7 @@ pub struct AppState {
     pub python: String,
     pub default_stats_dir: PathBuf,
     pub children: Mutex<HashMap<String, std::process::Child>>,
-    /// Windows 共享悬浮窗当前显示的服务（空串 = 全部视图）。
+    /// 共享悬浮窗当前显示的服务（空串 = 全部视图）。
     /// 用于区分"切到不同服务"（保持打开只换内容）与"切到同一服务"（开关）。
     pub shared_float: Mutex<String>,
 }
@@ -707,21 +707,11 @@ fn hide_panel(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 悬浮窗窗口 label：全部视图为 "float"，单服务为 "float_{service}"（macOS/Linux 用）。
-#[cfg(not(target_os = "windows"))]
-fn float_label(service: &str) -> String {
-    if service.is_empty() {
-        "float".to_string()
-    } else {
-        format!("float_{service}")
-    }
-}
-
-/// Windows：单共享悬浮窗。
+/// 全平台统一：单共享悬浮窗。
 /// 切到不同服务 → 保持打开、只换内容（float-switch 事件驱动前端切换）；
 /// 切到同一服务 → 开关（toggle）语义。透明 WebView2 无法运行时创建
-/// （会卡死事件循环，已验证），只能在 setup 预创建 1 个共享窗口。
-#[cfg(target_os = "windows")]
+/// （会卡死事件循环，已验证），只能在 setup 预创建 1 个共享窗口；
+/// 统一后 macOS/Linux 也走同一套单窗逻辑。
 fn toggle_float_shared(app: &tauri::AppHandle, service: &str) -> Result<bool, String> {
     let label = "float";
     let Some(w) = app.get_webview_window(label) else {
@@ -763,48 +753,20 @@ fn toggle_float_shared(app: &tauri::AppHandle, service: &str) -> Result<bool, St
     Ok(true)
 }
 
-/// macOS/Linux：每服务独立悬浮窗，按需创建（WKWebView/WebKitGTK 无
-/// Windows 的 WebView2 消息泵问题，运行时创建安全），可同时多开。
-#[cfg(not(target_os = "windows"))]
-fn toggle_float_native(app: &tauri::AppHandle, service: &str) -> Result<bool, String> {
-    let label = float_label(service);
-    if let Some(w) = app.get_webview_window(&label) {
-        let visible = w.is_visible().map_err(|e| e.to_string())?;
-        if visible {
-            w.hide().map_err(|e| e.to_string())?;
-            emit_float_visible(app, &label, false);
-            return Ok(false);
-        }
-        w.show().map_err(|e| e.to_string())?;
-        w.set_focus().map_err(|e| e.to_string())?;
-        emit_float_visible(app, &label, true);
-        return Ok(true);
-    }
-    let w = create_float_window(app, &label, service).map_err(|e| e.to_string())?;
-    w.show().map_err(|e| e.to_string())?;
-    w.set_focus().map_err(|e| e.to_string())?;
-    emit_float_visible(app, &label, true);
-    Ok(true)
-}
-
+// macOS/Linux 旧实现（每服务独立窗口）已移除：需求统一为单共享悬浮窗，
+// 全平台都走 toggle_float_shared。
 #[tauri::command]
 fn toggle_float(app: tauri::AppHandle) -> Result<bool, String> {
     // 全部视图（托盘入口）
-    #[cfg(target_os = "windows")]
-    {
-        toggle_float_shared(&app, "")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        toggle_float_native(&app, "")
-    }
+    toggle_float_shared(&app, "")
 }
 
-// 创建悬浮窗。Windows 上必须在 setup 阶段（事件循环启动前）创建：
-// 运行时动态创建透明 WebView2 窗口，其 wait_with_pump 消息泵会与主事件
-// 循环的 GetMessage 竞争，导致初始化回调丢失 —— 表现为窗口空白、应用
-// 事件循环卡死（后续命令与退出均失效，已实测验证）。
-// macOS/Linux 无此问题，可运行时按需创建。
+// 创建悬浮窗（全平台统一预创建 1 个共享窗口，label 固定为 "float"）。
+// 必须在 setup 阶段（事件循环启动前）创建：运行时动态创建透明 WebView2
+// 窗口，其 wait_with_pump 消息泵会与主事件循环的 GetMessage 竞争，导致
+// 初始化回调丢失 —— 表现为窗口空白、应用事件循环卡死（后续命令与退出均
+// 失效，已实测验证）。macOS/Linux 的 WKWebView/WebKitGTK 虽无此问题，
+// 但统一逻辑后也一并预创建，保持行为一致。
 // 创建时 URL 带 service（初始显示的服务）与 label（事件过滤）。
 fn create_float_window(
     app: &tauri::AppHandle,
@@ -854,14 +816,7 @@ fn urlenc(s: &str) -> String {
 #[tauri::command]
 fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, String> {
     // 面板"悬浮"按钮：当前选中服务（空串=全部）
-    #[cfg(target_os = "windows")]
-    {
-        toggle_float_shared(&app, &service)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        toggle_float_native(&app, &service)
-    }
+    toggle_float_shared(&app, &service)
 }
 
 #[tauri::command]
@@ -1018,14 +973,11 @@ pub fn run() {
                 panel.set_focus()?;
             }
 
-            // Windows：预创建 1 个共享悬浮窗（隐藏），显示哪个服务由
+            // 全平台统一：预创建 1 个共享悬浮窗（隐藏），显示哪个服务由
             // float-switch 事件切换（见 toggle_float_shared）。必须在此阶段
-            // 创建：运行时动态创建透明 WebView2 会卡死事件循环（已实测验证）。
-            // macOS/Linux：WKWebView/WebKitGTK 无此问题，保持按需创建，不预创建。
-            #[cfg(target_os = "windows")]
-            {
-                create_float_window(app.handle(), "float", "")?;
-            }
+            // 创建：运行时动态创建透明 WebView2 会卡死事件循环（已实测验证），
+            // macOS/Linux 也统一预创建，走同一套单窗逻辑。
+            create_float_window(app.handle(), "float", "")?;
 
             Ok(())
         })

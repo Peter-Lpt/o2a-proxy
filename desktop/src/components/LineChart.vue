@@ -120,7 +120,7 @@ function render() {
   const series = [
     { name: "输入", color: cssVar("--chart-input", "#9aa3b2"), data: props.input || [] },
     { name: "缓存读", color: cssVar("--chart-read", "#4f8cff"), data: props.read || [] },
-    { name: "输出", color: cssVar("--chart-output", "#34d399"), data: props.output || [] },
+    { name: "输出", color: cssVar("--chart-output", "#f5a623"), data: props.output || [] },
   ];
   const hitData = props.hitRate || [];
   const n = labels.length;
@@ -314,7 +314,7 @@ function onMove(ev: MouseEvent) {
   let html = `<div class="tip-label">${labels[dataIdx]}</div>`;
   html += `<div class="tip-row"><i style="background:${cssVar("--chart-input", "#9aa3b2")}"></i>输入<span>${fmtComma(i)}</span></div>`;
   html += `<div class="tip-row"><i style="background:${cssVar("--chart-read", "#4f8cff")}"></i>缓存读<span>${fmtComma(r)}</span></div>`;
-  html += `<div class="tip-row"><i style="background:${cssVar("--chart-output", "#34d399")}"></i>输出<span>${fmtComma(o)}</span></div>`;
+  html += `<div class="tip-row"><i style="background:${cssVar("--chart-output", "#f5a623")}"></i>输出<span>${fmtComma(o)}</span></div>`;
   if (h != null && h > 0) {
     html += `<div class="tip-row"><i style="background:${cssVar("--chart-hit", "#1fab6b")}"></i>命中率<span>${fmtPct(h)}</span></div>`;
   }
@@ -412,6 +412,7 @@ watch(
   color: #5f6c85;
   padding: 3px 2px 0;
 }
+/* 图例：所有序列都是折线，标记统一为方块（圆角矩形），不再混用圆点 */
 .lc-legend .dot {
   display: inline-block;
   width: 8px;
@@ -419,8 +420,8 @@ watch(
   border-radius: 2px;
   margin-right: 4px;
 }
-.dot.input { background: #9aa3b2; }
-.dot.read { background: #4f8cff; }
-.dot.output { background: #34d399; }
-.dot.hit { background: #1fab6b; border-radius: 50%; }
+.dot.input { background: var(--chart-input, #9aa3b2); }
+.dot.read { background: var(--chart-read, #4f8cff); }
+.dot.output { background: var(--chart-output, #f5a623); }
+.dot.hit { background: var(--chart-hit, #1fab6b); }
 </style>

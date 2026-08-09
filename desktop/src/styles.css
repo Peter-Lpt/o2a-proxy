@@ -33,6 +33,12 @@
   --chart-bar: rgba(79, 140, 255, 0.5);
   --chart-line: #34d399;
   --chart-line-glow: rgba(52, 211, 153, 0.22);
+  /* 折线图序列配色：输入(灰) / 缓存读(蓝) / 输出(琥珀) / 命中率(绿)，
+     输出用琥珀色与缓存/命中率的绿色系区分开，避免同色难辨 */
+  --chart-input: #9aa3b2;
+  --chart-read: #4f8cff;
+  --chart-output: #f5a623;
+  --chart-hit: #1fab6b;
   --chart-tooltip-bg: rgba(16, 23, 42, 0.96);
   --chart-tooltip-border: #2b3a5c;
   --chart-crosshair: rgba(255, 255, 255, 0.3);
@@ -66,6 +72,10 @@
   --chart-bar: rgba(47, 111, 228, 0.5);
   --chart-line: #0f9d6a;
   --chart-line-glow: rgba(15, 157, 106, 0.18);
+  --chart-input: #7d8899;
+  --chart-read: #2f6fe4;
+  --chart-output: #c77408;
+  --chart-hit: #0f9d6a;
   --chart-tooltip-bg: rgba(255, 255, 255, 0.96);
   --chart-tooltip-border: #d9e0ec;
   --chart-crosshair: rgba(15, 23, 42, 0.25);
