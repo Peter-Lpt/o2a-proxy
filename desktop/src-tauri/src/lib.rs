@@ -669,6 +669,14 @@ fn emit_panel_visible(app: &tauri::AppHandle, visible: bool) {
     let _ = app.emit("panel-visible", visible);
 }
 
+/// 通知前端悬浮窗可见性（按窗口 label）：隐藏时暂停轮询。
+fn emit_float_visible(app: &tauri::AppHandle, label: &str, visible: bool) {
+    let _ = app.emit(
+        "float-visible",
+        serde_json::json!({ "label": label, "visible": visible }),
+    );
+}
+
 #[tauri::command]
 fn toggle_panel(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(w) = app.get_webview_window("panel") {
@@ -706,6 +714,7 @@ fn toggle_float(app: tauri::AppHandle) -> Result<bool, String> {
             w.show().map_err(|e| e.to_string())?;
             w.set_focus().map_err(|e| e.to_string())?;
         }
+        emit_float_visible(&app, "float", !visible);
         Ok(!visible)
     } else {
         Err("float window missing".into())
@@ -775,6 +784,7 @@ fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, Stri
             w.show().map_err(|e| e.to_string())?;
             w.set_focus().map_err(|e| e.to_string())?;
         }
+        emit_float_visible(&app, &label, !visible);
         Ok(!visible)
     } else {
         // 兜底：config 中新添加的服务（setup 阶段未预创建，仅 Windows 有预创建）。
@@ -782,16 +792,9 @@ fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, Stri
         let w = create_float_window(&app, &label, &service).map_err(|e| e.to_string())?;
         w.show().map_err(|e| e.to_string())?;
         w.set_focus().map_err(|e| e.to_string())?;
+        emit_float_visible(&app, &label, true);
         Ok(true)
     }
-}
-
-#[tauri::command]
-fn get_float_state(app: tauri::AppHandle) -> Result<bool, String> {
-    Ok(app
-        .get_webview_window("float")
-        .map(|w| w.is_visible().unwrap_or(false))
-        .unwrap_or(false))
 }
 
 #[tauri::command]
@@ -809,6 +812,7 @@ fn hide_on_close(app: tauri::AppHandle, label: String) -> impl Fn(&WindowEvent) 
             if let Some(w) = app.get_webview_window(label.as_str()) {
                 let _ = w.hide();
             }
+            emit_float_visible(&app, &label, false);
             api.prevent_close();
         }
     }
@@ -856,7 +860,6 @@ pub fn run() {
             hide_panel,
             toggle_float,
             toggle_float_for,
-            get_float_state,
             quit_app,
         ])
         .setup(|app| {

@@ -207,19 +207,17 @@ fn read_records(
 }
 
 /// 从原始记录按小时聚合某天数据（不再依赖容易过期的 summary 文件，
-/// 保证请求数、费用与记录口径一致）。
-fn load_day(
-    stats_dir: &Path,
-    date_str: &str,
+/// 保证请求数、费用与记录口径一致）。纯聚合、不读文件，
+/// 由 get_stats 一次性读入当月数据后对每天复用。
+fn aggregate_day(
+    records: &[Value],
     service: &str,
     primary: &str,
-    pricing: &Value,
-    aliases: &BTreeMap<String, String>,
+    date_str: &str,
 ) -> Option<Value> {
-    let records = read_records(stats_dir, date_str, pricing, aliases);
     let mut hours: BTreeMap<String, Agg> = BTreeMap::new();
     let mut day = Agg::default();
-    for rec in &records {
+    for rec in records {
         if !matches_service(rec, service, primary) {
             continue;
         }
@@ -383,7 +381,26 @@ fn get_stats_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Str
     let today_str = now.format("%Y-%m-%d").to_string();
     let month_prefix = now.format("%Y-%m").to_string();
     let cur_hour = now.format("%H").to_string();
-    let today = load_day(&dir, &today_str, service, &primary, &pricing, &aliases);
+
+    let day_files: Vec<String> = list_record_dates(dir)
+        .into_iter()
+        .filter(|d| d.starts_with(&month_prefix))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // 当月每个 jsonl 只读一次，今日/本月/按模型聚合共享同一份数据，
+    // 避免原实现对每个文件读取两遍（load_day + read_records）。
+    let month_records: Vec<(String, Vec<Value>)> = day_files
+        .iter()
+        .map(|d| (d.clone(), read_records(dir, d, &pricing, &aliases)))
+        .collect();
+    let today_records: &[Value] = month_records
+        .iter()
+        .find(|(d, _)| d == &today_str)
+        .map(|(_, r)| r.as_slice())
+        .unwrap_or(&[]);
+
+    let today = aggregate_day(today_records, service, &primary, &today_str);
     let current = today
         .as_ref()
         .and_then(|t| t.get("hours").and_then(|h| h.get(&cur_hour)))
@@ -408,22 +425,14 @@ fn get_stats_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Str
         }
     }
 
-    let records = read_records(&dir, &today_str, &pricing, &aliases);
-    let today_minute = aggregate_minutes(&records, service, &primary);
-    let today_minute_by_model = aggregate_minutes_by_model(&records, service, &primary);
-    let by_model = sum_by_model(&records, service, &primary);
-
-    let day_files: Vec<String> = list_record_dates(&dir)
-        .into_iter()
-        .filter(|d| d.starts_with(&month_prefix))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let today_minute = aggregate_minutes(today_records, service, &primary);
+    let today_minute_by_model = aggregate_minutes_by_model(today_records, service, &primary);
+    let by_model = sum_by_model(today_records, service, &primary);
 
     let mut month_total = Agg::default();
     let mut days_map: BTreeMap<String, Value> = BTreeMap::new();
-    for ds in &day_files {
-        if let Some(dd) = load_day(&dir, ds, service, &primary, &pricing, &aliases) {
+    for (ds, recs) in &month_records {
+        if let Some(dd) = aggregate_day(recs, service, &primary, ds) {
             if let Some(day) = dd.get("day") {
                 month_total.add_agg(&agg_from_json(day));
             }
@@ -445,9 +454,8 @@ fn get_stats_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Str
     // 本月按模型（累计 + 逐日）
     let mut month_by_model_map: BTreeMap<String, Agg> = BTreeMap::new();
     let mut month_daily_by_model: BTreeMap<String, BTreeMap<String, Value>> = BTreeMap::new();
-    for ds in &day_files {
-        let recs = read_records(&dir, ds, &pricing, &aliases);
-        for g in sum_by_model(&recs, service, &primary) {
+    for (ds, recs) in &month_records {
+        for g in sum_by_model(recs, service, &primary) {
             let m = g["model"].as_str().unwrap_or("unknown").to_string();
             month_by_model_map.entry(m.clone()).or_default().add_agg(&agg_from_json(&g));
             let mut d = g.clone();

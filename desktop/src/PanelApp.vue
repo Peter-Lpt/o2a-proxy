@@ -1014,6 +1014,14 @@ let timers: any[] = [];
 // 变为可见时立即刷新一轮，不等下一个轮询周期。
 const panelVisible = ref(!document.hidden);
 let unlistenPanel: (() => void) | null = null;
+// 模型列表只在面板首次可见时预热一次：避免启动即发 /models 请求
+// （端点不可达时白白占用 8s 阻塞线程），面板隐藏期间不预热。
+let modelsWarmed = false;
+function warmModelsOnce() {
+  if (modelsWarmed) return;
+  modelsWarmed = true;
+  warmModels();
+}
 
 function onPanelVisible(visible: boolean) {
   const was = panelVisible.value;
@@ -1023,6 +1031,7 @@ function onPanelVisible(visible: boolean) {
     loadStats();
     loadLive();
     loadAccountStats();
+    warmModelsOnce();
   }
 }
 function onVisibilityChange() {
@@ -1034,7 +1043,7 @@ onMounted(async () => {
   loadStats();
   loadLive();
   loadAccountStats();
-  warmModels();
+  if (panelVisible.value) warmModelsOnce();
   listen<boolean>("panel-visible", (e) => onPanelVisible(!!e.payload)).then(
     (f) => (unlistenPanel = f)
   );

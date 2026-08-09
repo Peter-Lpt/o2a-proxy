@@ -44,6 +44,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import { api, fmtNum, fmtPct } from "./api";
 import Icon from "./components/Icon.vue";
 import Spark from "./components/Spark.vue";
@@ -59,6 +60,19 @@ const floatService = (() => {
   const m = (window.location.hash || "").match(/[?&]service=([^&]+)/);
   return m ? decodeURIComponent(m[1]) : "";
 })();
+// 与 Rust 端窗口 label 一致：float 或 float_{service}
+const floatLabel = floatService ? "float_" + floatService : "float";
+// 可见性守卫：隐藏时暂停轮询（Rust 发 float-visible 事件 + document.hidden 双保险）
+const floatVisible = ref(!document.hidden);
+let unlistenFloat: (() => void) | null = null;
+
+function onFloatVisible(visible: boolean) {
+  const was = floatVisible.value;
+  floatVisible.value = visible;
+  if (visible && !was) {
+    refresh();
+  }
+}
 const floatTitle = computed(() =>
   floatService ? floatService + " · 悬浮看板" : "o2a-proxy · 全部"
 );
@@ -147,26 +161,29 @@ function onStorage() {
 }
 
 function onVisibility() {
-  if (!document.hidden) {
-    refresh();
-  }
+  onFloatVisible(!document.hidden);
 }
 
 onMounted(() => {
   theme.value = applyTheme();
   window.addEventListener("storage", onStorage);
   document.addEventListener("visibilitychange", onVisibility);
+  listen<any>("float-visible", (e) => {
+    const p = e.payload || {};
+    if (p.label === floatLabel) onFloatVisible(!!p.visible);
+  }).then((f) => (unlistenFloat = f));
   refresh();
-  // 预创建的悬浮窗初始为隐藏：隐藏时不轮询，可见时才拉数据，避免空转
+  // 悬浮窗隐藏时暂停轮询，可见时才拉数据，避免空转
   timers.push(
     setInterval(() => {
-      if (!document.hidden) refresh();
+      if (floatVisible.value) refresh();
     }, 3000)
   );
 });
 onUnmounted(() => {
   window.removeEventListener("storage", onStorage);
   document.removeEventListener("visibilitychange", onVisibility);
+  unlistenFloat?.();
   timers.forEach(clearInterval);
 });
 </script>

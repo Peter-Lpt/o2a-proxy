@@ -140,19 +140,27 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
         tee_stream(err, Arc::clone(&file), Box::new(std::io::stderr()));
     }
     children.insert(name.to_string(), child);
-    // 短暂等待，确认进程没有因端口占用/缺 key 等立刻退出
-    std::thread::sleep(Duration::from_millis(1200));
-    if let Some(ch) = children.get_mut(name) {
-        if let Some(status) = ch.try_wait().map_err(|e| e.to_string())? {
-            children.remove(name);
-            let tail = read_log_tail(&log, 1500);
-            let msg = if tail.is_empty() {
-                String::new()
-            } else {
-                format!("，日志：{tail}")
-            };
-            return Err(format!("代理启动后立即退出（code={status}）{msg}"));
+    // 轮询 try_wait 确认进程没有因端口占用/缺 key 等立刻退出：
+    // 与固定 sleep(1.2s) 相比，立即退出的情况能更快报错；
+    // 存活的情况最多等 800ms（兼顾 Windows 首次拉起 python 较慢）。
+    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    loop {
+        if let Some(ch) = children.get_mut(name) {
+            if let Some(status) = ch.try_wait().map_err(|e| e.to_string())? {
+                children.remove(name);
+                let tail = read_log_tail(&log, 1500);
+                let msg = if tail.is_empty() {
+                    String::new()
+                } else {
+                    format!("，日志：{tail}")
+                };
+                return Err(format!("代理启动后立即退出（code={status}）{msg}"));
+            }
         }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
 }
@@ -161,7 +169,20 @@ pub fn stop_service(state: &AppState, name: &str) -> Result<(), String> {
     let mut children = state.children.lock().unwrap();
     if let Some(mut child) = children.remove(name) {
         let _ = child.kill();
-        let _ = child.wait();
+        // 最多等 3s 让子进程退出；超时则再次强杀兜底，
+        // 避免挂死的子进程让 wait() 永久占住阻塞线程池线程。
+        let deadline = std::time::Instant::now() + Duration::from_millis(3000);
+        loop {
+            if child.try_wait().map_err(|e| e.to_string())?.is_some() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
     Ok(())
 }

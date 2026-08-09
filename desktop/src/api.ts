@@ -18,7 +18,6 @@ export const api = {
   openConfigFile: () => invoke<void>("open_config_file"),
   toggleFloat: () => invoke<boolean>("toggle_float"),
   toggleFloatFor: (service: string) => invoke<boolean>("toggle_float_for", { service }),
-  getFloatState: () => invoke<boolean>("get_float_state"),
   togglePanel: () => invoke<boolean>("toggle_panel"),
   hidePanel: () => invoke<void>("hide_panel"),
   quitApp: () => invoke<void>("quit_app"),
