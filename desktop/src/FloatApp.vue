@@ -2,9 +2,14 @@
   <div class="float" :class="{ on: anyRunning }" data-tauri-drag-region="deep">
     <div class="head">
       <span class="dot" :class="{ on: anyRunning }"></span>
-      <span class="ttl">{{ floatTitle }}</span>
+      <!-- Windows 单共享悬浮窗：下拉在窗口内直接切换服务（保持打开）；
+           macOS/Linux 每服务独立窗口，不显示切换器 -->
+      <div v-if="isWindows" class="svc-sel" data-tauri-drag-region="false" title="切换服务（窗口内直接切换）">
+        <SelectBox v-model="selValue" :options="floatOptions" size="sm" placeholder="全部" />
+      </div>
+      <span v-else class="ttl">{{ floatTitle }}</span>
       <span class="sub">{{ statusText }}</span>
-      <button class="x" title="关闭悬浮看板" data-tauri-drag-region="false" @click="api.toggleFloatFor(floatService)"><Icon name="x" :size="12" /></button>
+      <button class="x" title="关闭悬浮看板" data-tauri-drag-region="false" @click="closeFloat"><Icon name="x" :size="12" /></button>
     </div>
 
     <div class="stats">
@@ -43,10 +48,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { api, fmtNum, fmtPct } from "./api";
 import Icon from "./components/Icon.vue";
+import SelectBox from "./components/SelectBox.vue";
 import Spark from "./components/Spark.vue";
 import { applyTheme, getTheme } from "./theme";
 
@@ -55,16 +61,25 @@ const records = ref<any[]>([]);
 const theme = ref<"dark" | "light">(getTheme());
 let timers: any[] = [];
 
-// 从 URL 解析本悬浮窗对应的服务（#/float?service=xxx）
-const floatService = (() => {
-  const m = (window.location.hash || "").match(/[?&]service=([^&]+)/);
-  return m ? decodeURIComponent(m[1]) : "";
+// 初始服务从 URL 解析（#/float?service=xxx；Windows 共享窗口初始为全部）；
+// Windows 上由 Rust 发 float-switch 事件在共享窗口内切换服务；
+// macOS/Linux 上每服务独立窗口，URL 固定携带各自服务。
+const floatService = ref<string>(
+  (() => {
+    const m = (window.location.hash || "").match(/[?&]service=([^&]+)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  })()
+);
+// 与 Rust 端窗口 label 一致：Windows 为 float；macOS/Linux 为 float_{service}，
+// 由创建时 URL 参数传入，用于过滤各自窗口的事件。
+const floatLabel = (() => {
+  const m = (window.location.hash || "").match(/[?&]label=([^&]+)/);
+  return m ? decodeURIComponent(m[1]) : "float_0";
 })();
-// 与 Rust 端窗口 label 一致：float 或 float_{service}
-const floatLabel = floatService ? "float_" + floatService : "float";
 // 可见性守卫：隐藏时暂停轮询（Rust 发 float-visible 事件 + document.hidden 双保险）
 const floatVisible = ref(!document.hidden);
 let unlistenFloat: (() => void) | null = null;
+let unlistenSwitch: (() => void) | null = null;
 
 function onFloatVisible(visible: boolean) {
   const was = floatVisible.value;
@@ -74,8 +89,32 @@ function onFloatVisible(visible: boolean) {
   }
 }
 const floatTitle = computed(() =>
-  floatService ? floatService + " · 悬浮看板" : "o2a-proxy · 全部"
+  floatService.value ? floatService.value + " · 悬浮看板" : "o2a-proxy · 全部"
 );
+
+// Windows 共享悬浮窗：标题栏下拉在窗口内直接切换服务（保持打开，不先关再开）。
+// macOS/Linux 为每服务独立窗口，不显示切换下拉。
+const isWindows = navigator.userAgent.includes("Windows");
+const selValue = ref(floatService.value);
+watch(floatService, (v) => {
+  selValue.value = v;
+});
+// 切换服务：纯切换语义（选不同服务保持打开只换内容；选当前服务无操作），
+// 本地立即更新并刷新（Rust float-switch 事件兜底同步）
+watch(selValue, async (v) => {
+  if (v === floatService.value) return;
+  try {
+    await api.toggleFloatFor(v);
+    floatService.value = v;
+    refresh();
+  } catch (_) {
+    selValue.value = floatService.value; // 失败回弹
+  }
+});
+const floatOptions = computed(() => [
+  { value: "", label: "全部" },
+  ...(status.value.services || []).map((s: any) => ({ value: s.name, label: s.name })),
+]);
 
 const anyRunning = computed(() => (status.value.services || []).some((s: any) => s.running));
 const now1min = computed(() => {
@@ -149,11 +188,18 @@ const liveFeed = computed(() =>
 async function refresh() {
   try {
     status.value = await api.getStatus();
-    const d = await api.getLive(floatService);
+    const d = await api.getLive(floatService.value);
     records.value = d?.records || [];
   } catch (e) {
     records.value = [];
   }
+}
+
+// 关闭本悬浮窗（Windows：隐藏共享窗口；macOS/Linux：隐藏独立窗口）
+async function closeFloat() {
+  try {
+    await api.toggleFloatFor(floatService.value);
+  } catch (_) {}
 }
 
 function onStorage() {
@@ -172,6 +218,15 @@ onMounted(() => {
     const p = e.payload || {};
     if (p.label === floatLabel) onFloatVisible(!!p.visible);
   }).then((f) => (unlistenFloat = f));
+  // Windows 共享窗口：Rust 切换服务时更新并立即刷新数据（按 label 过滤）
+  listen<any>("float-switch", (e) => {
+    const p = e.payload || {};
+    if (p.label !== floatLabel) return;
+    if (typeof p.service === "string" && p.service !== floatService.value) {
+      floatService.value = p.service;
+      refresh();
+    }
+  }).then((f) => (unlistenSwitch = f));
   refresh();
   // 悬浮窗隐藏时暂停轮询，可见时才拉数据，避免空转
   timers.push(
@@ -184,6 +239,7 @@ onUnmounted(() => {
   window.removeEventListener("storage", onStorage);
   document.removeEventListener("visibilitychange", onVisibility);
   unlistenFloat?.();
+  unlistenSwitch?.();
   timers.forEach(clearInterval);
 });
 </script>
@@ -215,6 +271,24 @@ onUnmounted(() => {
 .dot.on { background: var(--green); animation: blink 1.6s ease-in-out infinite; }
 @keyframes blink { 50% { opacity: 0.3; } }
 .ttl { font-weight: 700; font-size: 12px; }
+/* 服务切换下拉：融入悬浮窗配色——按钮透明背景 + 浮窗同款边框（--glass-border），
+   hover 轻亮；菜单用浮窗底色（--float-bg），避免与面板输入框风格割裂 */
+.svc-sel { flex: none; }
+.svc-sel :deep(.sb) { min-width: 92px; }
+.svc-sel :deep(.sb-btn) {
+  background: transparent;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+}
+.svc-sel :deep(.sb-btn:hover),
+.svc-sel :deep(.sb.open .sb-btn) {
+  background: var(--bg3);
+  border-color: var(--glass-border);
+}
+.svc-sel :deep(.sb-menu) {
+  background: var(--float-bg);
+  border: 1px solid var(--glass-border);
+}
 .sub { color: var(--muted); font-size: 10.5px; margin-left: 2px; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .x {
   width: 18px; height: 18px; border: none; border-radius: 5px;

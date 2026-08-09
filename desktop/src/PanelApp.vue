@@ -14,7 +14,7 @@
           <Icon :name="theme === 'dark' ? 'sun' : 'moon'" :size="14" />
         </button>
         <button class="btn btn-sm" title="添加服务" @click="addService"><Icon name="plus" :size="12" /> 添加服务</button>
-        <button class="float-btn" :title="floatService ? '为「' + floatService + '」开启悬浮看板' : '开启全部悬浮看板'" @click="api.toggleFloatFor(floatService)"><Icon name="float" :size="12" /> 悬浮</button>
+        <button class="float-btn" :title="floatService ? '为「' + floatService + '」开启悬浮看板' : '开启全部悬浮看板'" @click="onToggleFloat"><Icon name="float" :size="12" /> 悬浮</button>
       </div>
     </header>
 
@@ -730,6 +730,15 @@ async function toggleSvc(name: string) {
   } catch (e: any) {
     showToast("操作失败: " + e);
     offError.value = String(e);
+  }
+}
+
+// 悬浮窗开关：切换当前选中服务（或全部）的悬浮窗，失败时给出提示
+async function onToggleFloat() {
+  try {
+    await api.toggleFloatFor(floatService.value);
+  } catch (e: any) {
+    showToast(String(e));
   }
 }
 

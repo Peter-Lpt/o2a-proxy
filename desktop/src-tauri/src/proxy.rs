@@ -141,9 +141,9 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     }
     children.insert(name.to_string(), child);
     // 轮询 try_wait 确认进程没有因端口占用/缺 key 等立刻退出：
-    // 与固定 sleep(1.2s) 相比，立即退出的情况能更快报错；
-    // 存活的情况最多等 800ms（兼顾 Windows 首次拉起 python 较慢）。
-    let deadline = std::time::Instant::now() + Duration::from_millis(800);
+    // 快速退出的情况能立刻报错（无需等满窗口）；
+    // 验证窗口保持 1.2s，兼容 Windows 上 python 首次拉起较慢的环境。
+    let deadline = std::time::Instant::now() + Duration::from_millis(1200);
     loop {
         if let Some(ch) = children.get_mut(name) {
             if let Some(status) = ch.try_wait().map_err(|e| e.to_string())? {
@@ -280,6 +280,7 @@ mod tests {
             python: "python".to_string(),
             default_stats_dir: root.join("cache_stats"),
             children: Mutex::new(std::collections::HashMap::new()),
+            shared_float: Mutex::new(String::new()),
         };
         let res = start_service(&state, "svc1");
         assert!(res.is_err(), "缺少 API Key 时启动应报错");
@@ -312,6 +313,7 @@ mod tests {
             python: "python".to_string(),
             default_stats_dir: root.join("cache_stats"),
             children: Mutex::new(std::collections::HashMap::new()),
+            shared_float: Mutex::new(String::new()),
         };
         // 模拟一个运行中的子进程
         let child = Command::new("python")

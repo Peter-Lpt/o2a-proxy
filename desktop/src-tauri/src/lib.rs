@@ -30,6 +30,9 @@ pub struct AppState {
     pub python: String,
     pub default_stats_dir: PathBuf,
     pub children: Mutex<HashMap<String, std::process::Child>>,
+    /// Windows 共享悬浮窗当前显示的服务（空串 = 全部视图）。
+    /// 用于区分"切到不同服务"（保持打开只换内容）与"切到同一服务"（开关）。
+    pub shared_float: Mutex<String>,
 }
 
 fn find_root() -> PathBuf {
@@ -704,23 +707,8 @@ fn hide_panel(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-fn toggle_float(app: tauri::AppHandle) -> Result<bool, String> {
-    if let Some(w) = app.get_webview_window("float") {
-        let visible = w.is_visible().map_err(|e| e.to_string())?;
-        if visible {
-            w.hide().map_err(|e| e.to_string())?;
-        } else {
-            w.show().map_err(|e| e.to_string())?;
-            w.set_focus().map_err(|e| e.to_string())?;
-        }
-        emit_float_visible(&app, "float", !visible);
-        Ok(!visible)
-    } else {
-        Err("float window missing".into())
-    }
-}
-
+/// 悬浮窗窗口 label：全部视图为 "float"，单服务为 "float_{service}"（macOS/Linux 用）。
+#[cfg(not(target_os = "windows"))]
 fn float_label(service: &str) -> String {
     if service.is_empty() {
         "float".to_string()
@@ -729,19 +717,108 @@ fn float_label(service: &str) -> String {
     }
 }
 
-// 创建悬浮窗。必须在 setup 阶段（事件循环启动前）创建：
-// Windows 上运行时动态创建透明 WebView2 窗口，其 wait_with_pump 消息泵
-// 会与主事件循环的 GetMessage 竞争，导致 WebView2 初始化回调丢失 ——
-// 表现为窗口空白、应用事件循环卡死（点击退出/托盘退出均无效）。
+/// Windows：单共享悬浮窗。
+/// 切到不同服务 → 保持打开、只换内容（float-switch 事件驱动前端切换）；
+/// 切到同一服务 → 开关（toggle）语义。透明 WebView2 无法运行时创建
+/// （会卡死事件循环，已验证），只能在 setup 预创建 1 个共享窗口。
+#[cfg(target_os = "windows")]
+fn toggle_float_shared(app: &tauri::AppHandle, service: &str) -> Result<bool, String> {
+    let label = "float";
+    let Some(w) = app.get_webview_window(label) else {
+        // 兜底：正常不会走到（setup 已预创建共享悬浮窗）
+        let w = create_float_window(app, label, service).map_err(|e| e.to_string())?;
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
+        emit_float_visible(app, label, true);
+        return Ok(true);
+    };
+    let state = app.state::<AppState>();
+    let mut cur = state.shared_float.lock().unwrap();
+    let is_visible = w.is_visible().map_err(|e| e.to_string())?;
+    if service == cur.as_str() {
+        // 同一服务：开关
+        if is_visible {
+            w.hide().map_err(|e| e.to_string())?;
+            *cur = String::new(); // 关闭后重置为默认（全部视图），重开不再停留旧服务
+            emit_float_visible(app, label, false);
+            return Ok(false);
+        }
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
+        emit_float_visible(app, label, true);
+        return Ok(true);
+    }
+    // 不同服务：切换显示，保持打开（窗口内直接切换，不先关再开）
+    *cur = service.to_string();
+    drop(cur);
+    let _ = app.emit(
+        "float-switch",
+        serde_json::json!({ "label": label, "service": service }),
+    );
+    if !is_visible {
+        w.show().map_err(|e| e.to_string())?;
+    }
+    w.set_focus().map_err(|e| e.to_string())?;
+    emit_float_visible(app, label, true);
+    Ok(true)
+}
+
+/// macOS/Linux：每服务独立悬浮窗，按需创建（WKWebView/WebKitGTK 无
+/// Windows 的 WebView2 消息泵问题，运行时创建安全），可同时多开。
+#[cfg(not(target_os = "windows"))]
+fn toggle_float_native(app: &tauri::AppHandle, service: &str) -> Result<bool, String> {
+    let label = float_label(service);
+    if let Some(w) = app.get_webview_window(&label) {
+        let visible = w.is_visible().map_err(|e| e.to_string())?;
+        if visible {
+            w.hide().map_err(|e| e.to_string())?;
+            emit_float_visible(app, &label, false);
+            return Ok(false);
+        }
+        w.show().map_err(|e| e.to_string())?;
+        w.set_focus().map_err(|e| e.to_string())?;
+        emit_float_visible(app, &label, true);
+        return Ok(true);
+    }
+    let w = create_float_window(app, &label, service).map_err(|e| e.to_string())?;
+    w.show().map_err(|e| e.to_string())?;
+    w.set_focus().map_err(|e| e.to_string())?;
+    emit_float_visible(app, &label, true);
+    Ok(true)
+}
+
+#[tauri::command]
+fn toggle_float(app: tauri::AppHandle) -> Result<bool, String> {
+    // 全部视图（托盘入口）
+    #[cfg(target_os = "windows")]
+    {
+        toggle_float_shared(&app, "")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        toggle_float_native(&app, "")
+    }
+}
+
+// 创建悬浮窗。Windows 上必须在 setup 阶段（事件循环启动前）创建：
+// 运行时动态创建透明 WebView2 窗口，其 wait_with_pump 消息泵会与主事件
+// 循环的 GetMessage 竞争，导致初始化回调丢失 —— 表现为窗口空白、应用
+// 事件循环卡死（后续命令与退出均失效，已实测验证）。
+// macOS/Linux 无此问题，可运行时按需创建。
+// 创建时 URL 带 service（初始显示的服务）与 label（事件过滤）。
 fn create_float_window(
     app: &tauri::AppHandle,
     label: &str,
     service: &str,
 ) -> Result<tauri::WebviewWindow, tauri::Error> {
     let url = if service.is_empty() {
-        "index.html#/float".to_string()
+        format!("index.html#/float?label={}", urlenc(label))
     } else {
-        format!("index.html#/float?service={}", urlenc(service))
+        format!(
+            "index.html#/float?service={}&label={}",
+            urlenc(service),
+            urlenc(label)
+        )
     };
     let w = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title("o2a-proxy 悬浮看板")
@@ -773,27 +850,17 @@ fn urlenc(s: &str) -> String {
     out
 }
 
+
 #[tauri::command]
 fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, String> {
-    let label = float_label(&service);
-    if let Some(w) = app.get_webview_window(&label) {
-        let visible = w.is_visible().map_err(|e| e.to_string())?;
-        if visible {
-            w.hide().map_err(|e| e.to_string())?;
-        } else {
-            w.show().map_err(|e| e.to_string())?;
-            w.set_focus().map_err(|e| e.to_string())?;
-        }
-        emit_float_visible(&app, &label, !visible);
-        Ok(!visible)
-    } else {
-        // 兜底：config 中新添加的服务（setup 阶段未预创建，仅 Windows 有预创建）。
-        // 动态创建后需显式 show，否则窗口保持隐藏。
-        let w = create_float_window(&app, &label, &service).map_err(|e| e.to_string())?;
-        w.show().map_err(|e| e.to_string())?;
-        w.set_focus().map_err(|e| e.to_string())?;
-        emit_float_visible(&app, &label, true);
-        Ok(true)
+    // 面板"悬浮"按钮：当前选中服务（空串=全部）
+    #[cfg(target_os = "windows")]
+    {
+        toggle_float_shared(&app, &service)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        toggle_float_native(&app, &service)
     }
 }
 
@@ -874,6 +941,7 @@ pub fn run() {
                 // 默认统计目录：应用（项目根）下的相对目录
                 default_stats_dir: root.join("cache_stats"),
                 children: Mutex::new(HashMap::new()),
+                shared_float: Mutex::new(String::new()),
             };
             app.manage(state);
 
@@ -950,34 +1018,13 @@ pub fn run() {
                 panel.set_focus()?;
             }
 
-            let _float_win = create_float_window(app.handle(), "float", "")?;
-
-            // Windows 专用：预创建各服务的悬浮窗（隐藏）。
-            // 运行时动态创建透明 WebView2 窗口会与主事件循环消息泵竞争
-            // （见 create_float_window 注释），导致窗口空白、退出失效；
-            // setup 阶段创建则无此问题。macOS/Linux 无此问题，保持原有
-            // 按需创建行为，不在此预创建。
+            // Windows：预创建 1 个共享悬浮窗（隐藏），显示哪个服务由
+            // float-switch 事件切换（见 toggle_float_shared）。必须在此阶段
+            // 创建：运行时动态创建透明 WebView2 会卡死事件循环（已实测验证）。
+            // macOS/Linux：WKWebView/WebKitGTK 无此问题，保持按需创建，不预创建。
             #[cfg(target_os = "windows")]
             {
-                let state = app.state::<AppState>();
-                if let Ok(cfg) = read_config_value(&state) {
-                    if let Some(services) = cfg.get("services").and_then(|v| v.as_array()) {
-                        for s in services {
-                            let name = s
-                                .get("comment")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if name.is_empty() {
-                                continue;
-                            }
-                            let label = float_label(&name);
-                            if app.get_webview_window(&label).is_none() {
-                                let _ = create_float_window(app.handle(), &label, &name);
-                            }
-                        }
-                    }
-                }
+                create_float_window(app.handle(), "float", "")?;
             }
 
             Ok(())

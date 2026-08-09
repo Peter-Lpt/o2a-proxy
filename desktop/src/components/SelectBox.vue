@@ -29,6 +29,8 @@
       <Icon name="chevron-down" :size="12" :class="{ flip: open }" />
     </button>
 
+    <div v-if="open" class="sb-mask" data-tauri-drag-region="false" @mousedown="close"></div>
+
     <div v-if="open" class="sb-menu" :style="menuStyle">
       <button
         v-for="opt in visibleOptions"
@@ -262,6 +264,15 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   padding: 4px;
   animation: sb-in 0.12s ease-out;
+}
+/* 展开时的全屏透明遮罩：点击任意位置收起下拉。
+   必须标记 data-tauri-drag-region=false，否则悬浮窗的拖拽区会吞掉
+   mousedown，导致点击拖拽区域（标题/统计区等）下拉无法收起。 */
+.sb-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  cursor: default;
 }
 @keyframes sb-in {
   from {
