@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use chrono::Datelike;
 use serde_json::{json, Map, Value};
@@ -354,7 +356,27 @@ fn day_to_series(dd: &Value) -> Value {
     v
 }
 
+/// get_stats 短时缓存（TTL 2.5s）：面板 5s 轮询 + 账号聚合每 10s 按服务各调
+/// 一次，全部重读 jsonl 并遍历当月重算费用开销大，同批轮询只扫一遍文件。
+/// 键含统计目录，避免不同目录/测试间串缓存。
+static STATS_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
+
 pub fn get_stats(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
+    let key = format!("{}|{}|{}", dir.to_string_lossy(), service, primary);
+    if let Some((k, t, v)) = &*STATS_CACHE.lock().unwrap() {
+        if t.elapsed() < Duration::from_millis(2500) && k == &key {
+            let mut v = v.clone();
+            // 命中缓存时刷新时间戳，面板上“更新于”仍保持接近实时
+            v["updatedAt"] = json!(chrono::Local::now().to_rfc3339());
+            return Ok(v);
+        }
+    }
+    let out = get_stats_impl(dir, service, primary)?;
+    *STATS_CACHE.lock().unwrap() = Some((key, Instant::now(), out.clone()));
+    Ok(out)
+}
+
+fn get_stats_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
     let now = chrono::Local::now();
@@ -520,7 +542,23 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     (first_next - first_cur).num_days() as u32
 }
 
+/// get_live 短时缓存（TTL 1.5s）：面板与各悬浮窗每 3s 各读一次今日 jsonl，
+/// 高频轮询下避免重复全量读取。
+static LIVE_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
+
 pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
+    let key = format!("{}|{}|{}", dir.to_string_lossy(), service, primary);
+    if let Some((k, t, v)) = &*LIVE_CACHE.lock().unwrap() {
+        if t.elapsed() < Duration::from_millis(1500) && k == &key {
+            return Ok(v.clone());
+        }
+    }
+    let out = get_live_impl(dir, service, primary)?;
+    *LIVE_CACHE.lock().unwrap() = Some((key, Instant::now(), out.clone()));
+    Ok(out)
+}
+
+fn get_live_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();

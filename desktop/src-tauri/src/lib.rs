@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem, Submenu};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 #[cfg(target_os = "windows")]
 mod ffi {
@@ -341,8 +341,19 @@ fn save_config(state: State<'_, AppState>, mut cfg: serde_json::Value) -> Result
 }
 
 #[tauri::command]
-fn get_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let cfg = read_config_value(&state)?;
+async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    // 异步命令跑在 Tauri 线程池；内部含端口探测（200ms/服务超时），
+    // 用 spawn_blocking 挪到阻塞线程池，避免占住异步运行时线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_status_impl(&state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
+    let cfg = read_config_value(state)?;
     let services = cfg.get("services").cloned().unwrap_or_else(|| serde_json::json!([]));
     let mut children = state.children.lock().unwrap();
     let mut out = Vec::new();
@@ -390,44 +401,83 @@ fn get_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "root": state.root.to_string_lossy().to_string(),
         "python": state.python,
-        "statsDir": stats_dir(&state).to_string_lossy().to_string(),
+        "statsDir": stats_dir(state).to_string_lossy().to_string(),
         "services": out,
     }))
 }
 
 #[tauri::command]
-fn start_service(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    proxy::start_service(&state, &name)
+async fn start_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    // start_service 内部 sleep(1.2s) 验证子进程存活，属阻塞操作，
+    // spawn_blocking 挪到阻塞线程池，避免拖住主线程/异步运行时。
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        proxy::start_service(&state, &name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn stop_service(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    proxy::stop_service(&state, &name)
+async fn stop_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    // child.wait() 等待子进程退出，同样放阻塞线程池
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        proxy::stop_service(&state, &name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn toggle_service(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    proxy::toggle_service(&state, &name)
+async fn toggle_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        proxy::toggle_service(&state, &name)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn start_all(state: State<'_, AppState>) -> Result<(), String> {
-    proxy::start_all(&state)
+async fn start_all(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        proxy::start_all(&state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn stop_all(state: State<'_, AppState>) -> Result<(), String> {
-    proxy::stop_all(&state)
+async fn stop_all(app: tauri::AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        proxy::stop_all(&state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_stats(state: State<'_, AppState>, service: String) -> Result<serde_json::Value, String> {
-    stats::get_stats(&stats_dir(&state), &service, &primary_service(&state))
+async fn get_stats(app: tauri::AppHandle, service: String) -> Result<serde_json::Value, String> {
+    // 全量读 jsonl + 按月重算费用较重，异步执行 + stats.rs 内部 TTL 缓存
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stats::get_stats(&stats_dir(&state), &service, &primary_service(&state))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
-fn get_live(state: State<'_, AppState>, service: String) -> Result<serde_json::Value, String> {
-    stats::get_live(&stats_dir(&state), &service, &primary_service(&state))
+async fn get_live(app: tauri::AppHandle, service: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stats::get_live(&stats_dir(&state), &service, &primary_service(&state))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 fn models_url(base: &str) -> Option<String> {
@@ -500,8 +550,11 @@ fn fetch_models_impl(base_url: &str, api_key: &str) -> Result<serde_json::Value,
 }
 
 #[tauri::command]
-fn fetch_models(base_url: String, api_key: String) -> Result<serde_json::Value, String> {
-    fetch_models_impl(&base_url, &api_key)
+async fn fetch_models(base_url: String, api_key: String) -> Result<serde_json::Value, String> {
+    // ureq 同步 HTTP（8s 超时）放阻塞线程池，端点不可达时不再冻结 UI
+    tauri::async_runtime::spawn_blocking(move || fetch_models_impl(&base_url, &api_key))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[cfg(test)]
@@ -611,6 +664,11 @@ fn open_config_file(state: State<'_, AppState>) -> Result<(), String> {
     open_path(&p)
 }
 
+/// 通知前端面板可见性：隐藏时前端暂停轮询，避免空转与卡顿。
+fn emit_panel_visible(app: &tauri::AppHandle, visible: bool) {
+    let _ = app.emit("panel-visible", visible);
+}
+
 #[tauri::command]
 fn toggle_panel(app: tauri::AppHandle) -> Result<bool, String> {
     if let Some(w) = app.get_webview_window("panel") {
@@ -622,6 +680,7 @@ fn toggle_panel(app: tauri::AppHandle) -> Result<bool, String> {
             w.show().map_err(|e| e.to_string())?;
             w.set_focus().map_err(|e| e.to_string())?;
         }
+        emit_panel_visible(&app, !visible);
         Ok(!visible)
     } else {
         Err("panel window missing".into())
@@ -633,6 +692,7 @@ fn hide_panel(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window("panel") {
         w.hide().map_err(|e| e.to_string())?;
     }
+    emit_panel_visible(&app, false);
     Ok(())
 }
 
@@ -760,6 +820,7 @@ fn panel_events(app: tauri::AppHandle) -> impl Fn(&WindowEvent) + Send + 'static
             if let Some(w) = app.get_webview_window("panel") {
                 let _ = w.hide();
             }
+            emit_panel_visible(&app, false);
             api.prevent_close();
         }
         WindowEvent::Focused(false) => {
@@ -767,6 +828,7 @@ fn panel_events(app: tauri::AppHandle) -> impl Fn(&WindowEvent) + Send + 'static
             if let Some(w) = app.get_webview_window("panel") {
                 let _ = w.hide();
             }
+            emit_panel_visible(&app, false);
         }
         _ => {}
     }
@@ -811,6 +873,63 @@ pub fn run() {
                 children: Mutex::new(HashMap::new()),
             };
             app.manage(state);
+
+            // 托盘菜单：先于任何窗口创建，托盘图标立即出现。
+            // Windows 上 WebView2 窗口初始化耗时 0.5~2s/个（面板 + 悬浮窗共
+            // 6 个），若等全部建完再创建托盘，图标会延迟很久才显示。
+            let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;
+            let float_i = MenuItem::with_id(app, "float", "悬浮看板", true, None::<&str>)?;
+            let start_all_i = MenuItem::with_id(app, "start_all", "启动全部代理", true, None::<&str>)?;
+            let stop_all_i = MenuItem::with_id(app, "stop_all", "停止全部代理", true, None::<&str>)?;
+            let open_cfg_i = MenuItem::with_id(app, "open_cfg", "打开 config.json", true, None::<&str>)?;
+            let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let proxy_menu = Submenu::with_items(app, "代理", true, &[&start_all_i, &stop_all_i])?;
+            let menu = Menu::with_items(app, &[&panel_i, &float_i, &proxy_menu, &open_cfg_i, &quit_i])?;
+
+            TrayIconBuilder::with_id("main")
+                // 用与应用图标同款的托盘图标（22x22/@2x），避免默认图标在菜单栏渲染过小失真
+                .icon(tauri::include_image!("icons/tray-icon.png"))
+                .icon_as_template(false)
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "panel" => {
+                        let _ = toggle_panel(app.clone());
+                    }
+                    "float" => {
+                        let _ = toggle_float(app.clone());
+                    }
+                    "start_all" => {
+                        // 每服务串行等待约 1.2s 验证存活，异步执行避免卡住托盘 UI
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = start_all(app).await;
+                        });
+                    }
+                    "stop_all" => {
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let _ = stop_all(app).await;
+                        });
+                    }
+                    "open_cfg" => {
+                        let state = app.state::<AppState>();
+                        let _ = open_config_file(state);
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let _ = toggle_panel(tray.app_handle().clone());
+                    }
+                })
+                .build(app)?;
 
             let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()))
                 .title("o2a-proxy")
@@ -857,56 +976,6 @@ pub fn run() {
                     }
                 }
             }
-
-            // 托盘菜单
-            let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;
-            let float_i = MenuItem::with_id(app, "float", "悬浮看板", true, None::<&str>)?;
-            let start_all_i = MenuItem::with_id(app, "start_all", "启动全部代理", true, None::<&str>)?;
-            let stop_all_i = MenuItem::with_id(app, "stop_all", "停止全部代理", true, None::<&str>)?;
-            let open_cfg_i = MenuItem::with_id(app, "open_cfg", "打开 config.json", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let proxy_menu = Submenu::with_items(app, "代理", true, &[&start_all_i, &stop_all_i])?;
-            let menu = Menu::with_items(app, &[&panel_i, &float_i, &proxy_menu, &open_cfg_i, &quit_i])?;
-
-            TrayIconBuilder::with_id("main")
-                // 用与应用图标同款的托盘图标（22x22/@2x），避免默认图标在菜单栏渲染过小失真
-                .icon(tauri::include_image!("icons/tray-icon.png"))
-                .icon_as_template(false)
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "panel" => {
-                        let _ = toggle_panel(app.clone());
-                    }
-                    "float" => {
-                        let _ = toggle_float(app.clone());
-                    }
-                    "start_all" => {
-                        let state = app.state::<AppState>();
-                        let _ = proxy::start_all(&state);
-                    }
-                    "stop_all" => {
-                        let state = app.state::<AppState>();
-                        let _ = proxy::stop_all(&state);
-                    }
-                    "open_cfg" => {
-                        let state = app.state::<AppState>();
-                        let _ = open_config_file(state);
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let _ = toggle_panel(tray.app_handle().clone());
-                    }
-                })
-                .build(app)?;
 
             Ok(())
         })

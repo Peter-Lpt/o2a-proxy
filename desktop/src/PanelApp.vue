@@ -275,6 +275,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { listen } from "@tauri-apps/api/event";
 import { api, fmtCost, fmtNum, fmtPct } from "./api";
 import Icon from "./components/Icon.vue";
 import LineChart from "./components/LineChart.vue";
@@ -1007,16 +1008,45 @@ watch(
 );
 
 let timers: any[] = [];
+// 面板可见性：隐藏时暂停轮询，避免面板长期隐藏期间空转 + 反复全量读统计。
+// 托盘点击/失焦收起由 Rust 发 panel-visible 事件通知（可靠），再叠加
+// document.hidden（WebView2 窗口隐藏时可见性置位）双保险；
+// 变为可见时立即刷新一轮，不等下一个轮询周期。
+const panelVisible = ref(!document.hidden);
+let unlistenPanel: (() => void) | null = null;
+
+function onPanelVisible(visible: boolean) {
+  const was = panelVisible.value;
+  panelVisible.value = visible;
+  if (visible && !was) {
+    loadStatus();
+    loadStats();
+    loadLive();
+    loadAccountStats();
+  }
+}
+function onVisibilityChange() {
+  onPanelVisible(!document.hidden);
+}
+
 onMounted(async () => {
   await Promise.all([loadConfig(), loadStatus()]);
   loadStats();
   loadLive();
   loadAccountStats();
   warmModels();
-  timers.push(setInterval(loadStatus, 3000));
-  timers.push(setInterval(loadStats, 5000));
-  timers.push(setInterval(loadLive, 3000));
-  timers.push(setInterval(loadAccountStats, 10000));
+  listen<boolean>("panel-visible", (e) => onPanelVisible(!!e.payload)).then(
+    (f) => (unlistenPanel = f)
+  );
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  timers.push(setInterval(() => { if (panelVisible.value) loadStatus(); }, 3000));
+  timers.push(setInterval(() => { if (panelVisible.value) loadStats(); }, 5000));
+  timers.push(setInterval(() => { if (panelVisible.value) loadLive(); }, 3000));
+  timers.push(setInterval(() => { if (panelVisible.value) loadAccountStats(); }, 10000));
 });
-onUnmounted(() => timers.forEach(clearInterval));
+onUnmounted(() => {
+  unlistenPanel?.();
+  document.removeEventListener("visibilitychange", onVisibilityChange);
+  timers.forEach(clearInterval);
+});
 </script>
