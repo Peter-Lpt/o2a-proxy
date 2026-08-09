@@ -24,6 +24,7 @@
       "account": "acc-1",
       "api": "openai-completions",
       "model": "qwen-plus",
+      "override_model": true,
       "listen_address": "11011",
       "max_tokens": 1000000,
       "context_1m": true

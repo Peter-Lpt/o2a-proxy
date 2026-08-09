@@ -186,7 +186,7 @@
                 </label>
                 <div class="proto-row"><span class="proto-lbl">入口协议</span><span class="proto-val">{{ entryProto }}</span></div>
                 <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
-                <label>子模型 sub_model <SelectBox v-model="activeSvc.sub_model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
+                <label class="inline"><input v-model="activeSvc.override_model" type="checkbox" :disabled="activeSvcRunning" /><span>覆盖客户端模型 override_model <span class="fc-sub" style="font-weight:400">（关：透传客户端请求的模型名）</span></span></label>
                 <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
                 <div class="grid2">
                   <label>max_tokens <input v-model="activeSvc.max_tokens" type="number" min="1" :disabled="activeSvcRunning" /></label>
@@ -756,7 +756,7 @@ function addService() {
     account: (cfg.accounts || [])[0]?.id || "",
     client: "auto",
     model: "qwen-plus",
-    sub_model: "qwen-plus",
+    override_model: true,
     listen_address: port,
     context_1m: false,
     max_tokens: 4096,

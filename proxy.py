@@ -34,7 +34,6 @@ PROXY_MODEL = os.environ.get("PROXY_MODEL", "qwen-plus")
 PROXY_MAX_TOKENS = int(os.environ.get("PROXY_MAX_TOKENS", "4096"))
 # 子 agent 模型配置（Claude Code 的 Task 工具会启动子 agent，使用 haiku 等模型）
 # 默认与主 agent 相同，可单独配置
-SUB_PROXY_MODEL = os.environ.get("SUB_PROXY_MODEL", PROXY_MODEL)
 # 流式响应总超时（秒），防止模型长时间卡在推理阶段
 STREAM_TIMEOUT = int(os.environ.get("STREAM_TIMEOUT", "600"))
 
@@ -126,14 +125,15 @@ class Service:
     - direct：Anthropic 入口 → 透传发送 Anthropic 端点
     """
 
-    def __init__(self, name, account, client, host, port, model, sub_model, max_tokens, proxy, api="", upstream_api=""):
+    def __init__(self, name, account, client, host, port, model, override_model=True,
+                 max_tokens=4096, proxy="", api="", upstream_api=""):
         self.name = name
         self.account = account
         self.client = client
         self.host = host
         self.port = port
         self.model = model
-        self.sub_model = sub_model
+        self.override_model = override_model
         self.max_tokens = max_tokens
         self.proxy = proxy or ""
         self.api = (api or "").strip()
@@ -182,7 +182,7 @@ class Service:
     def with_mode(self, mode):
         """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
         s = Service(self.name, self.account, self.client, self.host, self.port,
-                    self.model, self.sub_model, self.max_tokens, self.proxy, self.api,
+                    self.model, self.override_model, self.max_tokens, self.proxy, self.api,
                     self.upstream_api)
         s._mode_override = mode
         return s
@@ -323,7 +323,7 @@ def load_config():
                     host=svc.get("listen_host", "127.0.0.1"),
                     port=int(svc.get("listen_address", "8317")),
                     model=svc.get("model", "qwen-plus"),
-                    sub_model=svc.get("sub_model", svc.get("model", "qwen-plus")),
+                    override_model=svc.get("override_model", True),
                     max_tokens=int(svc.get("max_tokens", 1000000 if svc.get("context_1m") else 4096)),
                     proxy=os.environ.get("HTTP_PROXY", ""),
                     api=api,
@@ -337,7 +337,7 @@ def load_config():
                             openai_url=TARGET_URL, anthropic_url=""),
             client="auto",
             host=LISTEN_HOST, port=LISTEN_PORT,
-            model=PROXY_MODEL, sub_model=SUB_PROXY_MODEL, max_tokens=PROXY_MAX_TOKENS,
+            model=PROXY_MODEL, override_model=True, max_tokens=PROXY_MAX_TOKENS,
             proxy=PROXY,
         ))
     return services
@@ -1077,8 +1077,11 @@ def _responses_to_chat(req, service):
                 m["role"] = "system"
             msgs.append(m)
         chat["messages"] = msgs
-        # 透传客户端请求的模型名（同一端口可服务多个模型），缺省回退服务配置
-        chat["model"] = req.get("model") or service.model
+        # 模型覆盖开关：默认用服务配置的 model；override_model=false 时透传客户端模型名（缺省回退服务配置）
+        if service.override_model:
+            chat["model"] = service.model
+        else:
+            chat["model"] = req.get("model") or service.model
         if not chat.get("max_tokens") and not chat.get("max_output_tokens"):
             # 没带 max_tokens 时用服务默认，但封顶上游支持的 131072，避免 1M 上下文默认值触发上游 400
             chat["max_tokens"] = min(service.max_tokens, 131072)
@@ -1120,8 +1123,12 @@ def _responses_to_chat(req, service):
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
 
+    if service.override_model:
+        chat_model = service.model
+    else:
+        chat_model = req.get("model") or service.model
     chat = {
-        "model": req.get("model") or service.model,
+        "model": chat_model,
         "messages": messages,
         "stream": req.get("stream", False),
     }
@@ -1487,13 +1494,15 @@ def convert_request(req, service):
         messages.insert(0, {"role": "system", "content": system_content})
 
     is_stream = req.get("stream", False)
-    # 根据模型名判断是否子 agent 请求，使用对应的模型配置
-    # Claude Code 子 agent (Task 工具) 使用 haiku 模型名
+    # 模型覆盖开关：默认用服务配置的 model 覆盖客户端请求的模型；
+    # override_model=false 时忠实透传客户端模型名（缺失时回退服务配置）
     client_model = req.get("model", "")
-    is_subagent = "haiku" in client_model.lower()
-    model = service.sub_model if is_subagent else service.model
-    if is_subagent:
-        logger.debug(f"[SUBAGENT] Detected sub-agent request: {client_model} -> {model}")
+    if service.override_model:
+        model = service.model
+    else:
+        model = client_model or service.model
+    if client_model and client_model != model:
+        logger.debug(f"[MODEL] client requested {client_model} -> use {model} (override={service.override_model})")
     openai_req = {
         "model": model,
         "messages": messages,

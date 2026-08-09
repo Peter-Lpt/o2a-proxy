@@ -648,10 +648,18 @@ async def handle_passthrough(request: web.Request, service: Service,
         target = build_target(service, request)
     try:
         payload = json.loads(body)
-        if not payload.get("model") and service.model:
-            payload["model"] = service.model
-            body = json.dumps(payload).encode("utf-8")
-        model = payload.get("model") or service.model
+        if service.override_model:
+            # 默认：用服务配置的 model 覆盖客户端请求的模型
+            if payload.get("model") != service.model:
+                payload["model"] = service.model
+                body = json.dumps(payload).encode("utf-8")
+            model = service.model
+        else:
+            # 忠实透传客户端模型名，仅缺失时回退服务配置
+            if not payload.get("model") and service.model:
+                payload["model"] = service.model
+                body = json.dumps(payload).encode("utf-8")
+            model = payload.get("model") or service.model
     except json.JSONDecodeError:
         return openai_error_response(400, "invalid json")
     logger.info(f"[FWD][passthrough] stream={stream} model={model} "
@@ -1024,7 +1032,8 @@ async def handle_request(request: web.Request):
 
     if mode == "codex":
         stream = bool(payload.get("stream", False))
-        logger.info(f"[REQ][codex] model={service.model} stream={stream} api={service.api or 'auto'} "
+        req_model = payload.get("model") or service.model
+        logger.info(f"[REQ][codex] model={req_model} stream={stream} api={service.api or 'auto'} "
                     f"upstream={service.upstream_api} bytes={len(body)} "
                     f"elapsed={time.time()-req_start:.3f}s")
         # api=openai-completions：Chat 整包透传（直连上游，零转换）

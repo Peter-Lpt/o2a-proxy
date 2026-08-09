@@ -82,7 +82,7 @@ def build_service(openai_url: str, api: str = "", upstream_api: str = "openai-co
     acc = Account(id=ds.account.id, name=ds.account.name, api_key=ds.account.api_key,
                   openai_url=openai_url, anthropic_url="")
     return Service(name=ds.name, account=acc, client=ds.client, host="127.0.0.1",
-                   port=0, model=ds.model, sub_model=ds.sub_model,
+                   port=0, model=ds.model, override_model=ds.override_model,
                    max_tokens=ds.max_tokens, proxy="", api=api, upstream_api=upstream_api)
 
 

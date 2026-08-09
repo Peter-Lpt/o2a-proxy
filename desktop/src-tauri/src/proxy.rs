@@ -267,7 +267,6 @@ mod tests {
                 "comment": "svc1",
                 "mode": "claude",
                 "model": "m",
-                "sub_model": "m",
                 "listen_address": 18999,
                 "openai_base_url": "http://127.0.0.1:1/v1",
                 "openai_api_key": ""
@@ -301,7 +300,6 @@ mod tests {
                 "comment": "svc1",
                 "mode": "claude",
                 "model": "m",
-                "sub_model": "m",
                 "listen_address": 18999,
                 "openai_base_url": "http://127.0.0.1:1/v1",
                 "openai_api_key": "sk-test"

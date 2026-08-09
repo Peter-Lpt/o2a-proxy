@@ -125,7 +125,7 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
       "account": "acc-1",
       "client": "anthropic",
       "model": "qwen-plus",
-      "sub_model": "qwen-plus",
+      "override_model": true,
       "listen_address": 11011
     }
   ]
@@ -150,8 +150,8 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `services[].api` | **入口协议（推荐显式声明）**：`openai-completions`（pi/常规 Chat）/ `openai-responses`（Codex）/ `anthropic-messages`（Claude Code）；未声明时回退 `client`/自动识别（旧配置兼容）。账号级 `accounts[].api` 可作为该账号所有服务的默认值 |
 | `services[].upstream_api` | **上游原生协议**（配合 `api=openai-responses`）：`openai-completions`（默认，上游只支持 Chat → 转换）/ `openai-responses`（上游原生支持 Responses，如 DeepSeek 官方 → 整包透传零转换） |
 | `services[].client` | 客户端类型（旧字段，`api` 未声明时生效）：`anthropic`（Claude Code）/ `openai`（Codex）/ `auto`（按请求自动识别，默认） |
-| `services[].model` | 主模型 |
-| `services[].sub_model` | 子模型（Claude Code 子 agent / Task 工具使用） |
+| `services[].model` | 模型（默认覆盖客户端请求的模型） |
+| `services[].override_model` | **模型覆盖开关**（默认 `true`）：`true` 时所有请求一律使用服务配置的 `model`（忽略客户端请求里的模型名）；`false` 时忠实透传客户端请求的模型名（缺省才回退服务配置）。`false` 适合客户端自己选模型（如 opencode / pi / hermes 各自指定主、子 agent 模型）的场景 |
 | `services[].listen_address` | 监听端口，每服务独立 |
 | `services[].context_1m` | 1M 上下文模式（影响默认 `max_tokens`） |
 | `services[].max_tokens` | 最大输出 token（缺省 4096） |
@@ -316,7 +316,7 @@ python test_codex_direct.py          # 端到端：Chat 整包透传 / Responses
 
 ### Q: 如何切换模型？
 
-修改 `config.json` 的 `model` / `sub_model` 后重启代理；桌面客户端里也可直接编辑并保存。
+修改 `config.json` 的 `model` / `override_model` 后重启代理；桌面客户端里也可直接编辑并保存。
 
 ### Q: 模型列表怎么来的？
 
