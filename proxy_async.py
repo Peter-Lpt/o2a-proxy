@@ -103,6 +103,61 @@ def openai_error_response(status: int, message: str) -> web.Response:
     )
 
 
+# ---------------------------------------------------------------------------
+# 会话任务状态（供 /status 端点与桌面悬浮窗展示）
+# 无会话 id 的启发式：只看“最后到最后”的全局信号，不区分具体是哪个会话。
+#   active = 有在途流 或 最近一次 finish 是 continue（长链中间）
+#   last_finish: continue | final | none
+# ---------------------------------------------------------------------------
+
+
+def _task(app) -> dict:
+    """每个服务（web.Application）独立的任务状态字典。"""
+    t = app.get("task_state")
+    if t is None:
+        t = {
+            "active_streams": 0,
+            "last_finish": "none",  # continue | final | none
+            "last_activity": 0.0,
+        }
+        app["task_state"] = t
+    return t
+
+
+def _task_begin(app) -> None:
+    _task(app)["active_streams"] += 1
+
+
+def _task_end(app) -> None:
+    t = _task(app)
+    t["active_streams"] = max(0, t["active_streams"] - 1)
+
+
+def _task_finish(app, is_final: bool) -> None:
+    t = _task(app)
+    t["last_finish"] = "final" if is_final else "continue"
+    t["last_activity"] = time.time()
+
+
+def _task_snapshot(app) -> dict:
+    t = _task(app)
+    return {
+        "active": t["active_streams"] > 0 or t["last_finish"] == "continue",
+        "active_streams": t["active_streams"],
+        "last_finish": t["last_finish"],
+        "last_activity": t["last_activity"],
+    }
+
+
+def _classify(finish_reason, has_tool_call: bool = False) -> bool:
+    """finish_reason -> 是否“最终答复”（is_final）。"""
+    if has_tool_call or finish_reason in ("tool_calls", "tool_use"):
+        return False
+    if finish_reason in ("length", "max_tokens"):
+        return False
+    return True  # stop / end_turn / None / 其它
+
+
 async def stream_write(resp: web.StreamResponse, data: bytes) -> None:
     """向客户端写 SSE 数据；客户端断开时抛 ClientGone。"""
     if not data:
@@ -202,6 +257,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
             text_bytes = 0
             first_chunk_ts = None
             last_prog_ts = time.time()
+            _task_begin(request.app)
 
             try:
                 while True:
@@ -520,6 +576,10 @@ async def handle_claude_stream(request: web.Request, service: Service,
                         }).encode("utf-8"))
                 except (ClientGone, ConnectionResetError):
                     pass
+            finally:
+                _task_finish(request.app, _classify(pending_finish_reason,
+                                                    bool(tool_input_buf)))
+                _task_end(request.app)
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"Upstream request failed: {err_body[:500]}")
@@ -606,6 +666,7 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
     content_list.extend(tool_calls)
 
     stop_reason = _anthropic_stop_reason(finish_reason, bool(tool_calls))
+    _task_finish(request.app, _classify(finish_reason, bool(tool_calls)))
     await record_stats(
         service,
         raw.get("model", service.model),
@@ -680,6 +741,11 @@ async def handle_passthrough(request: web.Request, service: Service,
                     converted = _convert_usage(data.get("usage") or {})
                     if converted.get("input_tokens"):
                         await record_stats(service, data.get("model") or model, converted)
+                    # 任务状态：非流式单次响应，用 finish_reason 判定是否最终答复
+                    fr = ((data.get("choices") or [{}])[0].get("finish_reason"))
+                    has_tool = bool((data.get("choices") or [{}])[0]\
+                                    .get("message", {}).get("tool_calls"))
+                    _task_finish(request.app, _classify(fr, has_tool))
                 except Exception:
                     pass
                 logger.info(f"[passthrough] completed bytes={len(raw)}")
@@ -691,6 +757,9 @@ async def handle_passthrough(request: web.Request, service: Service,
             })
             await resp.prepare(request)
             latest_usage = None
+            finish_reason = None
+            done_seen = False
+            _task_begin(request.app)
             try:
                 while True:
                     line = await up.content.readline()
@@ -699,7 +768,11 @@ async def handle_passthrough(request: web.Request, service: Service,
                     stripped = line.strip()
                     if stripped.startswith(b"data:"):
                         piece = stripped[5:].strip()
-                        if piece and piece != b"[DONE]":
+                        if piece == b"[DONE]":
+                            done_seen = True
+                            logger.info(f"[STREAM] done seen model={model} "
+                                        f"elapsed={time.time()-req_start:.2f}s")
+                        elif piece and piece != b"[DONE]":
                             try:
                                 chunk = json.loads(piece.decode("utf-8", errors="replace"))
                                 if responses_usage:
@@ -708,10 +781,19 @@ async def handle_passthrough(request: web.Request, service: Service,
                                         u = (chunk.get("response") or {}).get("usage") or {}
                                         if u:
                                             latest_usage = _convert_usage(u)
+                                        # 任务状态：output 无 function_call 视为最终答复
+                                        out = (chunk.get("response") or {}).get("output") or []
+                                        has_tool = any(i.get("type") == "function_call"
+                                                      for i in out)
+                                        _task_finish(request.app, _classify(None, has_tool))
                                 else:
                                     usage = chunk.get("usage")
                                     if usage:
                                         latest_usage = _convert_usage(usage)
+                                    # Chat 流式：finish_reason 在最后一个 delta 块出现
+                                    fr = chunk.get("choices") or []
+                                    if fr and fr[0].get("finish_reason"):
+                                        finish_reason = fr[0]["finish_reason"]
                             except Exception:
                                 pass
                     await stream_write(resp, line)
@@ -723,6 +805,11 @@ async def handle_passthrough(request: web.Request, service: Service,
                 logger.error(f"[passthrough] stream error: {e}", exc_info=True)
             finally:
                 await record_stats(service, model, latest_usage)
+                if not responses_usage:
+                    _task_finish(request.app, _classify(finish_reason))
+                _task_end(request.app)
+            logger.info(f"[STREAM] passthrough ended done={done_seen} "
+                        f"elapsed={time.time()-req_start:.2f}s")
             return resp
     except aiohttp.ClientError as e:
         err_body = str(e)
@@ -764,8 +851,11 @@ async def handle_openai_stream(request: web.Request, service: Service,
 
             model = service.model
             latest_usage = None
+            done_seen = False
+            finish_reason = None
             if is_responses:
                 translator = _ResponsesStreamTranslator(req.get("model") or service.model)
+            _task_begin(request.app)
             try:
                 while True:
                     line = await up.content.readline()
@@ -776,12 +866,19 @@ async def handle_openai_stream(request: web.Request, service: Service,
                         stripped = line.strip()
                         if stripped.startswith(b"data:") :
                             piece = stripped[5:].strip()
-                            if piece and piece != b"[DONE]":
+                            if piece == b"[DONE]":
+                                done_seen = True
+                                logger.info(f"[STREAM] done seen model={model} "
+                                            f"elapsed={time.time()-req_start:.2f}s")
+                            elif piece and piece != b"[DONE]":
                                 try:
                                     chunk = json.loads(piece.decode("utf-8", errors="replace"))
                                     usage = chunk.get("usage")
                                     if usage:
                                         latest_usage = _convert_usage(usage)
+                                    fr = chunk.get("choices") or []
+                                    if fr and fr[0].get("finish_reason"):
+                                        finish_reason = fr[0]["finish_reason"]
                                 except Exception:
                                     pass
                         await stream_write(resp, line)
@@ -789,12 +886,18 @@ async def handle_openai_stream(request: web.Request, service: Service,
                     if line.startswith(b"data:"):
                         data_str = line[5:].strip().decode("utf-8", errors="replace")
                         if data_str == "[DONE]":
+                            done_seen = True
                             break
                         try:
                             chunk = json.loads(data_str)
                             usage = chunk.get("usage")
                             if usage:
                                 latest_usage = _convert_usage(usage)
+                            # Responses 流：response.completed 事件判定是否最终
+                            if chunk.get("type") == "response.completed":
+                                out = (chunk.get("response") or {}).get("output") or []
+                                has_tool = any(i.get("type") == "function_call" for i in out)
+                                _task_finish(request.app, _classify(None, has_tool))
                         except Exception:
                             continue
                         for ev in translator.translate(chunk):
@@ -807,6 +910,11 @@ async def handle_openai_stream(request: web.Request, service: Service,
                 logger.error(f"[codex] stream error: {e}", exc_info=True)
             finally:
                 await record_stats(service, model, latest_usage)
+                if not is_responses:
+                    _task_finish(request.app, _classify(finish_reason))
+                _task_end(request.app)
+            logger.info(f"[STREAM] codex ended done={done_seen} "
+                        f"elapsed={time.time()-req_start:.2f}s")
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[codex] upstream failed: {err_body[:500]}")
@@ -852,8 +960,16 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
             )
         if not req.get("input"):
             # Chat 直通：上游本就是 chat.completion，原样返回
+            fr = ((data.get("choices") or [{}])[0].get("finish_reason"))
+            has_tool = bool((data.get("choices") or [{}])[0]
+                            .get("message", {}).get("tool_calls"))
+            _task_finish(request.app, _classify(fr, has_tool))
             return web.Response(body=raw, status=200, content_type="application/json")
         out = _chat_to_responses_json(data, req.get("model") or service.model)
+        # Responses 转换：output 无 function_call 视为最终答复
+        has_tool = any(i.get("type") == "function_call"
+                      for i in (out.get("output") or []))
+        _task_finish(request.app, _classify(None, has_tool))
         raw = json.dumps(out).encode("utf-8")
     except Exception as e:
         logger.warning(f"[codex] response convert failed: {e}")
@@ -910,6 +1026,8 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
             await asyncio.to_thread(
                 get_stats(service.name, service.account.id).record, model, usage
             )
+        # 任务状态：Anthropic stop_reason == end_turn 视为最终答复
+        _task_finish(request.app, _classify(data.get("stop_reason")))
     except Exception as e:
         logger.warning(f"[direct] response parse failed: {e}")
 
@@ -945,6 +1063,8 @@ async def handle_direct_stream(request: web.Request, service: Service,
 
             model = service.model
             latest_usage = None
+            stop_reason = None
+            _task_begin(request.app)
             try:
                 while True:
                     line = await up.content.readline()
@@ -968,6 +1088,9 @@ async def handle_direct_stream(request: web.Request, service: Service,
                                 if latest_usage is None:
                                     latest_usage = {}
                                 latest_usage.update(u)
+                            sr = (ev.get("delta") or {}).get("stop_reason")
+                            if sr:
+                                stop_reason = sr
                         # OpenAI 兼容流式：usage 通常出现在最后一个 chunk
                         else:
                             u = ev.get("usage")
@@ -985,6 +1108,8 @@ async def handle_direct_stream(request: web.Request, service: Service,
                 if latest_usage and ("prompt_tokens" in latest_usage or "completion_tokens" in latest_usage):
                     latest_usage = _convert_usage(latest_usage)
                 await record_stats(service, model, latest_usage)
+                _task_finish(request.app, _classify(stop_reason))
+                _task_end(request.app)
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[direct] upstream failed: {err_body[:500]}")
@@ -1088,13 +1213,18 @@ async def handle_get(request: web.Request, service: Service):
         return json_response(summary)
     if path == "/health":
         return json_response({"status": "ok"})
+    if path == "/status":
+        snap = _task_snapshot(request.app)
+        snap.update({"service": service.name, "port": service.port,
+                     "mode": service.mode})
+        return json_response(snap)
     return json_response({
         "status": "ok",
         "mode": service.mode,
         "client": service.client,
         "account": service.account.name,
         "target": service.target_url,
-        "endpoints": ["/stats?period=hour|day|all", "/stats?account=<账号id>&period=day", "/health"],
+        "endpoints": ["/stats?period=hour|day|all", "/stats?account=<账号id>&period=day", "/health", "/status"],
     })
 
 

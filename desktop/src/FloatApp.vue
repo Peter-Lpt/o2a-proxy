@@ -1,7 +1,7 @@
 <template>
-  <div class="float" :class="{ on: anyRunning }" data-tauri-drag-region="deep">
+  <div class="float" :class="{ on: anyActive }" data-tauri-drag-region="deep">
     <div class="head">
-      <span class="dot" :class="{ on: anyRunning }"></span>
+      <span class="dot" :class="{ on: anyActive }"></span>
       <!-- 全平台统一：单悬浮窗，下拉在窗口内直接切换服务（保持打开） -->
       <div class="svc-sel" data-tauri-drag-region="false" title="切换服务（窗口内直接切换）">
         <SelectBox v-model="selValue" :options="floatOptions" size="sm" placeholder="全部" />
@@ -105,9 +105,23 @@ watch(selValue, async (v) => {
 });
 const floatOptions = computed(() => [
   { value: "", label: "全部" },
-  ...(status.value.services || []).map((s: any) => ({ value: s.name, label: s.name })),
+  ...(status.value.services || []).map((s: any) => ({
+    value: s.name,
+    label: s.name,
+    dot: svcDot(s),
+  })),
 ]);
 
+// 单服务圆点：灰=未开启，绿=空闲/完成，busy(琥珀闪烁)=运行中
+function svcDot(s: any): string {
+  if (!s.running) return "gray";
+  return s.task?.active ? "busy" : "green";
+}
+
+// 全局：任一服务有任务在跑则闪烁
+const anyActive = computed(() =>
+  (status.value.services || []).some((s: any) => s.task?.active)
+);
 const anyRunning = computed(() => (status.value.services || []).some((s: any) => s.running));
 const now1min = computed(() => {
   const cutoff = Date.now() - 300_000;
@@ -224,7 +238,7 @@ onMounted(() => {
   timers.push(
     setInterval(() => {
       if (floatVisible.value) refresh();
-    }, 3000)
+    }, 2000)
   );
 });
 onUnmounted(() => {

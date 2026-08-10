@@ -221,6 +221,14 @@ pub(crate) fn port_open(host: &str, port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
+/// 探测某服务端点的 /status，返回任务状态（active 等）。失败返回 None。
+fn fetch_task_status(host: &str, port: u16) -> Option<serde_json::Value> {
+    let url = format!("http://{host}:{port}/status");
+    let resp = ureq::get(&url).timeout(Duration::from_millis(800)).call().ok()?;
+    let body = resp.into_string().ok()?;
+    serde_json::from_str(&body).ok()
+}
+
 /// 把面板定位到托盘图标附近（macOS 用托盘坐标，Windows 用鼠标位置 + 工作区）。
 #[allow(unused_variables)]
 fn position_panel(app: &tauri::AppHandle, win: &tauri::WebviewWindow) -> Result<(), String> {
@@ -390,7 +398,7 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
                 .map(|c| c.try_wait().ok().flatten().is_none())
                 .unwrap_or(false);
             let running = child_alive || (port > 0 && port_open(&host, port));
-            out.push(serde_json::json!({
+            let mut svc = serde_json::json!({
                 "name": name,
                 "running": running,
                 "port": port,
@@ -398,7 +406,14 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
                 "mode": mode,
                 "model": s.get("model").cloned().unwrap_or(serde_json::Value::Null),
                 "context_1m": s.get("context_1m").cloned().unwrap_or(serde_json::Value::Bool(false)),
-            }));
+            });
+            // 服务在跑时探 /status 拿实时任务状态（active/last_finish 等）
+            if running && port > 0 {
+                if let Some(task) = fetch_task_status(&host, port) {
+                    svc["task"] = task;
+                }
+            }
+            out.push(svc);
         }
     }
     Ok(serde_json::json!({
