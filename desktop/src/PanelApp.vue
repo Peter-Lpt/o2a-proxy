@@ -94,19 +94,25 @@
         </div>
 
         <div class="chart-head">
-          <div class="seg">
-            <button class="seg-btn" :class="{ active: range === 'today' }" @click="setRange('today')">今日</button>
-            <button class="seg-btn" :class="{ active: range === 'month' }" @click="setRange('month')">本月</button>
+          <div class="chart-left">
+            <div class="seg">
+              <button class="seg-btn" :class="{ active: range === 'today' }" @click="setRange('today')">今日</button>
+              <button class="seg-btn" :class="{ active: range === 'month' }" @click="setRange('month')">本月</button>
+            </div>
+            <button class="cal-btn" :class="{ active: range === 'custom' }" :title="calOpen ? '收起日历' : '自定义日期区间'" @click="calOpen = !calOpen">
+              {{ range === 'custom' ? rangeLabel : '日历' }}<span class="cal-caret">{{ calOpen ? '▲' : '▼' }}</span>
+            </button>
           </div>
           <div class="chart-head-right">
-            <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" title="按模型过滤（今日/本月）" />
+            <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" :title="'按模型过滤（' + rangeLabel + '）'" />
             <button class="icon-btn" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
           </div>
         </div>
+        <CalendarHeat v-if="calOpen" :service="statsService" @select="onCalSelect" @quick="onCalQuick" />
 
         <div v-if="modelStats.length" class="card model-stats-card">
           <div class="fc-h">
-            <span>{{ range === 'today' ? "今日按模型" : "本月按模型" }}</span>
+            <span>{{ rangeLabel }}按模型</span>
             <span class="model-stats-total">总费用 ¥{{ fmtCost(modelStats.reduce((a, m) => a + (m.cost || 0), 0)) }}</span>
           </div>
           <div class="model-stats-list">
@@ -123,7 +129,7 @@
         </div>
 
         <div class="card chart-box">
-          <div class="chart-title">缓存命中率 & Token 消耗（{{ range === 'today' ? '今日逐分钟' : '本月逐日' }}）</div>
+          <div class="chart-title">缓存命中率 & Token 消耗（{{ chartTitle }}）<span v-if="deltaText" class="chart-delta" :class="deltaCls">{{ deltaText }}</span></div>
           <LineChart :labels="chartLabels" :input="chartInput" :read="chartRead" :output="chartOutput" :hit-rate="chartHit" :theme="theme" />
           <div class="chart-note">* 命中率 = 缓存读 / (缓存读 + 输入)，对齐 Anthropic 官方口径</div>
         </div>
@@ -277,6 +283,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import { api, fmtCost, fmtNum, fmtPct } from "./api";
+import CalendarHeat from "./components/CalendarHeat.vue";
 import Icon from "./components/Icon.vue";
 import LineChart from "./components/LineChart.vue";
 import SelectBox from "./components/SelectBox.vue";
@@ -338,7 +345,27 @@ function onTabsWheel(e: WheelEvent) {
   el.scrollLeft += dx;
 }
 const page = ref<"stats" | "config" | "accounts">("stats");
-const range = ref<"today" | "month">("today");
+type RangeKey = "today" | "yesterday" | "week" | "lastweek" | "month" | "lastmonth" | "custom";
+// 区间档位（历史档由日历点选自定义区间替代，仅今日/本月暴露为主档）
+const rangeOptions: { value: RangeKey; label: string }[] = [
+  { value: "today", label: "今日" },
+  { value: "yesterday", label: "昨日" },
+  { value: "week", label: "本周" },
+  { value: "lastweek", label: "上周" },
+  { value: "month", label: "本月" },
+  { value: "lastmonth", label: "上月" },
+];
+function readRange(): RangeKey {
+  // 仅接受主界面暴露的档位（今日 / 本月）；自定义区间不记忆，刷新回今日
+  try {
+    const v = localStorage.getItem("o2a-stats-range");
+    if (v === "today" || v === "month") return v as RangeKey;
+  } catch (_) {}
+  return "today";
+}
+const range = ref<RangeKey>(readRange());
+const calOpen = ref(false);
+const customRange = ref<{ start: string; end: string } | null>(null);
 const modelFilter = ref<string>("");
 const toast = ref("");
 const offError = ref("");
@@ -700,7 +727,14 @@ async function loadStatus() {
 
 async function loadStats() {
   try {
-    const s = await api.getStats(statsService.value);
+    const c = customRange.value;
+    const isCustom = range.value === "custom";
+    const s = await api.getStats(
+      statsService.value,
+      range.value,
+      isCustom && c ? c.start : undefined,
+      isCustom && c ? c.end : undefined
+    );
     Object.keys(stats).forEach((k) => delete (stats as any)[k]);
     Object.assign(stats, s || {});
   } catch (e: any) {
@@ -903,10 +937,7 @@ function hitClass(r: number): string {
   return "";
 }
 
-const modelOptions = computed(() => {
-  const arr = range.value === "today" ? stats.byModel || [] : stats.monthByModel || [];
-  return (arr as any[]).map((m: any) => m.model);
-});
+const modelOptions = computed(() => (stats.byModel || []).map((m: any) => m.model));
 
 const filterOptions = computed(() => [
   { value: "", label: "全部模型" },
@@ -914,30 +945,53 @@ const filterOptions = computed(() => [
 ]);
 
 const modelStats = computed(() => {
-  const arr = range.value === "today" ? stats.byModel || [] : stats.monthByModel || [];
+  const arr = stats.byModel || [];
   return (arr as any[]).filter((m: any) => !modelFilter.value || m.model === modelFilter.value);
 });
 
+// 所选范围的相关文案与同比
+const rangeLabel = computed(() => {
+  if (range.value === "custom") {
+    const s = String(stats.rangeStart || "").slice(5);
+    const e = String(stats.rangeEnd || "").slice(5);
+    return s && e ? `${s} ~ ${e}` : "自定义";
+  }
+  const r = String(stats.range || range.value);
+  return rangeOptions.find((o) => o.value === r)?.label || "今日";
+});
+// 历史入口已由日历取代（点两个日期即可），仅保留今日/本月两档
+const prevLabel = computed(() => String(stats.prevLabel || "上期"));
+const seriesKind = computed(() => String(stats.seriesKind || "minute"));
+const kindLabel = computed(() =>
+  seriesKind.value === "minute" ? "逐分钟" : seriesKind.value === "hour" ? "逐小时" : "逐日"
+);
+const chartTitle = computed(() => `${rangeLabel.value}${kindLabel.value}`);
+const deltaText = computed(() => {
+  // 同比只在历史档显示（今日/本月为当前期，不比）
+  if (range.value === "today" || range.value === "month") return "";
+  const a = Number(stats.rangeAgg?.requests || 0);
+  const b = Number(stats.prevAgg?.requests || 0);
+  if (!b) return `较${prevLabel.value} —`;
+  const pct = Math.round(((a - b) / b) * 100);
+  return `较${prevLabel.value} ${pct >= 0 ? "+" : ""}${pct}% ${pct >= 0 ? "↑" : "↓"}`;
+});
+const deltaCls = computed(() => {
+  if (range.value === "today" || range.value === "month") return "";
+  const a = Number(stats.rangeAgg?.requests || 0);
+  const b = Number(stats.prevAgg?.requests || 0);
+  if (!b) return "";
+  return a >= b ? "up" : "down";
+});
+
 const chartData = computed(() => {
-  const pick = (arr: any[]) => ({
-    labels: arr.map((x: any) =>
-      range.value === "today" ? (x.minute || "").slice(11) : (x.date || "").slice(5)
-    ),
-    input: arr.map((x: any) => Number(x.input || 0)),
-    read: arr.map((x: any) => Number(x.read || 0)),
-    output: arr.map((x: any) => Number(x.output || 0)),
-    hit: arr.map((x: any) => x.hitRate || 0),
-  });
-  if (modelFilter.value) {
-    if (range.value === "today") {
-      return pick(stats.todayMinuteByModel?.[modelFilter.value] || []);
-    }
-    return pick(stats.monthDailyByModel?.[modelFilter.value] || []);
-  }
-  if (range.value === "today") {
-    return pick(stats.todayMinute || []);
-  }
-  return pick(stats.monthDaily || []);
+  const s: any[] = stats.series || [];
+  return {
+    labels: s.map((x: any) => x.label),
+    input: s.map((x: any) => Number(x.input || 0)),
+    read: s.map((x: any) => Number(x.read || 0)),
+    output: s.map((x: any) => Number(x.output || 0)),
+    hit: s.map((x: any) => x.hitRate || 0),
+  };
 });
 
 const chartLabels = computed(() => chartData.value.labels);
@@ -992,9 +1046,46 @@ const liveSum = computed(() => {
   return `最近一次 ${String(last.timestamp || "").slice(11, 19)}`;
 });
 
-function setRange(r: "today" | "month") {
+function setRange(r: RangeKey) {
   range.value = r;
+  try {
+    if (r === "custom") localStorage.removeItem("o2a-stats-range");
+    else localStorage.setItem("o2a-stats-range", r);
+  } catch (_) {}
   modelFilter.value = "";
+  calOpen.value = false;
+  loadStats();
+}
+
+// 自定义区间：起止日期（YYYY-MM-DD）；保持日历展开，便于用户看到选中区间并可微调
+function setCustomRange(start: string, end: string) {
+  customRange.value = { start, end };
+  range.value = "custom";
+  try {
+    localStorage.removeItem("o2a-stats-range");
+  } catch (_) {}
+  modelFilter.value = "";
+  loadStats();
+}
+
+function onCalSelect(start: string, end: string) {
+  setCustomRange(start, end);
+}
+
+// 日历底部快捷：昨日 / 近7天 / 近30天（今日/本月由外部主档位提供，避免重复）
+function onCalQuick(key: string) {
+  const now = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const iso = (d: Date) => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  if (key === "yesterday") {
+    const y = new Date(now.getTime() - 86400000);
+    const s = iso(y);
+    setCustomRange(s, s);
+    return;
+  }
+  const days = key === "7d" ? 6 : 29;
+  const start = iso(new Date(now.getTime() - days * 86400000));
+  setCustomRange(start, iso(now));
 }
 
 watch(selected, () => {

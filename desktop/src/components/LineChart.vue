@@ -81,8 +81,8 @@ function hexA(hex: string, a: number): string {
 
 function tracePath(g: CanvasRenderingContext2D, pts: { x: number; y: number }[]) {
   g.moveTo(pts[0].x, pts[0].y);
-  if (pts.length < 3) {
-    for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+  if (pts.length === 2) {
+    g.lineTo(pts[1].x, pts[1].y);
     return;
   }
   for (let i = 0; i < pts.length - 1; i++) {
@@ -94,7 +94,18 @@ function tracePath(g: CanvasRenderingContext2D, pts: { x: number; y: number }[])
     const c1y = p1.y + (p2.y - p0.y) / 6;
     const c2x = p2.x - (p3.x - p1.x) / 6;
     const c2y = p2.y - (p3.y - p1.y) / 6;
-    g.bezierCurveTo(c1x, c1y, c2x, c2y, p2.x, p2.y);
+    // 将控制点 y 限制在当前段两端点 y 之间，曲线（控制点凸包内）
+    // 就不会弯曲超出波峰/波谷，进而不会越过图表的上下边界线
+    const lo = Math.min(p1.y, p2.y);
+    const hi = Math.max(p1.y, p2.y);
+    g.bezierCurveTo(
+      c1x,
+      Math.max(lo, Math.min(hi, c1y)),
+      c2x,
+      Math.max(lo, Math.min(hi, c2y)),
+      p2.x,
+      p2.y
+    );
   }
 }
 
@@ -237,11 +248,16 @@ function render() {
     g.stroke();
   }
 
-  // x labels
+  // x labels：按标签实际宽度自适应步长，避免数据点多时标签重叠
   g.fillStyle = cssVar("--chart-text", "#9aa3b2");
   g.textAlign = "center";
   g.textBaseline = "top";
-  const step = Math.max(1, Math.ceil(visLabels.length / Math.max(2, Math.floor(plotW / 60))));
+  const maxLabelW = visLabels.reduce(
+    (m, l) => Math.max(m, String(l).length * 6),
+    0
+  ) + 8;
+  const pxPerSlot = plotW / Math.max(1, visLabels.length);
+  const step = Math.max(1, Math.ceil((maxLabelW + 4) / Math.max(1, pxPerSlot)));
   for (let i = 0; i < visLabels.length; i += step) {
     g.fillText(String(visLabels[i]), xCenter(si + i), PADT + plotH + 6);
   }

@@ -478,11 +478,40 @@ async fn stop_all(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_stats(app: tauri::AppHandle, service: String) -> Result<serde_json::Value, String> {
+async fn get_stats(
+    app: tauri::AppHandle,
+    service: String,
+    range: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<serde_json::Value, String> {
     // 全量读 jsonl + 按月重算费用较重，异步执行 + stats.rs 内部 TTL 缓存
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        stats::get_stats(&stats_dir(&state), &service, &primary_service(&state))
+        let r = range.as_deref().unwrap_or("today");
+        stats::get_stats(
+            &stats_dir(&state),
+            &service,
+            &primary_service(&state),
+            r,
+            start.as_deref(),
+            end.as_deref(),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_daily(
+    app: tauri::AppHandle,
+    service: String,
+    start: String,
+    end: String,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        stats::get_daily(&stats_dir(&state), &service, &primary_service(&state), &start, &end)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -890,6 +919,7 @@ pub fn run() {
             start_all,
             stop_all,
             get_stats,
+            get_daily,
             get_live,
             fetch_models,
             open_config_file,

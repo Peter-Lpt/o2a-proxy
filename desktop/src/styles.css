@@ -329,7 +329,30 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 .st-row.cost b::before { content: "¥"; font-size: 9px; margin-right: 2px; opacity: 0.7; }
 
 /* ---------- 图表头部 ---------- */
+/* 轻量历史入口：今日/本月两档 + 日历（自定义区间） */
 .chart-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 9px; }
+.chart-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cal-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.cal-btn:hover { border-color: var(--blue); color: var(--text); }
+.cal-btn.active {
+  background: var(--blue-dim);
+  border-color: var(--blue);
+  color: var(--blue);
+  font-weight: 600;
+}
+.cal-caret { font-size: 8px; opacity: 0.75; }
 .seg { display: flex; border: 1px solid var(--border-soft); border-radius: 9px; overflow: hidden; background: var(--bg2); }
 .seg-btn { padding: 4px 15px; font-size: 11.5px; color: var(--muted); background: transparent; transition: all 0.15s; }
 .seg-btn + .seg-btn { border-left: 1px solid var(--border-soft); }
@@ -350,6 +373,9 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 }
 .chart-select:focus { border-color: var(--blue); }
 .chart-title { font-size: 11.5px; color: var(--muted); margin-bottom: 7px; font-weight: 500; }
+.chart-delta { font-size: 10.5px; font-weight: 500; margin-left: 6px; }
+.chart-delta.up { color: var(--green); }
+.chart-delta.down { color: var(--red); }
 .chart-note { font-size: 10px; color: var(--muted-2); margin-top: 5px; }
 .updated { font-size: 10px; color: var(--muted-2); text-align: right; margin-top: 3px; font-family: var(--font-mono); }
 

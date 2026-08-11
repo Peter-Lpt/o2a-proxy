@@ -23,3 +23,6 @@ proxy_*.log
 # Electron build output
 mac/node_modules/
 mac/dist/
+
+# Agent subagent artifacts
+.pi-subagents/
