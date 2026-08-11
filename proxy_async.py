@@ -1198,8 +1198,31 @@ async def handle_request(request: web.Request):
     return await handle_claude_non_stream(request, service, openai_request, req_start)
 
 
+def _model_entry(service: Service) -> dict:
+    """当前端口服务可请求模型的标准条目（OpenAI /v1/models 结构）。
+
+    override_model=true（默认）时，任何请求的 model 都会被强转为 service.model，
+    因此列表固定为这一条；override_model=false 时透传客户端模型名，service.model
+    仅作缺省值，通过 required=false 提示外部调用方可传任意模型。
+    """
+    entry = {
+        "id": service.model,
+        "object": "model",
+        "created": 0,
+        "owned_by": service.account.name,
+        "context": service.max_tokens,
+        "required": bool(service.override_model),
+    }
+    return entry
+
+
 async def handle_get(request: web.Request, service: Service):
     path = request.path
+    if path in ("/models", "/v1/models"):
+        return json_response({
+            "object": "list",
+            "data": [_model_entry(service)],
+        })
     if path == "/stats":
         if not is_cache_stats_enabled():
             return json_response({"error": "cache stats is disabled"})
