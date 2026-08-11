@@ -26,7 +26,6 @@
       @keydown.esc="close"
     >
       <span class="sb-label">
-        <span v-if="currentOpt && currentOpt.dot" :class="['sb-dot', currentOpt.dot]"></span>
         {{ currentLabel }}
       </span>
       <Icon name="chevron-down" :size="12" :class="{ flip: open }" />
@@ -43,7 +42,6 @@
         :class="{ active: opt.value === modelValue }"
         @click="pick(opt.value)"
       >
-        <span v-if="opt.dot" :class="['sb-dot', opt.dot]"></span>
         {{ opt.label }}
       </button>
       <div v-if="!visibleOptions.length" class="sb-empty">无匹配项</div>
@@ -57,7 +55,7 @@ import Icon from "./Icon.vue";
 
 const props = defineProps<{
   modelValue: string;
-  options?: (string | { value: string; label?: string; dot?: string })[];
+  options?: (string | { value: string; label?: string })[];
   placeholder?: string;
   allowCustom?: boolean;
   size?: "sm" | "md";
@@ -75,11 +73,9 @@ const opts = computed(() =>
   (props.options || []).map((o) =>
     typeof o === "string"
       ? { value: o, label: o }
-      : { value: o.value, label: o.label || o.value, dot: o.dot }
+      : { value: o.value, label: o.label || o.value }
   )
 );
-
-const currentOpt = computed(() => opts.value.find((o) => o.value === props.modelValue));
 
 const currentLabel = computed(
   () =>
@@ -256,19 +252,6 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 5px;
 }
-.sb-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--muted-2);
-}
-.sb-dot.gray { background: #3a4250; }
-.sb-dot.green { background: var(--green); }
-.sb-dot.amber { background: var(--amber); }
-.sb-dot.red { background: var(--red, #ef4444); }
-.sb-dot.busy { background: var(--amber); animation: sb-blink 1.2s ease-in-out infinite; }
-@keyframes sb-blink { 50% { opacity: 0.3; } }
 .sb-chevron-btn svg,
 .sb-btn > svg {
   transition: transform 0.15s;

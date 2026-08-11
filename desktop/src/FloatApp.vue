@@ -1,7 +1,7 @@
 <template>
   <div class="float" :class="{ on: anyActive }" data-tauri-drag-region="deep">
     <div class="head">
-      <span class="dot" :class="{ on: anyActive }"></span>
+      <span class="hdot" :class="[headInner, { ring: headRing }]" :title="headDotTitle"></span>
       <!-- 全平台统一：单悬浮窗，下拉在窗口内直接切换服务（保持打开） -->
       <div class="svc-sel" data-tauri-drag-region="false" title="切换服务（窗口内直接切换）">
         <SelectBox v-model="selValue" :options="floatOptions" size="sm" placeholder="全部" />
@@ -108,12 +108,11 @@ const floatOptions = computed(() => [
   ...(status.value.services || []).map((s: any) => ({
     value: s.name,
     label: s.name,
-    dot: svcDot(s),
   })),
 ]);
 
-// 单服务圆点：灰=未开启，绿=空闲/完成，busy(琥珀闪烁)=运行中
-function svcDot(s: any): string {
+// 服务状态：灰=未运行，绿=运行空闲，busy(琥珀闪烁)=正在处理
+function svcState(s: any): "gray" | "green" | "busy" {
   if (!s.running) return "gray";
   return s.task?.active ? "busy" : "green";
 }
@@ -123,6 +122,37 @@ const anyActive = computed(() =>
   (status.value.services || []).some((s: any) => s.task?.active)
 );
 const anyRunning = computed(() => (status.value.services || []).some((s: any) => s.running));
+
+// 头部状态点：随当前视图变化。全部视图=全局聚合；单服务视图=该服务自身状态
+const headInner = computed<"gray" | "green" | "busy">(() => {
+  const svc = floatService.value;
+  const svcs = status.value.services || [];
+  if (svc) {
+    const s = svcs.find((x: any) => x.name === svc);
+    return s ? svcState(s) : "gray";
+  }
+  if (anyActive.value) return "busy";
+  if (anyRunning.value) return "green";
+  return "gray";
+});
+// 外环（天蓝）：仅单服务视图，且存在其他 running 服务时给出提示
+const headRing = computed<boolean>(() => {
+  const svc = floatService.value;
+  if (!svc) return false;
+  return (status.value.services || []).some((x: any) => x.name !== svc && x.running);
+});
+const headDotTitle = computed(() => {
+  const svc = floatService.value;
+  const name =
+    (status.value.services || []).find((x: any) => x.name === svc)?.name || "全部";
+  const stateTxt =
+    headInner.value === "busy"
+      ? `${name}：正在处理`
+      : headInner.value === "green"
+        ? `${name}：运行中`
+        : `${name}：未运行`;
+  return headRing.value ? `${stateTxt}；其他服务有运行` : stateTxt;
+});
 const now1min = computed(() => {
   const cutoff = Date.now() - 300_000;
   return (records.value || []).filter((r: any) => {
@@ -273,8 +303,16 @@ onUnmounted(() => {
 }
 .float.on { border-color: rgba(52, 211, 153, 0.4); }
 .head { display: flex; align-items: center; gap: 6px; padding: 8px 10px 4px; flex: none; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: #3a4250; flex: none; }
-.dot.on { background: var(--green); animation: blink 1.6s ease-in-out infinite; }
+/* 头部状态点：内点=当前视图状态（灰停/绿闲/琥珀闪忙），
+   外环天蓝=单服务视图下其他服务有在跑 */
+.hdot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #3a4250; border: 1.5px solid transparent;
+  flex: none;
+}
+.hdot.green { background: var(--green); }
+.hdot.busy { background: var(--amber); animation: blink 1.6s ease-in-out infinite; }
+.hdot.ring { border-color: var(--cyan); }
 @keyframes blink { 50% { opacity: 0.3; } }
 /* 服务切换下拉：融入悬浮窗配色——按钮透明背景 + 浮窗同款边框（--glass-border），
    hover 轻亮；菜单用浮窗底色（--float-bg），避免与面板输入框风格割裂 */
