@@ -922,8 +922,13 @@ def _convert_usage(usage):
         usage.get("completion_tokens", usage.get("output_tokens", 0))
     )
 
+    # DeepSeek 顶层字段：prompt_cache_hit_tokens（命中）/ prompt_cache_miss_tokens（未命中）
+    # 命中部分计入缓存读，prompt_total 是全量（含命中），相减后才是真实输入。
+    ds_cache_hit = _to_int(usage.get("prompt_cache_hit_tokens", 0))
+
     cached_tokens = _to_int(
-        prompt_details.get(
+        ds_cache_hit
+        or prompt_details.get(
             "cached_tokens",
             prompt_details.get(
                 "cache_read_input_tokens",
@@ -957,7 +962,12 @@ def _convert_usage(usage):
     input_tokens = max(0, prompt_total - cached_tokens - cache_write_tokens)
 
     completion_details = usage.get("completion_tokens_details") or {}
-    reasoning_tokens = _to_int(completion_details.get("reasoning_tokens", 0))
+    # Responses 格式的推理 token 在 output_tokens_details.reasoning_tokens
+    output_details = usage.get("output_tokens_details") or {}
+    reasoning_tokens = _to_int(
+        completion_details.get("reasoning_tokens")
+        or output_details.get("reasoning_tokens", 0)
+    )
 
     return {
         "input_tokens": input_tokens,
@@ -1121,7 +1131,12 @@ def _responses_to_chat(req, service):
 
     instructions = req.get("instructions", "")
     if instructions:
-        messages.insert(0, {"role": "system", "content": instructions})
+        if messages and messages[0].get("role") == "system":
+            # input 已含 system 角色消息时合并，避免产生两条 system
+            prev = messages[0].get("content", "") or ""
+            messages[0]["content"] = (instructions + "\n\n" + prev) if prev else instructions
+        else:
+            messages.insert(0, {"role": "system", "content": instructions})
 
     if service.override_model:
         chat_model = service.model
@@ -1133,11 +1148,11 @@ def _responses_to_chat(req, service):
         "stream": req.get("stream", False),
     }
     if "max_output_tokens" in req:
-        chat["max_tokens"] = req["max_output_tokens"]
+        chat["max_tokens"] = min(_to_int(req["max_output_tokens"], service.max_tokens) or service.max_tokens, 131072)
     elif "max_tokens" in req:
-        chat["max_tokens"] = req["max_tokens"]
+        chat["max_tokens"] = min(_to_int(req["max_tokens"], service.max_tokens) or service.max_tokens, 131072)
     else:
-        chat["max_tokens"] = service.max_tokens
+        chat["max_tokens"] = min(service.max_tokens, 131072)
     for k in ("temperature", "top_p", "stream_options", "seed", "parallel_tool_calls"):
         if k in req:
             chat[k] = req[k]
@@ -1178,8 +1193,16 @@ def _chat_usage_to_responses(usage):
     usage = usage or {}
     prompt = _to_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
     completion = _to_int(usage.get("completion_tokens", usage.get("output_tokens", 0)))
-    cached = _to_int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
-    reasoning = _to_int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0))
+    # 兼容 DeepSeek 顶层缓存字段与 Responses 格式的 details 嵌套
+    cached = _to_int(
+        usage.get("prompt_cache_hit_tokens", 0)
+        or (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
+        or (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
+    )
+    reasoning = _to_int(
+        (usage.get("completion_tokens_details") or {}).get("reasoning_tokens", 0)
+        or (usage.get("output_tokens_details") or {}).get("reasoning_tokens", 0)
+    )
     return {
         "input_tokens": prompt,
         "input_tokens_details": {"cached_tokens": cached},
@@ -1198,6 +1221,9 @@ def _chat_to_responses_json(data, model):
     message = choice.get("message") or {}
     # 文本输出
     text = message.get("content") or ""
+    if isinstance(text, list):
+        # 上游 content 为 block 列表时转为纯文本，避免 Responses 结构非法
+        text = _responses_content_to_text(text)
     if text:
         output.append({
             "id": f"msg_{len(output)}",
@@ -1205,6 +1231,16 @@ def _chat_to_responses_json(data, model):
             "role": "assistant",
             "status": "completed",
             "content": [{"type": "output_text", "text": text, "annotations": []}],
+        })
+    # 推理内容（reasoning_content -> Responses reasoning item）
+    reasoning = message.get("reasoning_content") or ""
+    if reasoning:
+        output.append({
+            "id": f"reasoning_{len(output)}",
+            "type": "reasoning",
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": reasoning}],
+            "content": [{"type": "reasoning_text", "text": reasoning}],
         })
     # 函数调用
     for tc in message.get("tool_calls") or []:
@@ -1239,6 +1275,8 @@ class _ResponsesStreamTranslator:
         self.created_at = int(time.time())
         self.output_index = 0
         self._emitted_created = False
+        self._finished = False      # 内容 done 事件已发射（幂等）
+        self._completed = False     # response.completed 已发射（幂等）
         self._msg_item_id = None
         self._msg_output_index = 0
         self._msg_delivered = False
@@ -1246,6 +1284,11 @@ class _ResponsesStreamTranslator:
         self._tool_states = {}  # index -> state
         self._tool_order = []
         self._delivered_tool = set()
+        self._output_sequence = []  # 按交付(output_index)顺序记录 ('message'|'tool'|'reasoning', key)
+        self._reasoning_item_id = None
+        self._reasoning_output_index = 0
+        self._reasoning_delivered = False
+        self._reasoning_text = ""
         self.usage = None
 
     def _base_response(self):
@@ -1273,6 +1316,7 @@ class _ResponsesStreamTranslator:
         self._msg_item_id = f"msg_{self.output_index}"
         self._msg_output_index = self.output_index
         self.output_index += 1
+        self._output_sequence.append(("message", None))
         item = {
             "id": self._msg_item_id,
             "type": "message",
@@ -1288,6 +1332,25 @@ class _ResponsesStreamTranslator:
                        "content_index": 0,
                        "part": {"type": "output_text", "text": "", "annotations": []}})
 
+    def _deliver_reasoning(self, events):
+        """交付推理 item（reasoning_content -> reasoning）。"""
+        if self._reasoning_delivered:
+            return
+        self._reasoning_delivered = True
+        self._reasoning_item_id = f"rs_{self.output_index}"
+        self._reasoning_output_index = self.output_index
+        self.output_index += 1
+        self._output_sequence.append(("reasoning", None))
+        item = {
+            "id": self._reasoning_item_id,
+            "type": "reasoning",
+            "status": "in_progress",
+            "summary": [],
+            "content": [],
+        }
+        events.append({"type": "response.output_item.added",
+                       "output_index": self._reasoning_output_index, "item": item})
+
     def _deliver_tool(self, idx, events):
         if idx in self._delivered_tool:
             return
@@ -1296,6 +1359,7 @@ class _ResponsesStreamTranslator:
         state["output_index"] = self.output_index
         state["item_id"] = f"fc_{self.output_index}"
         self.output_index += 1
+        self._output_sequence.append(("tool", idx))
         item = {
             "id": state["item_id"],
             "type": "function_call",
@@ -1318,6 +1382,19 @@ class _ResponsesStreamTranslator:
         delta = choices[0].get("delta") or {}
 
         content = delta.get("content")
+        reasoning = delta.get("reasoning_content")
+        # 推理内容 -> reasoning item（保持与文本输出并行）
+        if isinstance(reasoning, str) and reasoning:
+            self._ensure_created(events)
+            self._deliver_reasoning(events)
+            self._reasoning_text += reasoning
+            events.append({
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": self._reasoning_item_id,
+                "output_index": self._reasoning_output_index,
+                "delta": reasoning,
+            })
+
         if isinstance(content, str) and content:
             self._ensure_created(events)
             self._deliver_message(events)
@@ -1356,12 +1433,31 @@ class _ResponsesStreamTranslator:
 
         finish_reason = choices[0].get("finish_reason")
         if finish_reason:
-            self._finish(events)
+            # 只收尾内容块（done 事件）；response.completed 延迟到流结束（[DONE]/EOF）
+            # 由外层调用 complete() 发射，确保 usage 尾块（标准顺序在 finish_reason 之后）
+            # 已到达——否则 completed 的 usage 会是 None（Codex 计费错乱）。
+            self._close_items(events)
         return events
 
-    def _finish(self, events):
+    def _close_items(self, events):
+        """收尾内容块：done 事件（推理/消息/工具），幂等；不发射 response.completed。"""
+        if self._finished:
+            return
+        self._finished = True
         if not self._emitted_created:
             self._ensure_created(events)
+        # 关闭推理内容
+        if self._reasoning_delivered:
+            events.append({"type": "response.reasoning_summary_text.done",
+                           "item_id": self._reasoning_item_id,
+                           "output_index": self._reasoning_output_index,
+                           "text": self._reasoning_text})
+            events.append({"type": "response.output_item.done",
+                           "output_index": self._reasoning_output_index, "item": {
+                               "id": self._reasoning_item_id, "type": "reasoning",
+                               "status": "completed",
+                               "summary": [{"type": "summary_text", "text": self._reasoning_text}],
+                               "content": [{"type": "reasoning_text", "text": self._reasoning_text}]}})
         # 关闭文本消息
         if self._msg_delivered:
             events.append({"type": "response.output_text.done",
@@ -1392,24 +1488,55 @@ class _ResponsesStreamTranslator:
                                "id": state["item_id"], "type": "function_call",
                                "status": "completed", "name": state["name"],
                                "call_id": state["id"], "arguments": state["arguments"]}})
+
+    def complete(self, events):
+        """发射 response.completed（含最终 usage），幂等。流结束（[DONE]/EOF）时调用。"""
+        if self._completed:
+            return
+        self._close_items(events)
+        self._completed = True
         events.append({"type": "response.completed", "response": self.assemble()})
+
+    def _finish(self, events):
+        """完整收尾：done 事件 + response.completed（幂等，供流结束统一调用）。"""
+        self._close_items(events)
+        self.complete(events)
 
     def assemble(self):
         output = []
-        if self._msg_delivered:
-            output.append({"id": self._msg_item_id, "type": "message", "role": "assistant",
-                           "status": "completed",
-                           "content": [{"type": "output_text", "text": self._text, "annotations": []}]})
-        for idx in self._tool_order:
-            state = self._tool_states[idx]
-            output.append({"id": state["item_id"], "type": "function_call",
-                           "status": "completed", "name": state["name"],
-                           "call_id": state["id"], "arguments": state["arguments"]})
+        for kind, key in self._output_sequence:
+            if kind == "message":
+                output.append({"id": self._msg_item_id, "type": "message", "role": "assistant",
+                               "status": "completed",
+                               "content": [{"type": "output_text", "text": self._text, "annotations": []}]})
+            elif kind == "reasoning":
+                output.append({"id": self._reasoning_item_id, "type": "reasoning",
+                               "status": "completed",
+                               "summary": [{"type": "summary_text", "text": self._reasoning_text}],
+                               "content": [{"type": "reasoning_text", "text": self._reasoning_text}]})
+            else:
+                state = self._tool_states[key]
+                output.append({"id": state["item_id"], "type": "function_call",
+                               "status": "completed", "name": state["name"],
+                               "call_id": state["id"], "arguments": state["arguments"]})
         resp = self._base_response()
         resp["status"] = "completed"
         resp["output"] = output
         resp["usage"] = self.usage
         return resp
+
+
+def _tool_choice_any(openai_tools):
+    """Anthropic tool_choice='any'（必须调用）→ OpenAI：单工具时绑定该工具，多工具时 required。"""
+    names = [
+        t.get("function", {}).get("name", "")
+        for t in (openai_tools or [])
+        if isinstance(t, dict) and isinstance(t.get("function"), dict)
+    ]
+    names = [n for n in names if n]
+    if len(names) == 1:
+        return {"type": "function", "function": {"name": names[0]}}
+    return "required"
 
 
 def convert_request(req, service):
@@ -1426,11 +1553,21 @@ def convert_request(req, service):
             tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
             if tool_results:
                 # 转换为 OpenAI tool 消息格式
-                # 先收集同一条 Anthropic 消息中的纯文本块（不属于 tool_result）
+                # 与 tool_result 交错的文本块按出现顺序冲刷为 user 消息，保持交错顺序
                 orphan_text_parts = []
                 for block in content:
                     if isinstance(block, dict) and block.get("type") == "tool_result":
+                        if orphan_text_parts:
+                            messages.append({
+                                "role": "user",
+                                "content": "\n".join(orphan_text_parts),
+                            })
+                            orphan_text_parts = []
                         tool_id = block.get("tool_use_id", block.get("id", ""))
+                        if not tool_id:
+                            # 缺 tool_use_id 无法形成合法 tool 消息（上游会 400）
+                            logger.warning("tool_result 块缺少 tool_use_id，已跳过")
+                            continue
                         content_val = block.get("content", "")
                         text = _extract_text(content_val)
                         messages.append({
@@ -1476,16 +1613,14 @@ def convert_request(req, service):
                     continue
 
         # 普通文本消息 - 转为纯文本（DashScope 不支持 content blocks 格式）
-        if isinstance(content, list):
-            messages.append({
-                "role": role,
-                "content": _extract_text(content),
-            })
-        else:
-            messages.append({
-                "role": role,
-                "content": _extract_text(content),
-            })
+        text = _extract_text(content)
+        if not text:
+            # 纯 thinking 块等空 content 消息，跳过（部分上游拒绝空 content）
+            continue
+        messages.append({
+            "role": role,
+            "content": text,
+        })
 
     system = req.get("system", "")
     if system:
@@ -1506,7 +1641,11 @@ def convert_request(req, service):
     openai_req = {
         "model": model,
         "messages": messages,
-        "max_tokens": req.get("max_tokens", service.max_tokens),
+        # 1M 上下文服务的默认 max_tokens 可能高达 1000000，封顶上游支持的 131072
+        "max_tokens": min(
+            _to_int(req.get("max_tokens"), service.max_tokens) or service.max_tokens,
+            131072,
+        ),
         "stream": is_stream,
     }
     if is_stream:
@@ -1526,8 +1665,8 @@ def convert_request(req, service):
 
     # 转换 tools: Anthropic -> OpenAI
     tools = req.get("tools", [])
+    openai_tools = []
     if tools:
-        openai_tools = []
         for tool in tools:
             if isinstance(tool, dict):
                 name = tool.get("name", "")
@@ -1547,10 +1686,11 @@ def convert_request(req, service):
     # 转换 tool_choice: Anthropic -> OpenAI
     tool_choice = req.get("tool_choice")
     if tool_choice:
-        if tool_choice == "any" or tool_choice == "auto":
-            openai_req["tool_choice"] = "auto"
-        elif tool_choice == "none":
-            openai_req["tool_choice"] = "none"
+        if isinstance(tool_choice, str):
+            if tool_choice == "any":
+                openai_req["tool_choice"] = _tool_choice_any(openai_tools)
+            elif tool_choice in ("auto", "none"):
+                openai_req["tool_choice"] = tool_choice
         elif isinstance(tool_choice, dict):
             tool_type = tool_choice.get("type", "")
             if tool_type == "tool":
@@ -1558,6 +1698,10 @@ def convert_request(req, service):
                     "type": "function",
                     "function": {"name": tool_choice.get("name", "")},
                 }
+            elif tool_type == "any":
+                openai_req["tool_choice"] = _tool_choice_any(openai_tools)
+            elif tool_type in ("auto", "none"):
+                openai_req["tool_choice"] = tool_type
 
     return openai_req
 

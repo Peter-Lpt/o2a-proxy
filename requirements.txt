@@ -1,2 +1,4 @@
 # asyncio 版代理（proxy_async.py）依赖；proxy.py 保持纯标准库
 aiohttp>=3.9
+# pytest 异步端到端测试（test_codex_direct.py 用 anyio 插件跑 async 用例）
+anyio>=4
