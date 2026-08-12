@@ -245,6 +245,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                 "output_tokens": 0,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
+                "reasoning_tokens": 0,
             }
             content_block_idx = 0
             content_block_open = False
@@ -252,6 +253,8 @@ async def handle_claude_stream(request: web.Request, service: Service,
             pending_finish_reason = None
             tool_input_buf = {}
             tool_index_to_block_index = {}
+            pending_orphan_args = {}  # 无 id 首块的参数缓冲（等 id 块到达再开块）
+            had_tool_calls = False
             n_chunks = 0
             reasoning_bytes = 0
             text_bytes = 0
@@ -286,6 +289,12 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                 "index": content_block_idx,
                             }).encode())
                             thinking_block_open = False
+                        for idx in tool_input_buf:
+                            await stream_write(resp, sse_event({
+                                "type": "content_block_stop",
+                                "index": idx,
+                            }).encode())
+                        tool_input_buf.clear()
                         if content_block_open:
                             await stream_write(resp, sse_event({
                                 "type": "content_block_stop",
@@ -302,6 +311,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             "type": "message_stop",
                         }).encode())
                         finished = True
+                        await record_stats(service, model, latest_usage)
                         break
                     if now - last_prog_ts >= 5.0:
                         last_prog_ts = now
@@ -324,7 +334,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                     "index": content_block_idx,
                                 }).encode())
                                 content_block_open = False
-                            stop_reason = _anthropic_stop_reason(pending_finish_reason)
+                            stop_reason = _anthropic_stop_reason(pending_finish_reason, had_tool_calls)
                             await stream_write(resp, sse_event({
                                 "type": "message_delta",
                                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
@@ -360,6 +370,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             "output_tokens": output_tokens,
                             "cache_creation_input_tokens": cache_write_tokens,
                             "cache_read_input_tokens": cached_tokens,
+                            "reasoning_tokens": reasoning_tokens,
                         }
                         logger.debug(f"[DEBUG] cached_tokens={cached_tokens}, "
                                      f"cache_write_tokens={cache_write_tokens}, "
@@ -371,7 +382,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                     if not choices:
                         # 最后一个 chunk（choices 为空）带 usage，发送结束事件
                         if pending_finish_reason and not finished:
-                            stop_reason = _anthropic_stop_reason(pending_finish_reason)
+                            stop_reason = _anthropic_stop_reason(pending_finish_reason, had_tool_calls)
                             await stream_write(resp, sse_event({
                                 "type": "message_delta",
                                 "delta": {"stop_reason": stop_reason, "stop_sequence": None},
@@ -407,6 +418,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                     "output_tokens": 0,
                                     "cache_creation_input_tokens": cache_write_tokens,
                                     "cache_read_input_tokens": cached_tokens,
+                                    "reasoning_tokens": reasoning_tokens,
                                 },
                             },
                         }).encode())
@@ -434,13 +446,9 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             "delta": {"type": "thinking_delta", "thinking": reasoning_content},
                         }).encode())
                         reasoning_bytes += len(reasoning_content)
-                    elif thinking_block_open and not reasoning_content:
-                        await stream_write(resp, sse_event({
-                            "type": "content_block_stop",
-                            "index": content_block_idx,
-                        }).encode())
-                        thinking_block_open = False
-                        content_block_idx += 1
+                    # 注意：不在此处提前关闭 thinking 块——部分网关在分段思考之间
+                    # 会发空/null 的 reasoning_content，提前关闭会把一个块拆成多个。
+                    # thinking 块在 content / tool_calls / finish / EOF 时统一关闭。
 
                     # 处理文本内容
                     content = delta.get("content", "")
@@ -470,13 +478,14 @@ async def handle_claude_stream(request: web.Request, service: Service,
                     tool_calls = delta.get("tool_calls", [])
                     for tc in tool_calls:
                         tool_call_index = int(tc.get("index", len(tool_index_to_block_index)))
-                        tc_id = tc.get("id", "")
-                        tc_func = tc.get("function", {})
-                        tc_name = tc_func.get("name", "")
-                        tc_args = tc_func.get("arguments", "")
+                        tc_id = tc.get("id", "") or ""
+                        tc_func = tc.get("function", {}) or {}
+                        tc_name = tc_func.get("name", "") or ""
+                        tc_args = tc_func.get("arguments", "") or ""
 
-                        if tc_id:
-                            # 新的 tool_use 开始
+                        idx = tool_index_to_block_index.get(tool_call_index)
+                        if tc_id and idx is None:
+                            # 新的 tool_use 开始（id 首块）
                             if thinking_block_open:
                                 await stream_write(resp, sse_event({
                                     "type": "content_block_stop",
@@ -493,6 +502,14 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                 content_block_idx += 1
                             block_idx = content_block_idx
                             tool_index_to_block_index[tool_call_index] = block_idx
+                            had_tool_calls = True
+                            # 无 id 首块可能已缓冲部分参数（pending_orphan_args），合并后开块
+                            input_str = pending_orphan_args.pop(tool_call_index, "") + tc_args
+                            tool_input_buf[block_idx] = {
+                                "id": tc_id,
+                                "name": tc_name,
+                                "input_str": input_str,
+                            }
                             await stream_write(resp, sse_event({
                                 "type": "content_block_start",
                                 "index": block_idx,
@@ -503,33 +520,40 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                     "input": {},
                                 },
                             }).encode())
-                            tool_input_buf[block_idx] = {
-                                "id": tc_id,
-                                "name": tc_name,
-                                "input_str": tc_args,
-                            }
                             content_block_idx += 1
-                        elif tc_args:
-                            idx = tool_index_to_block_index.get(tool_call_index, content_block_idx)
-                            if idx in tool_input_buf:
+                            if input_str:
+                                await stream_write(resp, sse_event({
+                                    "type": "content_block_delta",
+                                    "index": block_idx,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": input_str,
+                                    },
+                                }).encode())
+                                text_bytes += len(input_str)
+                        else:
+                            if idx is None:
+                                # 尚无 id：缓冲参数，等 id 块到达再开块（避免孤儿空 id 块）
+                                if tc_args:
+                                    pending_orphan_args[tool_call_index] = (
+                                        pending_orphan_args.get(tool_call_index, "") + tc_args
+                                    )
+                                continue
+                            # 续块（无 id，或网关每块重复带 id）：追加参数到已有块，不重复开块
+                            if tc_args:
                                 tool_input_buf[idx]["input_str"] += tc_args
-                            else:
-                                tool_input_buf[idx] = {
-                                    "id": "",
-                                    "name": tc_name,
-                                    "input_str": tc_args,
-                                }
-                        if tc_args:
-                            await stream_write(resp, sse_event({
-                                "type": "content_block_delta",
-                                "index": tool_index_to_block_index.get(
-                                    tool_call_index, content_block_idx),
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": tc_args,
-                                },
-                            }).encode())
-                            text_bytes += len(tc_args)
+                                had_tool_calls = True
+                                await stream_write(resp, sse_event({
+                                    "type": "content_block_delta",
+                                    "index": idx,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": tc_args,
+                                    },
+                                }).encode())
+                                text_bytes += len(tc_args)
+                            if tc_name and not tool_input_buf[idx]["name"]:
+                                tool_input_buf[idx]["name"] = tc_name
 
                     if finish_reason and not finished:
                         pending_finish_reason = finish_reason
@@ -552,8 +576,38 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             }).encode())
                             content_block_open = False
 
-                # 上游关闭但未收到 [DONE]
+                # 上游关闭但未收到 [DONE]：补发终止事件，避免客户端挂起
                 if not finished:
+                    if thinking_block_open:
+                        await stream_write(resp, sse_event({
+                            "type": "content_block_stop",
+                            "index": content_block_idx,
+                        }).encode())
+                        thinking_block_open = False
+                    for idx in tool_input_buf:
+                        await stream_write(resp, sse_event({
+                            "type": "content_block_stop",
+                            "index": idx,
+                        }).encode())
+                    tool_input_buf.clear()
+                    if content_block_open:
+                        await stream_write(resp, sse_event({
+                            "type": "content_block_stop",
+                            "index": content_block_idx,
+                        }).encode())
+                        content_block_open = False
+                    if started:
+                        stop_reason = _anthropic_stop_reason(pending_finish_reason, had_tool_calls)
+                        await stream_write(resp, sse_event({
+                            "type": "message_delta",
+                            "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                            "usage": latest_usage,
+                        }).encode())
+                        await stream_write(resp, sse_event({
+                            "type": "message_stop",
+                        }).encode())
+                        finished = True
+                        await record_stats(service, model, latest_usage)
                     logger.info(f"[STREAM] upstream closed without [DONE] chunks={n_chunks} "
                                 f"elapsed={time.time()-req_start:.2f}s "
                                 f"finished={finished}")
@@ -578,7 +632,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                     pass
             finally:
                 _task_finish(request.app, _classify(pending_finish_reason,
-                                                    bool(tool_input_buf)))
+                                                    had_tool_calls))
                 _task_end(request.app)
     except aiohttp.ClientError as e:
         err_body = str(e)
@@ -725,6 +779,7 @@ async def handle_passthrough(request: web.Request, service: Service,
         return openai_error_response(400, "invalid json")
     logger.info(f"[FWD][passthrough] stream={stream} model={model} "
                 f"url={target} payload_bytes={len(body)}")
+    resp = None
     try:
         async with session.post(
             target, data=body,
@@ -733,7 +788,8 @@ async def handle_passthrough(request: web.Request, service: Service,
         ) as up:
             if up.status != 200:
                 err = await up.text()
-                return openai_error_response(up.status, f"upstream error: {err[:300]}")
+                # 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                return openai_error_response(up.status, f"upstream error: {err}")
             if not stream:
                 raw = await up.read()
                 try:
@@ -803,6 +859,14 @@ async def handle_passthrough(request: web.Request, service: Service,
                 raise
             except Exception as e:
                 logger.error(f"[passthrough] stream error: {e}", exc_info=True)
+                try:
+                    # 流内错误事件，避免客户端挂起到自身超时
+                    await stream_write(resp, sse_event({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": str(e)},
+                    }).encode())
+                except Exception:
+                    pass
             finally:
                 await record_stats(service, model, latest_usage)
                 if not responses_usage:
@@ -814,7 +878,14 @@ async def handle_passthrough(request: web.Request, service: Service,
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[passthrough] upstream failed: {err_body[:500]}")
-        return openai_error_response(502, f"upstream error: {err_body[:300]}")
+        if resp is None:
+            return openai_error_response(502, f"upstream error: {err_body[:300]}")
+        # 流已开始：结束当前响应，不能返回新的错误响应头
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+        return resp
 
 
 # ---------------------------------------------------------------------------
@@ -840,7 +911,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
         ) as up:
             if up.status != 200:
                 err = await up.text()
-                return openai_error_response(up.status, f"upstream error: {err[:300]}")
+                # 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                return openai_error_response(up.status, f"upstream error: {err}")
 
             resp = web.StreamResponse(status=200, headers={
                 "Content-Type": "text/event-stream; charset=utf-8",
@@ -849,17 +921,24 @@ async def handle_openai_stream(request: web.Request, service: Service,
             })
             await resp.prepare(request)
 
-            model = service.model
+            model = service.model if service.override_model else (req.get("model") or service.model)
             latest_usage = None
             done_seen = False
             finish_reason = None
             if is_responses:
-                translator = _ResponsesStreamTranslator(req.get("model") or service.model)
+                translator = _ResponsesStreamTranslator(model)
             _task_begin(request.app)
             try:
                 while True:
                     line = await up.content.readline()
                     if not line:
+                        if is_responses:
+                            # EOF 兜底：补发剩余事件 + response.completed，避免客户端挂起
+                            evs = []
+                            translator._finish(evs)
+                            for ev in evs:
+                                await stream_write(resp, sse_event(ev).encode())
+                            _task_finish(request.app, _classify(None, bool(translator._tool_order)))
                         break
                     if not is_responses:
                         # Chat 直通：原样转发每行，仅顺带提取 usage 供统计
@@ -887,6 +966,13 @@ async def handle_openai_stream(request: web.Request, service: Service,
                         data_str = line[5:].strip().decode("utf-8", errors="replace")
                         if data_str == "[DONE]":
                             done_seen = True
+                            if is_responses:
+                                # 流结束：补发 done 事件 + response.completed（幂等，usage 尾块已到达）
+                                evs = []
+                                translator._finish(evs)
+                                for ev in evs:
+                                    await stream_write(resp, sse_event(ev).encode())
+                                _task_finish(request.app, _classify(None, bool(translator._tool_order)))
                             break
                         try:
                             chunk = json.loads(data_str)
@@ -908,6 +994,14 @@ async def handle_openai_stream(request: web.Request, service: Service,
                 raise
             except Exception as e:
                 logger.error(f"[codex] stream error: {e}", exc_info=True)
+                try:
+                    # 流内错误事件，避免 pi/Codex 等客户端挂起到自身超时
+                    await stream_write(resp, sse_event({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": str(e)},
+                    }).encode())
+                except Exception:
+                    pass
             finally:
                 await record_stats(service, model, latest_usage)
                 if not is_responses:
@@ -932,7 +1026,8 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
                                    req: dict, chat_body: bytes, req_start: float):
     session = request.app["session"]
     target = build_target(service, request)
-    logger.info(f"[FWD][codex] forwarding(non-stream) model={service.model} "
+    model = service.model if service.override_model else (req.get("model") or service.model)
+    logger.info(f"[FWD][codex] forwarding(non-stream) model={model} "
                 f"url={target} payload_bytes={len(chat_body)}")
 
     try:
@@ -943,7 +1038,8 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         ) as up:
             if up.status != 200:
                 err = await up.text()
-                return openai_error_response(up.status, f"upstream error: {err[:300]}")
+                # 原样透传上游错误体，避免丢失 type/code/param
+                return openai_error_response(up.status, f"upstream error: {err}")
             raw = await up.read()
     except aiohttp.ClientError as e:
         err_body = str(e)
@@ -954,7 +1050,6 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         data = json.loads(raw)
         converted = _convert_usage(data.get("usage") or {})
         if converted.get("input_tokens") and is_cache_stats_enabled():
-            model = service.model
             await asyncio.to_thread(
                 get_stats(service.name, service.account.id).record, model, converted
             )
@@ -973,6 +1068,12 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         raw = json.dumps(out).encode("utf-8")
     except Exception as e:
         logger.warning(f"[codex] response convert failed: {e}")
+        if not req.get("input"):
+            # Chat 直通：任何转换异常都原样返回上游响应
+            return web.Response(body=raw, status=200, content_type="application/json")
+        # Responses 转换失败：返回明确错误，不能把 Chat 结构错位地当作 Responses 返回
+        return openai_error_response(
+            500, f"response convert failed: {e}")
 
     logger.info(f"[codex][nonstream] completed bytes={len(raw)}")
     return web.Response(body=raw, status=200, content_type="application/json")
@@ -982,13 +1083,18 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
 # Direct 模式（Anthropic Messages -> Anthropic 原生透传，直连）
 # ---------------------------------------------------------------------------
 
-def upstream_direct_headers(service: Service) -> dict:
+def upstream_direct_headers(service: Service, request: web.Request = None) -> dict:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {service.api_key}",
         "x-api-key": service.api_key,
         "anthropic-version": "2023-06-01",
     }
+    # 转发客户端 anthropic-beta（prompt caching / web search 等门控特性）
+    if request is not None:
+        beta = request.headers.get("anthropic-beta")
+        if beta:
+            headers["anthropic-beta"] = beta
     return {"headers": headers}
 
 
@@ -1003,12 +1109,13 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
         async with session.post(
             target, data=body,
             timeout=upstream_timeout(),
-            **upstream_direct_headers(service),
+            **upstream_direct_headers(service, request),
         ) as up:
             if up.status != 200:
                 err = await up.text()
-                logger.error(f"[direct] upstream error {up.status}: {err[:300]}")
-                return error_response(up.status, f"upstream error: {err[:300]}")
+                logger.error(f"[direct] upstream error {up.status}: {err}")
+                # 原样透传上游错误体
+                return error_response(up.status, f"upstream error: {err}")
             raw = await up.read()
     except aiohttp.ClientError as e:
         err_body = str(e)
@@ -1047,12 +1154,13 @@ async def handle_direct_stream(request: web.Request, service: Service,
         async with session.post(
             target, data=body,
             timeout=upstream_timeout(),
-            **upstream_direct_headers(service),
+            **upstream_direct_headers(service, request),
         ) as up:
             if up.status != 200:
                 err = await up.text()
-                logger.error(f"[direct] upstream error {up.status}: {err[:300]}")
-                return error_response(up.status, f"upstream error: {err[:300]}")
+                logger.error(f"[direct] upstream error {up.status}: {err}")
+                # 原样透传上游错误体
+                return error_response(up.status, f"upstream error: {err}")
 
             resp = web.StreamResponse(status=200, headers={
                 "Content-Type": "text/event-stream; charset=utf-8",
@@ -1104,6 +1212,14 @@ async def handle_direct_stream(request: web.Request, service: Service,
                 raise
             except Exception as e:
                 logger.error(f"[direct] stream error: {e}", exc_info=True)
+                try:
+                    # 流内错误事件，避免客户端挂起
+                    await stream_write(resp, sse_event({
+                        "type": "error",
+                        "error": {"type": "api_error", "message": str(e)},
+                    }).encode())
+                except Exception:
+                    pass
             finally:
                 if latest_usage and ("prompt_tokens" in latest_usage or "completion_tokens" in latest_usage):
                     latest_usage = _convert_usage(latest_usage)
@@ -1156,6 +1272,13 @@ async def handle_request(request: web.Request):
         service = service.with_mode(mode)
 
     if mode == "codex":
+        if not service.account.openai_url:
+            # 显式 api=openai-completions/responses + kind=anthropic 账号 → 无 OpenAI 端点
+            return openai_error_response(
+                400,
+                "该账号没有 OpenAI 端点，无法服务 OpenAI 客户端（Codex）。"
+                "请为该账号配置 openai_url，或改用 Claude Code / Anthropic 客户端。",
+            )
         stream = bool(payload.get("stream", False))
         req_model = payload.get("model") or service.model
         logger.info(f"[REQ][codex] model={req_model} stream={stream} api={service.api or 'auto'} "
@@ -1180,6 +1303,16 @@ async def handle_request(request: web.Request):
         stream = bool(payload.get("stream", False))
         logger.info(f"[REQ][direct] model={payload.get('model')} stream={stream} "
                     f"bytes={len(body)} elapsed={time.time()-req_start:.3f}s")
+        # direct 透传也遵循 override_model / max_tokens 默认值契约（与 README 一致）
+        modified = False
+        if service.override_model and payload.get("model") != service.model:
+            payload["model"] = service.model
+            modified = True
+        if not payload.get("max_tokens"):
+            payload["max_tokens"] = service.max_tokens
+            modified = True
+        if modified:
+            body = json.dumps(payload).encode("utf-8")
         if stream:
             return await handle_direct_stream(request, service, body, req_start)
         return await handle_direct_non_stream(request, service, body, req_start)
