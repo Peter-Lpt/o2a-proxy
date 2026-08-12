@@ -1,0 +1,70 @@
+name: Release
+
+# 打 v* tag 时触发：三平台打包（tauri-action）+ 自动创建 GitHub Release（草稿）。
+# 用法：
+#   git tag v0.1.1 && git push origin v0.1.1
+# 发布前请确认版本号已同步更新（CI 的 version-check 会强制校验 tag 与版本一致）。
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest    # Apple Silicon（arm64）dmg
+          - platform: ubuntu-22.04    # deb + AppImage
+          - platform: windows-latest  # NSIS + MSI
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      # 安装前端依赖（tauri-action 只执行 beforeBuildCommand 的 pnpm build，不会自动 install）
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+        working-directory: desktop
+
+      # Tauri Linux 构建依赖（webkit2gtk-4.1 等）
+      - name: 安装 Linux 系统依赖
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: 构建并发布
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 签名（可选）：设置 TAURI_SIGNING_PRIVATE_KEY / TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          # 后，产物会附带 .sig 签名文件（配合 upgrade 更新机制使用）
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: 'o2a-proxy ${{ github.ref_name }}'
+          releaseBody: '变更记录见 [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)（${{ github.ref_name }}）'
+          releaseDraft: true
+          prerelease: false
