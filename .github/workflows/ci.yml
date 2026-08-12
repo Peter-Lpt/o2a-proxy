@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 三处版本号（package.json / Cargo.toml / tauri.conf.json）必须一致；
+  # tag 触发时（v*）还需与 tag 对齐。
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 版本一致性检查
+        run: |
+          V1=$(python3 -c "import json;print(json.load(open('desktop/package.json'))['version'])")
+          V2=$(grep -m1 '^version' desktop/src-tauri/Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
+          V3=$(python3 -c "import json;print(json.load(open('desktop/src-tauri/tauri.conf.json'))['version'])")
+          echo "package.json=$V1  Cargo.toml=$V2  tauri.conf.json=$V3"
+          if [ "$V1" != "$V2" ] || [ "$V1" != "$V3" ]; then
+            echo "::error::三处版本号不一致"; exit 1
+          fi
+          if [ -n "$GITHUB_REF_NAME" ] && [[ "$GITHUB_REF_NAME" == v* ]]; then
+            if [ "$V1" != "${GITHUB_REF_NAME#v}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME#v} 与版本 $V1 不一致"; exit 1
+            fi
+          fi
+
+  # Python 引擎：单测 + 端到端（mock 上游 + 真实 aiohttp 引擎，覆盖三种协议形态与流式终止回归）
+  python-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: 安装依赖
+        run: pip install -r requirements.txt pytest
+      - name: 运行测试
+        run: python -m pytest test_cache_stats.py test_codex_direct.py -v
+
+  # 桌面端前端：类型检查（vue-tsc）+ 构建（vite）
+  desktop-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: desktop/pnpm-lock.yaml
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+      - name: 类型检查 + 构建
+        run: pnpm build
+
+  # Rust 命令层编译检查
+  rust-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: 安装 Tauri Linux 系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: cargo check
+        run: cargo check
+        working-directory: desktop/src-tauri

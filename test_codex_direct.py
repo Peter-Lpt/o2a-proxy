@@ -27,7 +27,7 @@ import pytest
 from aiohttp import web
 
 import proxy_async
-from proxy import Account, Service, load_config
+from proxy import Account, Service
 
 MOCK_PORT = 18901
 P_ASYNC_PORT = 18902
@@ -121,13 +121,13 @@ async def mock_responses_upstream(request: web.Request):
 
 
 def build_service(openai_url: str, api: str = "", upstream_api: str = "openai-completions"):
-    svcs = load_config()
-    ds = [s for s in svcs if s.account.id == "acc-3"][0]
-    acc = Account(id=ds.account.id, name=ds.account.name, api_key=ds.account.api_key,
+    # 测试自包含：不依赖本地 config.json（CI 环境没有该文件，.gitignore 忽略）。
+    # mock 上游不校验 API Key，用假 key 即可；模型名与各测试 payload 保持一致。
+    acc = Account(id="acc-3", name="Test-DeepSeek", api_key="sk-test",
                   openai_url=openai_url, anthropic_url="")
-    return Service(name=ds.name, account=acc, client=ds.client, host="127.0.0.1",
-                   port=0, model=ds.model, override_model=ds.override_model,
-                   max_tokens=ds.max_tokens, proxy="", api=api, upstream_api=upstream_api)
+    return Service(name="test-codex", account=acc, client="openai", host="127.0.0.1",
+                   port=0, model="deepseek-v4-flash", override_model=True,
+                   max_tokens=4096, proxy="", api=api, upstream_api=upstream_api)
 
 
 async def run_async_engine(openai_url: str, port: int, api: str, upstream_api: str,
