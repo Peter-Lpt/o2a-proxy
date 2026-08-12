@@ -1093,8 +1093,8 @@ def _responses_to_chat(req, service):
         else:
             chat["model"] = req.get("model") or service.model
         if not chat.get("max_tokens") and not chat.get("max_output_tokens"):
-            # 没带 max_tokens 时用服务默认，但封顶上游支持的 131072，避免 1M 上下文默认值触发上游 400
-            chat["max_tokens"] = min(service.max_tokens, 131072)
+            # 没带 max_tokens 时用服务默认（不做封顶，透传）
+            chat["max_tokens"] = service.max_tokens
         return chat
     else:
         raw_input = req.get("input", [])
@@ -1148,11 +1148,11 @@ def _responses_to_chat(req, service):
         "stream": req.get("stream", False),
     }
     if "max_output_tokens" in req:
-        chat["max_tokens"] = min(_to_int(req["max_output_tokens"], service.max_tokens) or service.max_tokens, 131072)
+        chat["max_tokens"] = req["max_output_tokens"]
     elif "max_tokens" in req:
-        chat["max_tokens"] = min(_to_int(req["max_tokens"], service.max_tokens) or service.max_tokens, 131072)
+        chat["max_tokens"] = req["max_tokens"]
     else:
-        chat["max_tokens"] = min(service.max_tokens, 131072)
+        chat["max_tokens"] = service.max_tokens
     for k in ("temperature", "top_p", "stream_options", "seed", "parallel_tool_calls"):
         if k in req:
             chat[k] = req[k]
@@ -1641,11 +1641,7 @@ def convert_request(req, service):
     openai_req = {
         "model": model,
         "messages": messages,
-        # 1M 上下文服务的默认 max_tokens 可能高达 1000000，封顶上游支持的 131072
-        "max_tokens": min(
-            _to_int(req.get("max_tokens"), service.max_tokens) or service.max_tokens,
-            131072,
-        ),
+        "max_tokens": req.get("max_tokens", service.max_tokens),
         "stream": is_stream,
     }
     if is_stream:
