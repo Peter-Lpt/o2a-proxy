@@ -166,20 +166,6 @@ fn recalc_cost(
     input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
-fn list_record_dates(stats_dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(stats_dir) else {
-        return out;
-    };
-    for e in entries.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        if e.path().is_file() && name.ends_with(".jsonl") {
-            out.push(name.trim_end_matches(".jsonl").to_string());
-        }
-    }
-    out
-}
-
 /// 读取某天原始记录，并统一按当前定价重算 cost 字段。
 fn read_records(
     stats_dir: &Path,
