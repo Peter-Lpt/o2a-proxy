@@ -169,6 +169,13 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   100% { transform: scale(1.6); opacity: 0; }
 }
 .orb.stopped { background: var(--muted-2); }
+/* 忙碌态：任一服务有活跃任务时琥珀闪烁 */
+.orb.busy {
+  background: var(--amber);
+  box-shadow: 0 0 10px var(--amber);
+  animation: blink 1.6s ease-in-out infinite;
+}
+.orb.busy::after { border-color: rgba(251, 191, 36, 0.45); animation: orb-pulse 1.8s ease-out infinite; }
 
 .btn {
   display: inline-flex;
@@ -209,7 +216,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .float-btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-dim); }
 
 /* ---------- 服务标签 ---------- */
-.svc-bar { padding: 0 14px 9px; }
+.svc-bar { position: relative; padding: 0 14px 9px; }
+/* 溢出渐隐遮罩：提示两侧还有更多服务（可拖拽 / 滚轮横向滚动） */
+.tab-edge {
+  position: absolute;
+  top: 0;
+  bottom: 9px;
+  width: 20px;
+  pointer-events: none;
+  z-index: 1;
+}
+.tab-edge.left { left: 14px; background: linear-gradient(90deg, var(--bg), transparent); }
+.tab-edge.right { right: 14px; background: linear-gradient(270deg, var(--bg), transparent); }
 .svc-tabs {
   display: flex; gap: 6px; overflow-x: auto;
   padding-bottom: 4px;
@@ -237,9 +255,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   background: var(--green);
   box-shadow: 0 0 6px var(--green);
 }
+.svc-tab .dot.busy {
+  background: var(--amber);
+  box-shadow: 0 0 6px var(--amber);
+  animation: blink 1.4s ease-in-out infinite;
+}
 .svc-tab .power {
-  font-size: 9px; opacity: 0.75;
-  width: 14px; height: 14px; border-radius: 4px;
+  font-size: 10px; opacity: 0.75;
+  width: 18px; height: 18px; border-radius: 5px;
   display: inline-flex; align-items: center; justify-content: center;
   background: rgba(255, 255, 255, 0.05);
 }
@@ -310,23 +333,39 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 
-/* ---------- 统计表：等宽数字 + 发丝线 ---------- */
-.stat-table { font-variant-numeric: tabular-nums; }
-.st-row {
-  display: flex; padding: 5px 0; font-size: 12px;
-  border-bottom: 1px solid var(--hairline);
+/* ---------- KPI 汇总卡：当前小时 / 今日 / 本月 ---------- */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+  margin-bottom: 10px;
 }
-.st-row:last-child { border-bottom: none; }
-.st-row span { flex: 1.4; color: var(--muted); }
-.st-row b { flex: 1; text-align: right; font-weight: 600; font-family: var(--font-mono); font-size: 11.5px; }
-.st-head { color: var(--muted-2); font-size: 10.5px; letter-spacing: 0.4px; text-transform: uppercase; padding-bottom: 7px; }
-.st-head span:first-child { color: var(--text); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 11.5px; }
-.st-head span:not(:first-child) { flex: 1; text-align: right; }
-.st-row.hit b { color: var(--muted); }
-.st-row.hit b.good { color: var(--green); }
-.st-row.hit b.mid { color: var(--amber); }
-.st-row.cost b { color: var(--amber); }
-.st-row.cost b::before { content: "¥"; font-size: 9px; margin-right: 2px; opacity: 0.7; }
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 9px 10px 8px;
+}
+.kpi-l { font-size: 10px; color: var(--muted); }
+.kpi-v {
+  font-size: 16px; font-weight: 700;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.kpi-v.good { color: var(--green); }
+.kpi-v.mid { color: var(--amber); }
+.kpi-v.cost { color: var(--amber); }
+.kpi-s {
+  font-size: 9.5px; color: var(--muted-2);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ---------- 图表头部 ---------- */
 /* 轻量历史入口：今日/本月两档 + 日历（自定义区间） */
@@ -372,12 +411,47 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235d6c88' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
 }
 .chart-select:focus { border-color: var(--blue); }
-.chart-title { font-size: 11.5px; color: var(--muted); margin-bottom: 7px; font-weight: 500; }
-.chart-delta { font-size: 10.5px; font-weight: 500; margin-left: 6px; }
+.chart-title { font-size: 11.5px; color: var(--muted); margin-bottom: 7px; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.chart-delta { font-size: 10.5px; font-weight: 500; }
 .chart-delta.up { color: var(--green); }
 .chart-delta.down { color: var(--red); }
+.chart-reset {
+  margin-left: auto;
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; font-size: 10px; color: var(--muted);
+  border: 1px solid var(--border-soft); border-radius: 6px;
+  background: var(--bg2); transition: all 0.15s;
+}
+.chart-reset:hover { color: var(--blue); border-color: var(--blue); }
 .chart-note { font-size: 10px; color: var(--muted-2); margin-top: 5px; }
 .updated { font-size: 10px; color: var(--muted-2); text-align: right; margin-top: 3px; font-family: var(--font-mono); }
+
+/* 统计读取失败提示条 */
+.stats-err {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin-bottom: 9px; padding: 7px 11px; border-radius: 8px;
+  background: var(--red-dim); border: 1px solid rgba(248, 113, 113, 0.3);
+  color: var(--red); font-size: 11px; line-height: 1.5;
+}
+.stats-err svg { flex: none; margin-top: 1px; }
+
+/* 首启引导卡 */
+.guide-card {
+  border-color: rgba(79, 140, 255, 0.35);
+  background:
+    radial-gradient(400px 140px at 100% 0%, rgba(79, 140, 255, 0.09), transparent 70%),
+    var(--bg2);
+}
+.guide-title { font-weight: 700; font-size: 12.5px; margin-bottom: 9px; }
+.guide-steps { display: flex; flex-direction: column; gap: 7px; }
+.guide-step { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--muted); }
+.guide-step b {
+  flex: none; width: 17px; height: 17px; border-radius: 50%;
+  background: var(--blue-dim); color: var(--blue);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700;
+}
+.guide-step span { flex: 1; }
 
 /* ---------- 按模型统计 ---------- */
 .model-stats-list { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
@@ -498,10 +572,57 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
   opacity: 0; pointer-events: none; transition: all 0.22s ease; z-index: 99;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.success {
+  background: var(--green-dim);
+  border-color: rgba(52, 211, 153, 0.45);
+  color: var(--green);
+}
+.toast.error {
+  background: var(--red-dim);
+  border-color: rgba(248, 113, 113, 0.45);
+  color: var(--red);
+}
+
+/* 刷新按钮加载旋转 */
+.icon-btn.spinning svg { animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 面板可缩放适配 ---------- */
+/* 矮窗口：压缩间距，展示更多内容 */
+@media (max-height: 660px) {
+  .head { padding: 9px 14px 7px; }
+  .svc-bar { padding-bottom: 6px; }
+  .bar { margin-bottom: 6px; padding: 6px 12px; }
+  .card { padding: 8px 12px; margin-bottom: 8px; }
+  .kpi-grid { gap: 6px; margin-bottom: 8px; }
+  .kpi { padding: 7px 9px 6px; }
+  .chart-head { margin: 0 0 7px; }
+  .live-feed { max-height: 76px; }
+  .foot { padding: 6px 14px 8px; }
+}
+/* 加宽面板：统计页双列（图表 | 模型/实时），充分利用横向空间 */
+@media (min-width: 640px) {
+  .stats-panel.active {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 10px;
+    align-items: start;
+  }
+  .stats-panel > .kpi-grid,
+  .stats-panel > .guide-card,
+  .stats-panel > .chart-head,
+  .stats-panel > .cal,
+  .stats-panel > .stats-err {
+    grid-column: 1 / -1;
+  }
+  .stats-panel > .card { margin-bottom: 10px; }
+  .stats-panel > .model-stats-card { grid-column: 2; }
+  .stats-panel > .live-card { grid-column: 2; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

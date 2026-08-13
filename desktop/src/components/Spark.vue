@@ -4,6 +4,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
+import { hitTier } from "../format";
 
 const props = defineProps<{
   points: number[]; // 缓存命中率 0..1
@@ -12,10 +13,6 @@ const props = defineProps<{
 }>();
 
 const el = ref<HTMLCanvasElement | null>(null);
-
-function hitCls(rate: number): string {
-  return rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad";
-}
 
 function draw() {
   const c = el.value;
@@ -51,7 +48,7 @@ function draw() {
     const x = i * slot + (slot - bw) / 2;
     const bh = Math.max(2, v * (h - 4));
     const r = Math.min(1.5, bw / 2, bh / 2);
-    ctx.fillStyle = COLOR[hitCls(v)];
+    ctx.fillStyle = COLOR[hitTier(v, true)];
     ctx.beginPath();
     ctx.roundRect(x, h - bh, bw, bh, r);
     ctx.fill();

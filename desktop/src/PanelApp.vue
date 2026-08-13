@@ -5,13 +5,13 @@
         <span class="logo"><Icon name="swap" :size="15" /></span>
         <div class="brand-txt">
           <div class="title">o2a-proxy</div>
-          <div class="sub" id="headSub">{{ anyRunning ? "代理运行中" : "代理已停止" }}</div>
+          <div class="sub" id="headSub">{{ headSubText }}</div>
         </div>
-        <span class="orb" :class="anyRunning ? 'running' : 'stopped'" :title="anyRunning ? '运行中' : '已停止'"></span>
+        <span class="orb" :class="headOrbCls" :title="headOrbTitle"></span>
       </div>
       <div class="head-actions">
-        <button class="icon-btn" :title="theme === 'dark' ? '切换到浅色' : '切换到深色'" @click="onToggleTheme">
-          <Icon :name="theme === 'dark' ? 'sun' : 'moon'" :size="14" />
+        <button class="icon-btn" :title="themeTitle" @click="onToggleTheme">
+          <Icon :name="themeIcon" :size="14" />
         </button>
         <button class="btn btn-sm" title="添加服务" @click="addService"><Icon name="plus" :size="12" /> 添加服务</button>
         <button class="float-btn" :title="floatService ? '为「' + floatService + '」开启悬浮看板' : '开启全部悬浮看板'" @click="onToggleFloat"><Icon name="float" :size="12" /> 悬浮</button>
@@ -19,9 +19,9 @@
     </header>
 
     <div class="svc-bar">
-      <div class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel">
+      <div class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel" @scroll="onTabsScroll">
         <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selected = '__all__'">
-          <span class="dot" :class="{ on: anyRunning }"></span>全部
+          <span class="dot" :class="{ on: anyRunning, busy: anyBusy }"></span>全部
         </button>
         <button
           v-for="s in serviceList"
@@ -31,12 +31,14 @@
           @click="selected = s.comment"
           :title="s.comment + ' · ' + (s.client || 'auto') + ' · :' + (s.listen_address ?? '?')"
         >
-          <span class="dot" :class="{ on: runningMap[s.comment] }"></span>{{ s.comment }}
+          <span class="dot" :class="{ on: runningMap[s.comment], busy: busyMap[s.comment] }"></span>{{ s.comment }}
           <span class="power" @click.stop="toggleSvc(s.comment)" :title="runningMap[s.comment] ? '停止' : '启动'">
-            <Icon :name="runningMap[s.comment] ? 'stop' : 'play'" :size="9" />
+            <Icon :name="runningMap[s.comment] ? 'stop' : 'play'" :size="10" />
           </span>
         </button>
       </div>
+      <span v-if="tabEdgeL" class="tab-edge left" aria-hidden="true"></span>
+      <span v-if="tabEdgeR" class="tab-edge right" aria-hidden="true"></span>
     </div>
 
     <div v-if="!anyRunning" class="bar off-bar">
@@ -58,39 +60,46 @@
 
     <main>
       <!-- 统计 -->
-      <section v-show="page === 'stats'" class="panel" :class="{ active: page === 'stats' }">
-        <div v-if="anyRunning" class="card live-card">
-          <div class="live-head">
-            <span class="live-title"><span class="live-dot"></span>实时调用</span>
-            <span>{{ liveSum }}</span>
+      <section v-show="page === 'stats'" class="panel stats-panel" :class="{ active: page === 'stats' }">
+        <!-- 首启引导：无服务 / 有服务无账号 -->
+        <div v-if="guide === 'services'" class="card guide-card">
+          <div class="guide-title">开始使用 o2a-proxy</div>
+          <div class="guide-steps">
+            <div class="guide-step"><b>1</b><span>添加服务（选择协议与监听端口）</span><button class="btn btn-sm" @click="addService">添加服务</button></div>
+            <div class="guide-step"><b>2</b><span>在「账号」页配置 API Key 与端点</span><button class="btn btn-sm" @click="goAccounts">去配置账号</button></div>
+            <div class="guide-step"><b>3</b><span>在服务标签上点击 ▶ 启动代理，这里开始出现实时统计</span></div>
           </div>
-          <Spark :points="liveSpark" :height="40" class="live-spark" />
-          <div class="live-feed">
-            <div v-for="(r, i) in liveFeed" :key="i" class="lf-row">
-              <span class="t">{{ r.time }}</span>
-              <span v-if="r.service" class="svc">{{ r.service }}</span>
-              <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
-              <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
-            </div>
+        </div>
+        <div v-else-if="guide === 'accounts'" class="card guide-card">
+          <div class="guide-title">还差一个账号</div>
+          <div class="guide-steps">
+            <div class="guide-step"><b>1</b><span>账号 = API Key + OpenAI / Anthropic 端点</span><button class="btn btn-sm" @click="goAccounts">去配置账号</button></div>
+            <div class="guide-step"><b>2</b><span>回到服务标签绑定该账号后即可启动</span></div>
           </div>
         </div>
 
-        <div class="card stat-table">
-          <div class="st-row st-head">
-            <span>{{ scopeLabel }}</span><span>当前小时</span><span>今日</span><span>本月</span>
+        <!-- KPI 汇总（当前小时 / 今日 / 本月） -->
+        <div class="kpi-grid">
+          <div class="kpi">
+            <span class="kpi-l">请求数</span>
+            <b class="kpi-v">{{ fmtNum(stats.today?.requests) }}</b>
+            <span class="kpi-s">时 {{ fmtNum(stats.current?.requests) }} · 月 {{ fmtNum(stats.month?.requests) }}</span>
           </div>
-          <div class="st-row"><span>请求数</span><b>{{ fmtNum(stats.current?.requests) }}</b><b>{{ fmtNum(stats.today?.requests) }}</b><b>{{ fmtNum(stats.month?.requests) }}</b></div>
-          <div class="st-row"><span>输入</span><b>{{ fmtNum(stats.current?.input) }}</b><b>{{ fmtNum(stats.today?.input) }}</b><b>{{ fmtNum(stats.month?.input) }}</b></div>
-          <div class="st-row"><span>缓存读</span><b>{{ fmtNum(stats.current?.read) }}</b><b>{{ fmtNum(stats.today?.read) }}</b><b>{{ fmtNum(stats.month?.read) }}</b></div>
-          <div class="st-row"><span>输出</span><b>{{ fmtNum(stats.current?.output) }}</b><b>{{ fmtNum(stats.today?.output) }}</b><b>{{ fmtNum(stats.month?.output) }}</b></div>
-          <div class="st-row"><span>总计</span><b>{{ fmtNum(totalOf(stats.current)) }}</b><b>{{ fmtNum(totalOf(stats.today)) }}</b><b>{{ fmtNum(totalOf(stats.month)) }}</b></div>
-          <div class="st-row hit">
-            <span>命中率</span>
-            <b :class="hitClass(stats.current?.hitRate)">{{ fmtPct(stats.current?.hitRate) }}</b>
-            <b :class="hitClass(stats.today?.hitRate)">{{ fmtPct(stats.today?.hitRate) }}</b>
-            <b :class="hitClass(stats.month?.hitRate)">{{ fmtPct(stats.month?.hitRate) }}</b>
+          <div class="kpi">
+            <span class="kpi-l">Token</span>
+            <b class="kpi-v">{{ fmtNum(totalOf(stats.today)) }}</b>
+            <span class="kpi-s">时 {{ fmtNum(totalOf(stats.current)) }} · 月 {{ fmtNum(totalOf(stats.month)) }}</span>
           </div>
-          <div class="st-row cost"><span>费用</span><b>{{ fmtCost(stats.current?.cost) }}</b><b>{{ fmtCost(stats.today?.cost) }}</b><b>{{ fmtCost(stats.month?.cost) }}</b></div>
+          <div class="kpi">
+            <span class="kpi-l">命中率</span>
+            <b class="kpi-v" :class="hitClass(stats.today?.hitRate)">{{ fmtPct(stats.today?.hitRate) }}</b>
+            <span class="kpi-s">时 {{ fmtPct(stats.current?.hitRate) }} · 月 {{ fmtPct(stats.month?.hitRate) }}</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-l">费用</span>
+            <b class="kpi-v cost">¥{{ fmtCost(stats.today?.cost) }}</b>
+            <span class="kpi-s">时 ¥{{ fmtCost(stats.current?.cost) }} · 月 ¥{{ fmtCost(stats.month?.cost) }}</span>
+          </div>
         </div>
 
         <div class="chart-head">
@@ -105,10 +114,23 @@
           </div>
           <div class="chart-head-right">
             <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" :title="'按模型过滤（' + rangeLabel + '）'" />
-            <button class="icon-btn" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
+            <button class="icon-btn" :class="{ spinning: statsLoading }" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
           </div>
         </div>
         <CalendarHeat v-if="calOpen" :service="statsService" @select="onCalSelect" @quick="onCalQuick" />
+
+        <div v-if="statsError" class="stats-err"><Icon name="alert" :size="12" />{{ statsError }}</div>
+
+        <div class="card chart-box">
+          <div class="chart-title">
+            <span>缓存命中率 & Token 消耗（{{ chartTitle }}）</span>
+            <span v-if="deltaText" class="chart-delta" :class="deltaCls">{{ deltaText }}</span>
+            <button class="chart-reset" title="复位缩放与平移" @click="chartResetKey++"><Icon name="refresh" :size="10" /> 复位</button>
+          </div>
+          <LineChart :labels="chartLabels" :input="chartInput" :read="chartRead" :output="chartOutput" :hit-rate="chartHit" :theme="theme" :reset-key="chartResetKey" />
+          <div class="chart-note">* 命中率 = 缓存读 / (缓存读 + 输入)，对齐 Anthropic 官方口径；滚轮缩放 · 拖拽平移 · 双击复位</div>
+          <div class="updated">{{ stats.updatedAt ? "更新于 " + stats.updatedAt.replace('T', ' ').slice(0, 19) : "—" }}</div>
+        </div>
 
         <div v-if="modelStats.length" class="card model-stats-card">
           <div class="fc-h">
@@ -128,12 +150,21 @@
           <div class="empty-tip">还没有按模型的统计数据，代理跑起来后这里会展示各模型的用量与费用。</div>
         </div>
 
-        <div class="card chart-box">
-          <div class="chart-title">缓存命中率 & Token 消耗（{{ chartTitle }}）<span v-if="deltaText" class="chart-delta" :class="deltaCls">{{ deltaText }}</span></div>
-          <LineChart :labels="chartLabels" :input="chartInput" :read="chartRead" :output="chartOutput" :hit-rate="chartHit" :theme="theme" />
-          <div class="chart-note">* 命中率 = 缓存读 / (缓存读 + 输入)，对齐 Anthropic 官方口径</div>
+        <div v-if="anyRunning" class="card live-card">
+          <div class="live-head">
+            <span class="live-title"><span class="live-dot"></span>实时调用</span>
+            <span>{{ liveSum }}</span>
+          </div>
+          <Spark :points="liveSpark" :height="40" class="live-spark" />
+          <div class="live-feed">
+            <div v-for="r in liveFeed" :key="r.key" class="lf-row">
+              <span class="t">{{ r.time }}</span>
+              <span v-if="r.service" class="svc">{{ r.service }}</span>
+              <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+              <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
+            </div>
+          </div>
         </div>
-        <div class="updated">{{ stats.updatedAt ? "更新于 " + stats.updatedAt.replace('T', ' ').slice(0, 19) : "—" }}</div>
       </section>
 
       <!-- 配置 -->
@@ -273,22 +304,32 @@
 
     <footer class="foot">
       <span>o2a-proxy · v0.1.0</span>
-      <button class="link-btn" @click="api.quitApp()">退出应用</button>
+      <button class="link-btn" @click="quitApp">退出应用</button>
     </footer>
-    <div id="toast" class="toast" :class="{ show: toast }">{{ toast }}</div>
+    <div id="toast" class="toast" :class="{ show: !!toast, [toastType]: !!toast }">{{ toast }}</div>
+    <ConfirmDialog
+      :open="!!confirmBox"
+      :title="confirmBox?.title || ''"
+      :message="confirmBox?.message || ''"
+      :ok-text="confirmBox?.okText || '确认'"
+      @confirm="onConfirmOk"
+      @cancel="confirmBox = null"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
-import { listen } from "@tauri-apps/api/event";
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { emit, listen } from "@tauri-apps/api/event";
 import { api, fmtCost, fmtNum, fmtPct } from "./api";
+import { hitTier } from "./format";
 import CalendarHeat from "./components/CalendarHeat.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import Icon from "./components/Icon.vue";
 import LineChart from "./components/LineChart.vue";
 import SelectBox from "./components/SelectBox.vue";
 import Spark from "./components/Spark.vue";
-import { getTheme, toggleTheme } from "./theme";
+import { applyTheme, getTheme, toggleTheme, watchSystemTheme, type Theme } from "./theme";
 
 const ALL = "__all__";
 const cfg = reactive<any>({});
@@ -368,9 +409,15 @@ const calOpen = ref(false);
 const customRange = ref<{ start: string; end: string } | null>(null);
 const modelFilter = ref<string>("");
 const toast = ref("");
+const toastType = ref<"info" | "success" | "error">("info");
 const offError = ref("");
 const showKey = ref(false);
-const theme = ref<"dark" | "light">(getTheme());
+const theme = ref<Theme>(getTheme());
+const statsLoading = ref(false);
+const statsError = ref("");
+const chartResetKey = ref(0);
+const tabEdgeL = ref(false);
+const tabEdgeR = ref(false);
 const fetchedModels = ref<string[]>([]);
 const modelHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
 const modelCache = new Map<string, string[]>();
@@ -391,8 +438,48 @@ const upstreamApiOptions = [
 const editingAcc = ref<string | null>(null);
 const accHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
 const accStats = reactive<Record<string, any>>({});
+const accStatsState = reactive<Record<string, "loading" | "ok" | "err">>({});
 let modelsSeq = 0;
 let accTimer: any = null;
+
+// ---------- 确认弹层 ----------
+const confirmBox = ref<{ title: string; message: string; okText?: string; action: () => void } | null>(null);
+function askConfirm(title: string, message: string, action: () => void, okText = "确认") {
+  confirmBox.value = { title, message, action, okText };
+}
+function onConfirmOk() {
+  const cb = confirmBox.value;
+  confirmBox.value = null;
+  cb?.action();
+}
+
+// ---------- 主题（深/浅/跟随系统） ----------
+const themeIcon = computed(() => (theme.value === "system" ? "auto" : theme.value === "dark" ? "sun" : "moon"));
+const themeTitle = computed(() =>
+  theme.value === "system"
+    ? "跟随系统（点击切为深色）"
+    : theme.value === "dark"
+      ? "切换到浅色"
+      : "切换到深色"
+);
+function emitTheme() {
+  emit("o2a-theme", theme.value).catch(() => {});
+}
+function onToggleTheme() {
+  theme.value = toggleTheme();
+  emitTheme();
+}
+
+// ---------- 服务标签栏：溢出渐隐提示 ----------
+function onTabsScroll() {
+  const el = svcTabs.value;
+  if (!el) {
+    tabEdgeL.value = tabEdgeR.value = false;
+    return;
+  }
+  tabEdgeL.value = el.scrollLeft > 2;
+  tabEdgeR.value = el.scrollLeft < el.scrollWidth - el.clientWidth - 2;
+}
 
 function accKindLabel(acc: any): string {
   const o = !!String(acc?.openai_url || "").trim();
@@ -424,8 +511,11 @@ function loadAccountStats() {
     const svcs = (cfg.services || []).filter((s: any) => s.account === acc.id);
     if (!svcs.length) {
       accStats[acc.id] = { today: { cost: 0, requests: 0 }, month: { cost: 0, requests: 0 } };
+      accStatsState[acc.id] = "ok";
       return;
     }
+    // 已有数据时静默刷新，避免每 10s 轮询闪烁
+    if (!accStats[acc.id]) accStatsState[acc.id] = "loading";
     Promise.all(svcs.map((s: any) => api.getStats(s.comment)))
       .then((res: any[]) => {
         let cost = 0, req = 0, mcost = 0, mreq = 0;
@@ -436,14 +526,19 @@ function loadAccountStats() {
           mreq += Number(r.month?.requests || 0);
         });
         accStats[acc.id] = { today: { cost, requests: req }, month: { cost: mcost, requests: mreq } };
+        accStatsState[acc.id] = "ok";
       })
       .catch(() => {
         accStats[acc.id] = { today: { cost: 0, requests: 0 }, month: { cost: 0, requests: 0 } };
+        accStatsState[acc.id] = "err";
       });
   });
 }
 const accStatsText = (acc: any) => {
   const st = accStats[acc.id];
+  const stt = accStatsState[acc.id];
+  if (stt === "loading") return "统计加载中…";
+  if (stt === "err") return "统计读取失败";
   if (!st) return "今日 —";
   const svcN = (cfg.services || []).filter((s: any) => s.account === acc.id).length;
   return `服务×${svcN} · 今日 ¥${fmtCost(st.today.cost)} / ${fmtNum(st.today.requests)} 次 · 本月 ¥${fmtCost(st.month.cost)}`;
@@ -502,16 +597,19 @@ function addAccount() {
 function removeAccount(acc: any) {
   const refs = (cfg.services || []).filter((s: any) => s.account === acc.id);
   if (refs.length) {
-    showToast(`无法删除：仍有 ${refs.length} 个服务引用该账号（${refs.map((s: any) => s.comment).join("、")}）`);
+    showToast(`无法删除：仍有 ${refs.length} 个服务引用该账号（${refs.map((s: any) => s.comment).join("、")}）`, "error");
     return;
   }
-  cfg.accounts = cfg.accounts.filter((a: any) => a.id !== acc.id);
-  if (editingAcc.value === acc.id) editingAcc.value = null;
-  showToast("已删除账号，点击保存配置生效");
-}
-
-function onToggleTheme() {
-  theme.value = toggleTheme();
+  askConfirm(
+    "删除账号",
+    `确定删除账号「${acc.name || acc.id}」？\n其 API Key 与端点将从配置中移除，保存后生效。`,
+    () => {
+      cfg.accounts = cfg.accounts.filter((a: any) => a.id !== acc.id);
+      if (editingAcc.value === acc.id) editingAcc.value = null;
+      showToast("已删除账号，点击保存配置生效", "success");
+    },
+    "删除"
+  );
 }
 
 function setModelHint(text: string, err = false) {
@@ -582,10 +680,23 @@ async function warmModels() {
 }
 
 let toastTimer: any = null;
-function showToast(msg: string) {
+function showToast(msg: string, type: "info" | "success" | "error" = "info") {
   toast.value = msg;
+  toastType.value = type;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toast.value = ""), 2200);
+  toastTimer = setTimeout(() => (toast.value = ""), type === "error" ? 4200 : 2200);
+}
+
+// 退出应用：确认（运行中的代理会被停止）
+function quitApp() {
+  askConfirm(
+    "退出应用",
+    "确定退出 o2a-proxy？\n运行中的代理服务将被停止。",
+    () => {
+      api.quitApp();
+    },
+    "退出"
+  );
 }
 
 // 服务标签以配置为准（添加/删除立即生效），运行态从 status 映射
@@ -597,7 +708,29 @@ const runningMap = computed<Record<string, boolean>>(() => {
   });
   return m;
 });
+// 忙碌态：服务有活跃任务（引擎 /status 的 task.active）
+const busyMap = computed<Record<string, boolean>>(() => {
+  const m: Record<string, boolean> = {};
+  (status.services || []).forEach((s: any) => {
+    m[s.name] = !!s.task?.active;
+  });
+  return m;
+});
 const anyRunning = computed(() => Object.values(runningMap.value).some(Boolean));
+const anyBusy = computed(() => Object.values(busyMap.value).some(Boolean));
+const headOrbCls = computed(() => (anyBusy.value ? "busy" : anyRunning.value ? "running" : "stopped"));
+const headOrbTitle = computed(() =>
+  anyBusy.value ? "正在处理请求" : anyRunning.value ? "运行中" : "已停止"
+);
+const headSubText = computed(() =>
+  anyBusy.value ? "代理处理中" : anyRunning.value ? "代理运行中" : "代理已停止"
+);
+// 首启引导：无服务 / 有服务但无账号
+const guide = computed(() => {
+  if (!serviceList.value.length) return "services";
+  if (!(cfg.accounts || []).length) return "accounts";
+  return "";
+});
 const activeSvcRunning = computed(
   () => !!activeSvc.value && !!runningMap.value[activeSvc.value.comment]
 );
@@ -625,7 +758,6 @@ const portSummary = computed(() => {
 function goAccounts() {
   page.value = "accounts";
 }
-const scopeLabel = computed(() => (selected.value === ALL ? "全部" : selected.value));
 
 // 服务入口提示：api 显式声明优先，回退 client / 自动识别
 const entryProto = computed(() => {
@@ -711,7 +843,7 @@ async function loadConfig() {
     Object.assign(cfg, c || {});
     migrateAccounts(cfg);
   } catch (e: any) {
-    showToast("读取配置失败: " + e);
+    showToast("读取配置失败: " + e, "error");
   }
 }
 
@@ -721,11 +853,12 @@ async function loadStatus() {
     Object.keys(status).forEach((k) => delete (status as any)[k]);
     Object.assign(status, s);
   } catch (e: any) {
-    showToast("读取状态失败: " + e);
+    showToast("读取状态失败: " + e, "error");
   }
 }
 
 async function loadStats() {
+  statsLoading.value = true;
   try {
     const c = customRange.value;
     const isCustom = range.value === "custom";
@@ -737,8 +870,12 @@ async function loadStats() {
     );
     Object.keys(stats).forEach((k) => delete (stats as any)[k]);
     Object.assign(stats, s || {});
+    statsError.value = "";
   } catch (e: any) {
-    // 统计目录缺失时静默
+    // 统计目录缺失/未启用统计时给出可操作提示，不再静默
+    statsError.value = "统计读取失败：" + (e || "未知错误") + "。请确认 config.json 已启用 cache_stats_enabled 且统计目录存在";
+  } finally {
+    statsLoading.value = false;
   }
 }
 
@@ -753,16 +890,16 @@ async function loadLive() {
 
 async function toggleSvc(name: string) {
   if (!(name in runningMap.value)) {
-    showToast("该服务尚未保存，请先保存配置");
+    showToast("该服务尚未保存，请先保存配置", "error");
     return;
   }
   try {
     await api.toggleService(name);
     await loadStatus();
     offError.value = "";
-    showToast(name + (runningMap.value[name] ? " 已启动" : " 已停止"));
+    showToast(name + (runningMap.value[name] ? " 已启动" : " 已停止"), "success");
   } catch (e: any) {
-    showToast("操作失败: " + e);
+    showToast("操作失败: " + e, "error");
     offError.value = String(e);
   }
 }
@@ -772,7 +909,7 @@ async function onToggleFloat() {
   try {
     await api.toggleFloatFor(floatService.value);
   } catch (e: any) {
-    showToast(String(e));
+    showToast(String(e), "error");
   }
 }
 
@@ -798,19 +935,27 @@ function addService() {
   cfg.services.push(svc);
   selected.value = svc.comment;
   page.value = "config";
-  showToast("已添加服务，绑定账号后保存");
+  showToast("已添加服务，绑定账号后保存", "success");
 }
 
 function removeSvc() {
   const s = activeSvc.value;
   if (!s) return;
   const name = s.comment;
-  if (runningMap.value[name]) {
-    api.stopService(name).catch(() => {});
-  }
-  cfg.services = cfg.services.filter((x: any) => x.comment !== name);
-  selected.value = ALL;
-  showToast("已删除服务，点击保存生效");
+  const running = !!runningMap.value[name];
+  askConfirm(
+    "删除服务",
+    running
+      ? `服务「${name}」正在运行，删除将先停止它并从配置中移除。\n保存配置后生效。`
+      : `确定删除服务「${name}」？\n保存配置后生效。`,
+    () => {
+      if (running) api.stopService(name).catch(() => {});
+      cfg.services = cfg.services.filter((x: any) => x.comment !== name);
+      selected.value = ALL;
+      showToast("已删除服务，点击保存生效", "success");
+    },
+    "删除"
+  );
 }
 
 function validateConfig(): string | null {
@@ -905,7 +1050,7 @@ function normalizeConfig() {
 async function saveConfig() {
   const err = validateConfig();
   if (err) {
-    showToast(err);
+    showToast(err, "error");
     return;
   }
   normalizeConfig();
@@ -920,9 +1065,14 @@ async function saveConfig() {
     for (const n of removed) {
       await api.stopService(n).catch(() => {});
     }
-    showToast("配置已保存");
+    // 引擎启动时一次性读取配置（不热加载）：运行中保存只对下次启动生效
+    if (anyRunning.value) {
+      showToast("配置已写入 config.json，运行中的服务重启后生效", "info");
+    } else {
+      showToast("配置已保存", "success");
+    }
   } catch (e: any) {
-    showToast("保存失败: " + e);
+    showToast("保存失败: " + e, "error");
   }
 }
 
@@ -931,10 +1081,7 @@ function totalOf(o: any): number {
 }
 
 function hitClass(r: number): string {
-  const v = Number(r || 0);
-  if (v >= 0.3) return "good";
-  if (v >= 0.1) return "mid";
-  return "";
+  return hitTier(r, false);
 }
 
 const modelOptions = computed(() => (stats.byModel || []).map((m: any) => m.model));
@@ -1009,6 +1156,7 @@ const liveFeed = computed(() =>
     .map((r: any) => {
       const rate = Number(r.cache_hit_rate || 0);
       return {
+        key: `${r.timestamp}_${r.service}_${r.output_tokens}`,
         time: String(r.timestamp || "").slice(11, 19),
         service: r.service || "",
         total:
@@ -1018,7 +1166,7 @@ const liveFeed = computed(() =>
         cacheRead: Number(r.cache_read_tokens || 0),
         output: Number(r.output_tokens || 0),
         hitPct: (rate * 100).toFixed(0),
-        hitCls: rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad",
+        hitCls: hitTier(rate, true),
       };
     })
 );
@@ -1107,6 +1255,15 @@ watch(
   }
 );
 
+// 服务增删后刷新 tab 溢出遮罩
+watch(
+  serviceList,
+  () => {
+    nextTick(onTabsScroll);
+  },
+  { deep: true }
+);
+
 let timers: any[] = [];
 // 面板可见性：隐藏时暂停轮询，避免面板长期隐藏期间空转 + 反复全量读统计。
 // 托盘点击/失焦收起由 Rust 发 panel-visible 事件通知（可靠），再叠加
@@ -1148,6 +1305,16 @@ onMounted(async () => {
     (f) => (unlistenPanel = f)
   );
   document.addEventListener("visibilitychange", onVisibilityChange);
+  // 主题：跨窗口同步（Tauri event）+ 系统深浅跟随
+  listen<string>("o2a-theme", (e) => {
+    if (e.payload !== theme.value) {
+      theme.value = e.payload as Theme;
+      applyTheme(theme.value);
+    }
+  }).catch(() => {});
+  watchSystemTheme(() => emitTheme());
+  emitTheme();
+  nextTick(onTabsScroll);
   timers.push(setInterval(() => { if (panelVisible.value) loadStatus(); }, 3000));
   timers.push(setInterval(() => { if (panelVisible.value) loadStats(); }, 5000));
   timers.push(setInterval(() => { if (panelVisible.value) loadLive(); }, 3000));

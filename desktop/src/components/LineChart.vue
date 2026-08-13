@@ -1,6 +1,7 @@
 <template>
   <div class="linechart">
     <canvas ref="el"></canvas>
+    <div v-if="showHint" class="lc-hint">滚轮缩放 · 拖拽平移 · 双击复位</div>
     <div class="lc-legend">
       <span><i class="dot input"></i>输入</span>
       <span><i class="dot read"></i>缓存读</span>
@@ -12,6 +13,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from "vue";
+import { fmtNum } from "../format";
 
 const props = defineProps<{
   labels: string[];
@@ -20,6 +22,7 @@ const props = defineProps<{
   output: number[];
   hitRate: number[];
   theme?: string;
+  resetKey?: number; // 递增时复位缩放/平移视图
 }>();
 
 const el = ref<HTMLCanvasElement | null>(null);
@@ -34,18 +37,26 @@ const PADB = 26;
 const vp = { zoom: 1, pan: 0 };
 let dataLen = 0;
 
+// 十字准星（hover 位置）与交互提示
+let crossX: number | null = null;
+let crossIdx = -1;
+const showHint = ref(false);
+let hintShownOnce = false;
+let hintTimer: any = null;
+
+function showHintOnce() {
+  if (hintShownOnce || showHint.value) return;
+  hintShownOnce = true;
+  showHint.value = true;
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => (showHint.value = false), 3600);
+}
+
 function cssVar(name: string, fb: string): string {
   const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return v || fb;
 }
 
-function fmtNum(n: number): string {
-  n = Number(n) || 0;
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
-  return String(Math.round(n));
-}
 function fmtComma(n: number): string {
   return Math.round(Number(n) || 0).toLocaleString("en-US");
 }
@@ -248,6 +259,30 @@ function render() {
     g.stroke();
   }
 
+  // 十字准星：hover 位置的竖虚线 + 各序列点位高亮
+  if (crossX !== null && crossIdx >= si && crossIdx < ei) {
+    g.save();
+    g.setLineDash([3, 3]);
+    g.strokeStyle = cssVar("--chart-crosshair", "rgba(255,255,255,0.3)");
+    g.lineWidth = 1;
+    g.beginPath();
+    g.moveTo(crossX, PADT);
+    g.lineTo(crossX, PADT + plotH);
+    g.stroke();
+    g.restore();
+    for (const ser of series) {
+      const v = Number(ser.data[crossIdx] || 0);
+      const y = PADT + plotH * (1 - Math.min(v, maxTok) / maxTok);
+      g.beginPath();
+      g.arc(crossX, y, 3.4, 0, Math.PI * 2);
+      g.fillStyle = ser.color;
+      g.fill();
+      g.strokeStyle = "#fff";
+      g.lineWidth = 1;
+      g.stroke();
+    }
+  }
+
   // x labels：按标签实际宽度自适应步长，避免数据点多时标签重叠
   g.fillStyle = cssVar("--chart-text", "#9aa3b2");
   g.textAlign = "center";
@@ -292,12 +327,15 @@ function onMove(ev: MouseEvent) {
   const rect = c.getBoundingClientRect();
   const mx = ev.clientX - rect.left;
   const my = ev.clientY - rect.top;
+  showHintOnce();
   if (dragging) {
     if (dataLen) {
       const visCount = Math.max(3, Math.min(dataLen, Math.round(dataLen / vp.zoom)));
       const slot = (rect.width - PADL - PADR) / visCount;
       vp.pan = Math.round(dragPan + (dragX - ev.clientX) / slot);
       vp.pan = Math.max(0, Math.min(dataLen - visCount, vp.pan));
+      crossX = null;
+      crossIdx = -1;
       draw();
     }
     t.style.display = "none";
@@ -305,6 +343,11 @@ function onMove(ev: MouseEvent) {
   }
   if (mx < PADL || mx > PADL + (rect.width - PADL - PADR) || my < PADT || my > PADT + (170 - PADT - PADB)) {
     t.style.display = "none";
+    if (crossX !== null) {
+      crossX = null;
+      crossIdx = -1;
+      draw();
+    }
     return;
   }
   const labels = props.labels || [];
@@ -319,8 +362,16 @@ function onMove(ev: MouseEvent) {
   const dataIdx = si + idx;
   if (dataIdx < si || dataIdx >= ei) {
     t.style.display = "none";
+    if (crossX !== null) {
+      crossX = null;
+      crossIdx = -1;
+      draw();
+    }
     return;
   }
+  crossX = mx;
+  crossIdx = dataIdx;
+  draw();
   const input = props.input || [], read = props.read || [], output = props.output || [];
   const hit = props.hitRate || [];
   const i = Number(input[dataIdx] || 0);
@@ -348,6 +399,11 @@ function onMove(ev: MouseEvent) {
 
 function onLeave() {
   if (tip) tip.style.display = "none";
+  if (crossX !== null) {
+    crossX = null;
+    crossIdx = -1;
+    draw();
+  }
 }
 
 function onWheel(ev: WheelEvent) {
@@ -366,6 +422,8 @@ function onWheel(ev: WheelEvent) {
   const center = vp.pan + oldVis * ratio;
   vp.pan = Math.round(center - newVis * ratio);
   vp.pan = Math.max(0, Math.min(n - newVis, vp.pan));
+  crossX = null;
+  crossIdx = -1;
   draw();
 }
 
@@ -382,6 +440,8 @@ function onUp() {
 function onDbl() {
   vp.zoom = 1;
   vp.pan = 0;
+  crossX = null;
+  crossIdx = -1;
   draw();
 }
 
@@ -401,7 +461,21 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (tip) tip.remove();
+  clearTimeout(hintTimer);
 });
+
+// 复位按钮（resetKey 递增）：恢复默认缩放/平移
+watch(
+  () => props.resetKey,
+  () => {
+    if (props.resetKey === undefined) return;
+    vp.zoom = 1;
+    vp.pan = 0;
+    crossX = null;
+    crossIdx = -1;
+    draw();
+  }
+);
 
 watch(
   () => [props.labels, props.input, props.read, props.output, props.hitRate, props.theme],
@@ -414,11 +488,33 @@ watch(
 </script>
 
 <style scoped>
+.linechart {
+  position: relative;
+}
 .linechart canvas {
   width: 100%;
   height: 170px;
   display: block;
   cursor: crosshair;
+}
+.lc-hint {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  padding: 3px 9px;
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--bg3);
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: 0.92;
+  z-index: 2;
+  animation: lc-hint-in 0.18s ease-out;
+}
+@keyframes lc-hint-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 0.92; transform: none; }
 }
 .lc-legend {
   display: flex;

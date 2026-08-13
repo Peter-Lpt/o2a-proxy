@@ -11,7 +11,9 @@
         @focus="openMenu"
         @input="onInput"
         @keydown.esc="close"
-        @keydown.enter.prevent="pickFirst"
+        @keydown.down.prevent="moveHighlight(1)"
+        @keydown.up.prevent="moveHighlight(-1)"
+        @keydown.enter.prevent="pickHighlighted"
       />
       <button type="button" class="sb-chevron-btn" :title="open ? '收起' : '展开'" :disabled="disabled" @click="toggle">
         <Icon name="chevron-down" :size="12" :class="{ flip: open }" />
@@ -22,8 +24,13 @@
       type="button"
       class="sb-btn"
       :disabled="disabled"
+      :aria-expanded="open"
+      aria-haspopup="listbox"
       @click="toggle"
       @keydown.esc="close"
+      @keydown.down.prevent="moveHighlight(1)"
+      @keydown.up.prevent="moveHighlight(-1)"
+      @keydown.enter.prevent="pickHighlighted"
     >
       <span class="sb-label">
         {{ currentLabel }}
@@ -33,13 +40,16 @@
 
     <div v-if="open" class="sb-mask" data-tauri-drag-region="false" @mousedown="close"></div>
 
-    <div v-if="open" class="sb-menu" :style="menuStyle">
+    <div v-if="open" class="sb-menu" :style="menuStyle" role="listbox">
       <button
-        v-for="opt in visibleOptions"
+        v-for="(opt, i) in visibleOptions"
         :key="opt.value"
         type="button"
         class="sb-opt"
-        :class="{ active: opt.value === modelValue }"
+        :class="{ active: opt.value === modelValue, highlighted: i === highlightIndex }"
+        role="option"
+        :aria-selected="opt.value === modelValue"
+        @mouseenter="highlightIndex = i"
         @click="pick(opt.value)"
       >
         {{ opt.label }}
@@ -68,6 +78,7 @@ const rootEl = ref<HTMLElement | null>(null);
 const open = ref(false);
 const query = ref("");
 const menuStyle = ref<Record<string, string>>({});
+const highlightIndex = ref(-1);
 
 const opts = computed(() =>
   (props.options || []).map((o) =>
@@ -107,10 +118,14 @@ function openMenu() {
     maxHeight: "220px",
   };
   open.value = true;
+  // 高亮当前值，便于键盘直接确认
+  const idx = visibleOptions.value.findIndex((o) => o.value === props.modelValue);
+  highlightIndex.value = idx >= 0 ? idx : 0;
 }
 
 function close() {
   open.value = false;
+  highlightIndex.value = -1;
 }
 
 function toggle() {
@@ -123,14 +138,35 @@ function pick(v: string) {
   close();
 }
 
+// 键盘导航：↑↓ 移动高亮，Enter 确认，Esc 收起
+function moveHighlight(delta: number) {
+  if (!open.value) {
+    openMenu();
+    return;
+  }
+  const n = visibleOptions.value.length;
+  if (!n) return;
+  const cur = highlightIndex.value < 0 ? 0 : highlightIndex.value;
+  highlightIndex.value = (cur + delta + n) % n;
+  const menu = rootEl.value?.querySelector<HTMLElement>(".sb-menu");
+  const opt = menu?.querySelector<HTMLElement>(`.sb-opt:nth-child(${highlightIndex.value + 1})`);
+  opt?.scrollIntoView({ block: "nearest" });
+}
+
+function pickHighlighted() {
+  if (!open.value) {
+    openMenu();
+    return;
+  }
+  const list = visibleOptions.value;
+  const idx = highlightIndex.value >= 0 ? highlightIndex.value : 0;
+  if (list[idx]) pick(list[idx].value);
+}
+
 function onInput(e: Event) {
   query.value = (e.target as HTMLInputElement).value;
   emit("update:modelValue", query.value);
   if (!open.value) openMenu();
-}
-
-function pickFirst() {
-  if (visibleOptions.value.length) pick(visibleOptions.value[0].value);
 }
 
 function onViewportChange() {
@@ -309,6 +345,14 @@ onBeforeUnmount(() => {
 .sb-opt.active {
   background: var(--blue-dim);
   color: var(--blue);
+}
+.sb-opt.highlighted {
+  background: var(--blue-dim);
+}
+.sb-opt.highlighted:not(.active) {
+  color: var(--text);
+  outline: 1px solid rgba(79, 140, 255, 0.5);
+  outline-offset: -1px;
 }
 .sb-empty {
   padding: 8px;

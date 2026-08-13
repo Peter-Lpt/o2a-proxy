@@ -7,17 +7,18 @@
         <SelectBox v-model="selValue" :options="floatOptions" size="sm" placeholder="全部" />
       </div>
       <span class="sub">{{ statusText }}</span>
+      <button class="x" title="打开主面板" data-tauri-drag-region="false" @click="openPanel"><Icon name="panel" :size="12" /></button>
       <button class="x" title="关闭悬浮看板" data-tauri-drag-region="false" @click="closeFloat"><Icon name="x" :size="12" /></button>
     </div>
 
     <div class="stats">
-      <div class="num">
+      <div class="num" :title="numReqTitle">
         <b>{{ fmtNum(min1.requests) }}</b><span>近5min 请求</span>
       </div>
-      <div class="num">
+      <div class="num" :title="numTokTitle">
         <b>{{ fmtNum(min1.tokens) }}</b><span>近5min Token</span>
       </div>
-      <div class="num">
+      <div class="num" :title="numHitTitle">
         <b :class="hitCls">{{ now1min.length ? fmtPct(min1.hitRate) : "—" }}</b><span>近5min 命中</span>
       </div>
     </div>
@@ -47,17 +48,19 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { api, fmtNum, fmtPct } from "./api";
+import { hitTier } from "./format";
 import Icon from "./components/Icon.vue";
 import SelectBox from "./components/SelectBox.vue";
 import Spark from "./components/Spark.vue";
-import { applyTheme, getTheme } from "./theme";
+import { applyTheme, getTheme, watchSystemTheme, type Theme } from "./theme";
 
 const status = ref<any>({ services: [] });
 const records = ref<any[]>([]);
-const theme = ref<"dark" | "light">(getTheme());
+const theme = ref<Theme>(getTheme());
 let timers: any[] = [];
+let resizeTimer: any = null;
 
 // 初始服务从 URL 解析（#/float?service=xxx；共享窗口初始为全部）；
 // 由 Rust 发 float-switch 事件在共享窗口内切换服务。
@@ -188,7 +191,30 @@ const min1 = computed(() => {
   };
 });
 
-const hitCls = computed(() => (min1.value.hitRate >= 0.3 ? "good" : min1.value.hitRate > 0 ? "mid" : ""));
+// 数字 hover 明细（近 5 分钟窗口分解）
+const numBreakdown = computed(() => {
+  const list = now1min.value;
+  let input = 0, read = 0, write = 0, output = 0;
+  list.forEach((r: any) => {
+    input += Number(r.input_tokens || 0);
+    read += Number(r.cache_read_tokens || 0);
+    write += Number(r.cache_write_tokens || 0);
+    output += Number(r.output_tokens || 0);
+  });
+  return { input, read, write, output };
+});
+const numReqTitle = computed(() => `近5min 请求：${min1.value.requests} 次`);
+const numTokTitle = computed(
+  () =>
+    `近5min Token（${numBreakdown.value.output} 输出）\n输入 ${numBreakdown.value.input} · 缓存读 ${numBreakdown.value.read} · 缓存写 ${numBreakdown.value.write}`
+);
+const numHitTitle = computed(() =>
+  now1min.value.length
+    ? `近5min 命中率：${fmtPct(min1.value.hitRate)}（缓存读 ${numBreakdown.value.read} / 输入+读 ${numBreakdown.value.read + numBreakdown.value.input}）`
+    : "近5min 暂无请求"
+);
+
+const hitCls = computed(() => hitTier(min1.value.hitRate, false));
 
 // getLive 返回最新在前；取最近 40 条并反转为时间正序（旧→新，最新在右）
 const pending = computed(() => (records.value || []).slice(0, 40).reverse());
@@ -216,7 +242,7 @@ const liveFeed = computed(() =>
         cacheRead: Number(r.cache_read_tokens || 0),
         output: Number(r.output_tokens || 0),
         hitPct: (rate * 100).toFixed(0),
-        hitCls: rate >= 0.6 ? "good" : rate > 0.15 ? "mid" : "bad",
+        hitCls: hitTier(rate, true),
       };
     })
 );
@@ -238,6 +264,11 @@ async function closeFloat() {
   } catch (_) {}
 }
 
+// 打开主面板（隐藏时唤出）
+function openPanel() {
+  api.togglePanel().catch(() => {});
+}
+
 function onStorage() {
   theme.value = applyTheme();
 }
@@ -246,10 +277,45 @@ function onVisibility() {
   onFloatVisible(!document.hidden);
 }
 
+// 记忆悬浮窗尺寸：用户缩放后写入 localStorage，下次启动恢复
+function onWinResize() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(
+        "o2a-float-size",
+        JSON.stringify({ w: window.innerWidth, h: window.innerHeight })
+      );
+    } catch (_) {}
+  }, 400);
+}
+function restoreFloatSize() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("o2a-float-size") || "null");
+    if (saved && saved.w > 0 && saved.h > 0) {
+      api.setFloatSize(Number(saved.w), Number(saved.h)).catch(() => {});
+    }
+  } catch (_) {}
+}
+
 onMounted(() => {
   theme.value = applyTheme();
   window.addEventListener("storage", onStorage);
   document.addEventListener("visibilitychange", onVisibility);
+  window.addEventListener("resize", onWinResize);
+  restoreFloatSize();
+  // 主题跨窗口同步：面板/悬浮窗任一侧切换，另一侧立即跟随
+  listen<string>("o2a-theme", (e) => {
+    const t = e.payload as Theme;
+    if (t !== theme.value) {
+      theme.value = t;
+      applyTheme(t);
+    }
+  }).catch(() => {});
+  watchSystemTheme(() => {
+    theme.value = applyTheme();
+    emit("o2a-theme", theme.value).catch(() => {});
+  });
   listen<any>("float-visible", (e) => {
     const p = e.payload || {};
     if (p.label === floatLabel) onFloatVisible(!!p.visible);
@@ -274,6 +340,8 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener("storage", onStorage);
   document.removeEventListener("visibilitychange", onVisibility);
+  window.removeEventListener("resize", onWinResize);
+  clearTimeout(resizeTimer);
   unlistenFloat?.();
   unlistenSwitch?.();
   timers.forEach(clearInterval);

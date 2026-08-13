@@ -4,6 +4,10 @@
       <button class="cal-nav" title="上一月" @click="shiftMonth(-1)">◀</button>
       <span class="cal-title">{{ view.year }}年{{ view.month + 1 }}月</span>
       <button class="cal-nav" title="下一月" @click="shiftMonth(1)">▶</button>
+      <div class="cal-dim" role="group" aria-label="热力维度">
+        <button class="cal-dim-btn" :class="{ active: dim === 'requests' }" @click="dim = 'requests'">请求</button>
+        <button class="cal-dim-btn" :class="{ active: dim === 'cost' }" @click="dim = 'cost'">费用</button>
+      </div>
       <span class="cal-legend"><i class="lg" style="opacity:0.15"></i><i class="lg" style="opacity:0.4"></i><i class="lg" style="opacity:0.65"></i><i class="lg" style="opacity:1"></i><span>少→多</span></span>
     </div>
     <div class="cal-body">
@@ -24,7 +28,7 @@
               class="cal-cell"
               :class="cellCls(cell)"
               :style="cell.style"
-              :title="cell.date + (cell.requests > 0 ? ' · ' + cell.requests + ' 次' : ' · 无请求')"
+              :title="cell.title"
               :disabled="cell.disabled"
               @click="pick(cell.date)"
             ></button>
@@ -48,9 +52,10 @@ const emit = defineEmits<{
 const BLUE = [79, 140, 255]; // --blue
 const DOWS = ["一", "二", "三", "四", "五", "六", "日"];
 
-const daily = ref<Record<string, number>>({});
+const daily = ref<Record<string, { requests: number; cost: number }>>({});
 const start = ref<string | null>(null); // 区间起点
 const end = ref<string | null>(null); // 区间终点
+const dim = ref<"requests" | "cost">("requests"); // 热力维度
 const view = ref<{ year: number; month: number }>({
   year: new Date().getFullYear(),
   month: new Date().getMonth(),
@@ -59,8 +64,10 @@ const view = ref<{ year: number; month: number }>({
 interface Cell {
   date: string;
   requests: number;
+  cost: number;
   disabled: boolean;
   style: string;
+  title: string;
 }
 const cells = ref<(Cell | null)[]>([]);
 const weeks = DOWS;
@@ -73,7 +80,7 @@ function startOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-// 当月月历格子（周一开头，不足 7 的倍数用空位补齐），热力色按请求量分档
+// 当月月历格子（周一开头，不足 7 的倍数用空位补齐），热力色按当前维度分档
 function buildCells() {
   const { year, month } = view.value;
   const first = new Date(year, month, 1);
@@ -81,7 +88,9 @@ function buildCells() {
   const lead = (first.getDay() + 6) % 7; // 周一=0 的偏移
   const total = Math.ceil((lead + daysInMonth) / 7) * 7;
   const today = startOfDay(new Date());
-  const max = Math.max(1, ...Object.values(daily.value));
+  const vals = Object.values(daily.value);
+  const maxReq = Math.max(1, ...vals.map((v) => v.requests));
+  const maxCost = Math.max(1e-6, ...vals.map((v) => v.cost));
   const arr: (Cell | null)[] = [];
   for (let i = 0; i < total; i++) {
     if (i < lead) {
@@ -92,21 +101,31 @@ function buildCells() {
     const d = new Date(year, month, day);
     const date = toISO(d);
     const disabled = d.getTime() > today.getTime();
-    const requests = daily.value[date] || 0;
+    const info = daily.value[date] || { requests: 0, cost: 0 };
+    const reqTitle = info.requests > 0 ? ` · ${info.requests} 次` : " · 无请求";
+    const costTitle = info.cost > 0 ? ` · ¥${info.cost.toFixed(4)}` : "";
     arr.push({
       date,
-      requests,
+      requests: info.requests,
+      cost: info.cost,
       disabled,
-      style: disabled ? "" : heatStyle(requests, max),
+      style: disabled ? "" : heatStyle(info, maxReq, maxCost),
+      title: `${date}${reqTitle}${costTitle}`,
     });
   }
   cells.value = arr;
 }
 
-// 热力色：0 → 弱底；>0 按相对最大值分档深浅
-function heatStyle(requests: number, max: number): string {
-  if (requests <= 0) return `background: rgba(${BLUE[0]},${BLUE[1]},${BLUE[2]},0.07)`;
-  const t = max > 0 ? requests / max : 0;
+// 热力色：0 → 弱底；>0 按相对最大值分档深浅（请求数 / 费用两套归一化）
+function heatStyle(
+  info: { requests: number; cost: number },
+  maxReq: number,
+  maxCost: number
+): string {
+  const v = dim.value === "cost" ? info.cost : info.requests;
+  const max = dim.value === "cost" ? maxCost : maxReq;
+  if (v <= 0) return `background: rgba(${BLUE[0]},${BLUE[1]},${BLUE[2]},0.07)`;
+  const t = max > 0 ? v / max : 0;
   const a = 0.2 + t * 0.8;
   return `background: rgba(${BLUE[0]},${BLUE[1]},${BLUE[2]},${a.toFixed(2)})`;
 }
@@ -166,9 +185,12 @@ async function load() {
     const first = toISO(new Date(year, month, 1));
     const last = toISO(new Date(year, month + 1, 0));
     const d = await api.getDaily(props.service, first, last);
-    const map: Record<string, number> = {};
+    const map: Record<string, { requests: number; cost: number }> = {};
     (d?.daily || []).forEach((x: any) => {
-      map[x.date] = Number(x.requests || 0);
+      map[x.date] = {
+        requests: Number(x.requests || 0),
+        cost: Number(x.cost || 0),
+      };
     });
     daily.value = map;
     buildCells();
@@ -176,6 +198,9 @@ async function load() {
     daily.value = {};
   }
 }
+
+// 维度切换：重算热力色（数据已加载，无需重新请求）
+watch(dim, () => buildCells());
 
 onMounted(() => {
   load();
@@ -231,6 +256,31 @@ watch(
   min-width: 62px;
   text-align: center;
 }
+.cal-dim {
+  display: inline-flex;
+  margin-left: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.cal-dim-btn {
+  padding: 2px 7px;
+  font-size: 9.5px;
+  color: var(--muted);
+  background: transparent;
+  transition: all 0.15s;
+}
+.cal-dim-btn + .cal-dim-btn {
+  border-left: 1px solid var(--border-soft);
+}
+.cal-dim-btn:hover {
+  color: var(--text);
+}
+.cal-dim-btn.active {
+  background: var(--blue-dim);
+  color: var(--blue);
+  font-weight: 600;
+}
 .cal-legend {
   display: inline-flex;
   align-items: center;
@@ -283,27 +333,27 @@ watch(
 }
 .cal-dow {
   display: grid;
-  grid-template-columns: repeat(7, 14px);
+  grid-template-columns: repeat(7, 16px);
   gap: 2px;
   margin-bottom: 2px;
 }
 .cal-dow span {
-  height: 11px;
-  line-height: 11px;
+  height: 12px;
+  line-height: 12px;
   font-size: 8.5px;
   color: var(--muted-2);
   text-align: center;
 }
 .cal-grid {
   display: grid;
-  grid-template-columns: repeat(7, 14px);
+  grid-template-columns: repeat(7, 16px);
   gap: 2px;
 }
 .cal-cell {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border: none;
-  border-radius: 2px;
+  border-radius: 2.5px;
   padding: 0;
   cursor: pointer;
   transition: filter 0.1s;

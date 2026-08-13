@@ -10,7 +10,7 @@ Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发�
 - **多服务配置**：`config.json` 支持任意数量服务，每服务独立端口、独立启停
 - **多账号管理**：账号（API Key + OpenAI/Anthropic 端点）与服务分离，多服务可复用同一账号，账号级统计聚合
 - **费用与缓存统计**：JSONL 原始记录 + 小时聚合，命中率 / 覆盖率 / 费用估算
-- **桌面客户端**（`desktop/`）：托盘图标 + 右键菜单、悬浮看板、统计图表、配置管理、模型列表联想、深/浅主题，跨平台（Windows / macOS / Linux）
+- **桌面客户端**（`desktop/`）：托盘图标 + 右键菜单、悬浮看板、统计图表、配置管理、模型列表联想、深/浅/跟随系统主题、全局快捷键（Ctrl+Alt+O 面板 / Ctrl+Alt+F 悬浮窗），跨平台（Windows / macOS / Linux）
 - **显式协议声明**：服务配置 `api` 字段声明入口协议（chat / responses / anthropic），消除自动识别误判
 
 ## 架构

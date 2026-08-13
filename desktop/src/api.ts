@@ -1,4 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { fmtCost, fmtNum, fmtPct } from "./format";
+
+export { fmtCost, fmtNum, fmtPct };
 
 export const api = {
   resolveRoot: () => invoke<string>("resolve_root"),
@@ -23,24 +26,7 @@ export const api = {
   toggleFloatFor: (service: string) => invoke<boolean>("toggle_float_for", { service }),
   togglePanel: () => invoke<boolean>("toggle_panel"),
   hidePanel: () => invoke<void>("hide_panel"),
+  setFloatSize: (width: number, height: number) =>
+    invoke<void>("set_float_size", { width, height }),
   quitApp: () => invoke<void>("quit_app"),
 };
-
-export function fmtNum(n: number | undefined | null): string {
-  const v = Number(n || 0);
-  if (v >= 1_000_000) return (v / 1_000_000).toFixed(2) + "M";
-  if (v >= 10_000) return (v / 1_000).toFixed(1) + "K";
-  return String(Math.round(v));
-}
-
-export function fmtPct(r: number | undefined | null): string {
-  const v = Number(r || 0);
-  return (v * 100).toFixed(1) + "%";
-}
-
-export function fmtCost(c: number | undefined | null): string {
-  const v = Number(c || 0);
-  if (v >= 100) return v.toFixed(0);
-  if (v >= 1) return v.toFixed(2);
-  return v.toFixed(4);
-}

@@ -428,53 +428,73 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
 async fn start_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
     // start_service 内部 sleep(1.2s) 验证子进程存活，属阻塞操作，
     // spawn_blocking 挪到阻塞线程池，避免拖住主线程/异步运行时。
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let app2 = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
         proxy::start_service(&state, &name)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    res?;
+    update_tray_tooltip(&app);
+    Ok(())
 }
 
 #[tauri::command]
 async fn stop_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
     // child.wait() 等待子进程退出，同样放阻塞线程池
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let app2 = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
         proxy::stop_service(&state, &name)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    res?;
+    update_tray_tooltip(&app);
+    Ok(())
 }
 
 #[tauri::command]
 async fn toggle_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let app2 = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
         proxy::toggle_service(&state, &name)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    res?;
+    update_tray_tooltip(&app);
+    Ok(())
 }
 
 #[tauri::command]
 async fn start_all(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let app2 = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
         proxy::start_all(&state)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    res?;
+    update_tray_tooltip(&app);
+    Ok(())
 }
 
 #[tauri::command]
 async fn stop_all(app: tauri::AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let state = app.state::<AppState>();
+    let app2 = app.clone();
+    let res = tauri::async_runtime::spawn_blocking(move || {
+        let state = app2.state::<AppState>();
         proxy::stop_all(&state)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    res?;
+    update_tray_tooltip(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -863,6 +883,29 @@ fn toggle_float_for(app: tauri::AppHandle, service: String) -> Result<bool, Stri
     toggle_float_shared(&app, &service)
 }
 
+/// 恢复悬浮窗尺寸（用户上次缩放记忆，前端 localStorage 持久化）
+#[tauri::command]
+fn set_float_size(app: tauri::AppHandle, width: f64, height: f64) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("float") {
+        w.set_size(tauri::LogicalSize::new(
+            width.max(300.0),
+            height.max(170.0),
+        ))
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 托盘 tooltip 动态状态：桌面端托管的运行中服务数。
+/// children 仅含桌面端启动的子进程；外部启动的引擎进程不统计（仅作提示）。
+fn update_tray_tooltip(app: &tauri::AppHandle) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let state = app.state::<AppState>();
+        let running = state.children.lock().unwrap().len();
+        let _ = tray.set_tooltip(Some(format!("o2a-proxy · {} 个服务运行中", running)));
+    }
+}
+
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
@@ -907,6 +950,23 @@ fn panel_events(app: tauri::AppHandle) -> impl Fn(&WindowEvent) + Send + 'static
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 全局快捷键：Ctrl+Alt+O 唤出面板 / Ctrl+Alt+F 唤出悬浮窗
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state() != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    let ctrl_alt =
+                        tauri_plugin_global_shortcut::Modifiers::CONTROL | tauri_plugin_global_shortcut::Modifiers::ALT;
+                    if shortcut.matches(ctrl_alt, tauri_plugin_global_shortcut::Code::KeyO) {
+                        let _ = toggle_panel(app.clone());
+                    } else if shortcut.matches(ctrl_alt, tauri_plugin_global_shortcut::Code::KeyF) {
+                        let _ = toggle_float(app.clone());
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             resolve_root,
             resolve_python,
@@ -927,9 +987,18 @@ pub fn run() {
             hide_panel,
             toggle_float,
             toggle_float_for,
+            set_float_size,
             quit_app,
         ])
         .setup(|app| {
+            // 全局快捷键注册（注册失败不阻塞启动：个别平台/桌面环境可能占用）
+            {
+                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+                let gs = app.global_shortcut();
+                let ctrl_alt = Modifiers::CONTROL | Modifiers::ALT;
+                let _ = gs.register(Shortcut::new(Some(ctrl_alt), Code::KeyO));
+                let _ = gs.register(Shortcut::new(Some(ctrl_alt), Code::KeyF));
+            }
             // macOS：纯菜单栏应用（无 Dock 图标），与原 Electron 行为一致
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -1005,7 +1074,9 @@ pub fn run() {
             let panel = WebviewWindowBuilder::new(app, "panel", WebviewUrl::App("index.html".into()))
                 .title("o2a-proxy")
                 .inner_size(430.0, 740.0)
-                .resizable(false)
+                // 可缩放：大屏可拉高查看更多统计；紧凑布局由 CSS 媒体查询适配
+                .resizable(true)
+                .min_inner_size(430.0, 560.0)
                 .decorations(false)
                 .transparent(true)
                 .skip_taskbar(true)

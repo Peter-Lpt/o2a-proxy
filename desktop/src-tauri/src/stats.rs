@@ -759,11 +759,14 @@ pub fn get_daily(
     for d in date_range(s, e) {
         let ds = d.format("%Y-%m-%d").to_string();
         let recs = read_records(dir, &ds, &pricing, &aliases);
-        let req = recs
-            .iter()
-            .filter(|r| matches_service(r, service, primary))
-            .count();
-        out.push(json!({"date": ds, "requests": req}));
+        let mut req = 0usize;
+        let mut cost = 0.0f64;
+        for r in recs.iter().filter(|r| matches_service(r, service, primary)) {
+            req += 1;
+            cost += r["cost"].as_f64().unwrap_or(0.0);
+        }
+        // cost 四舍五入到 4 位小数，与其余统计口径一致
+        out.push(json!({"date": ds, "requests": req, "cost": (cost * 10000.0).round() / 10000.0}));
     }
     let v = json!({"daily": out});
     *DAILY_CACHE.lock().unwrap() = Some((key, Instant::now(), v.clone()));
