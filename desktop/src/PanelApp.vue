@@ -221,6 +221,9 @@
                 <label v-if="activeSvc.api === 'openai-responses'" class="upstream-api-label">上游协议 upstream_api <span class="fc-sub" style="font-weight:400">（上游原生支持 Responses 时选透传）</span>
                   <SelectBox v-model="activeSvc.upstream_api" :options="upstreamApiOptions" :disabled="activeSvcRunning" />
                 </label>
+                <label>思考透传 thinking_mode <span class="fc-sub" style="font-weight:400">（Anthropic thinking / Responses reasoning → 上游）</span>
+                  <SelectBox v-model="activeSvc.thinking_mode" :options="thinkingOptions" placeholder="auto（默认）" :disabled="activeSvcRunning" />
+                </label>
                 <div class="proto-row"><span class="proto-lbl">入口协议</span><span class="proto-val">{{ entryProto }}</span></div>
                 <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
                 <label class="inline"><input v-model="activeSvc.override_model" type="checkbox" :disabled="activeSvcRunning" /><span>覆盖客户端模型 override_model <span class="fc-sub" style="font-weight:400">（关：透传客户端请求的模型名）</span></span></label>
@@ -434,6 +437,13 @@ const apiOptions = [
 const upstreamApiOptions = [
   { value: "openai-completions", label: "openai-completions（上游只支持 Chat → 自动转换）" },
   { value: "openai-responses", label: "openai-responses（上游原生支持 Responses，如 DeepSeek → 整包透传）" },
+];
+const thinkingOptions = [
+  { value: "auto", label: "auto（按上游自动推断）" },
+  { value: "passthrough", label: "passthrough（thinking 对象原样透传，DeepSeek / Kimi 类）" },
+  { value: "effort", label: "effort（reasoning_effort 档位，OpenAI 标准）" },
+  { value: "enable_thinking", label: "enable_thinking（布尔开关，DashScope / Qwen 类）" },
+  { value: "none", label: "none（不透传）" },
 ];
 const editingAcc = ref<string | null>(null);
 const accHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
@@ -1030,6 +1040,7 @@ function normalizeConfig() {
     s.context_1m = !!s.context_1m;
     if (!s.api) delete s.api;
     if (!s.upstream_api || s.upstream_api === "openai-completions") delete s.upstream_api;
+    if (!s.thinking_mode || s.thinking_mode === "auto") delete s.thinking_mode;
     delete s.openai_base_url;
     delete s.openai_api_key;
     delete s.anthropic_base_url;

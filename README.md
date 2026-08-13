@@ -155,8 +155,33 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `services[].listen_address` | 监听端口，每服务独立 |
 | `services[].context_1m` | 1M 上下文模式（影响默认 `max_tokens`） |
 | `services[].max_tokens` | 最大输出 token（缺省 4096） |
+| `services[].thinking_mode` | **思考深度透传模式**（默认 `auto`）：`auto`（按上游 URL/模型自动推断）/ `passthrough`（Anthropic 风格 `thinking` 对象原样透传，DeepSeek V3.2 / Kimi K2 / 兼容网关）/ `effort`（`budget_tokens` → `reasoning_effort` 档位，OpenAI 标准）/ `enable_thinking`（布尔开关，DashScope/Qwen 兼容模式）/ `none`（不透传）。见下文「思考深度透传」 |
 
 > **兼容**：旧格式（`services[].openai_base_url` / `openai_api_key` 内嵌，`mode` 字段）读取时自动迁移为账号结构，无需手动改配置。
+
+### 思考深度透传（thinking_mode）
+
+客户端请求里的"思考深度"参数按入口协议有两种形态：Anthropic 的 `thinking: {type, budget_tokens}`（token 预算）与 OpenAI 的 `reasoning: {effort}` / `reasoning_effort`（low/medium/high 档位）。两者不同构（预算 vs 档位），代理按服务级 `thinking_mode` 映射到上游：
+
+| thinking_mode | 上游收到的参数 | 适用上游 |
+|---|---|---|
+| `auto`（默认） | 按上游 URL/模型名推断：dashscope/qwen → `enable_thinking`；deepseek/kimi/moonshot → `thinking` 原样（含 `budget_tokens`）；其他 OpenAI 兼容网关 → `reasoning_effort` | 无需配置，覆盖主流 |
+| `passthrough` | `thinking: {type, budget_tokens}` 原样透传 | DeepSeek V3.2 / Kimi K2 Thinking / 接受 Anthropic 风格 thinking 的中转网关 |
+| `effort` | `reasoning_effort`（`budget_tokens` ≥8192 → high，≥2048 → medium，其余 → low；enabled 无预算时 medium 兜底） | OpenAI 标准档位的端点 |
+| `enable_thinking` | `enable_thinking: true/false` | DashScope / Qwen 兼容模式 |
+| `none` | 不透传（模型默认行为） | — |
+
+各入口 × 上游组合的处理方式：
+
+| 入口 | 上游 | 思考深度处理 |
+|---|---|---|
+| `anthropic-messages` | OpenAI Chat | 按 thinking_mode 转换（上表） |
+| `anthropic-messages` | Anthropic（direct 透传） | **整包透传**，`thinking` 原样保留 |
+| `openai-responses` | OpenAI Chat | `reasoning: {effort}` / `reasoning_effort` → 按 thinking_mode 转换 |
+| `openai-responses` | Responses（整包透传） | **原样保留** |
+| `openai-completions` | OpenAI Chat | **整包透传**，`reasoning_effort` 等字段原样保留 |
+
+> 思考**内容**（上游 `reasoning_content` → Anthropic `thinking` 块 / Responses `reasoning` item）与推理 token 统计（`reasoning_tokens`）已在响应方向完整透传，不受 `thinking_mode` 影响。
 
 ### 入口协议（api 字段，推荐显式声明）
 

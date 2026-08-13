@@ -126,7 +126,7 @@ class Service:
     """
 
     def __init__(self, name, account, client, host, port, model, override_model=True,
-                 max_tokens=4096, proxy="", api="", upstream_api=""):
+                 max_tokens=4096, proxy="", api="", upstream_api="", thinking_mode="auto"):
         self.name = name
         self.account = account
         self.client = client
@@ -138,6 +138,7 @@ class Service:
         self.proxy = proxy or ""
         self.api = (api or "").strip()
         self.upstream_api = (upstream_api or "openai-completions").strip()
+        self.thinking_mode = (thinking_mode or "auto").strip() or "auto"
         self._mode_override = None  # auto 服务每次请求识别后临时指定
 
     @property
@@ -190,6 +191,13 @@ class Service:
 
 _OPENAI_API_VALUES = ("", "anthropic-messages", "openai-completions", "openai-responses")
 _UPSTREAM_API_VALUES = ("openai-completions", "openai-responses")
+# 思考深度透传模式（服务级 thinking_mode）：
+# - auto：按上游 URL/模型名推断（dashscope/qwen → enable_thinking；deepseek/kimi → thinking；其他 → effort）
+# - passthrough：Anthropic 风格 thinking 对象原样透传（DeepSeek V3.2 / Kimi K2 / 兼容网关）
+# - effort：映射为 OpenAI reasoning_effort 档位（budget_tokens → low/medium/high）
+# - enable_thinking：映射为布尔开关（DashScope/Qwen 兼容模式）
+# - none：不透传（保持默认模型行为）
+_THINKING_MODES = ("auto", "passthrough", "effort", "enable_thinking", "none")
 
 
 def _responses_url(chat_url):
@@ -313,6 +321,10 @@ def load_config():
                 if upstream_api not in _UPSTREAM_API_VALUES:
                     logger.warning(f"[config] 服务 {svc.get('comment')} 的 upstream_api '{upstream_api}' 非法，回退 openai-completions")
                     upstream_api = "openai-completions"
+                thinking_mode = svc.get("thinking_mode", "auto") or "auto"
+                if thinking_mode not in _THINKING_MODES:
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 thinking_mode '{thinking_mode}' 非法，回退 auto")
+                    thinking_mode = "auto"
                 client = svc.get("client") or mode_to_client.get(mode, "auto")
                 if client not in ("anthropic", "openai", "auto"):
                     client = "auto"
@@ -328,6 +340,7 @@ def load_config():
                     proxy=os.environ.get("HTTP_PROXY", ""),
                     api=api,
                     upstream_api=upstream_api,
+                    thinking_mode=thinking_mode,
                 ))
     if not services and API_KEY:
         # 回退：环境变量配置（单服务）
@@ -1185,6 +1198,8 @@ def _responses_to_chat(req, service):
                 "type": "function",
                 "function": {"name": tool_choice.get("name", "")},
             }
+    # 思考深度：Responses reasoning（effort 档位）→ 上游 Chat 参数
+    _apply_reasoning_to_chat(chat, req, service)
     return chat
 
 
@@ -1539,6 +1554,105 @@ def _tool_choice_any(openai_tools):
     return "required"
 
 
+# ---------------------------------------------------------------------------
+# 思考深度透传：Anthropic thinking / OpenAI Responses reasoning → 上游参数
+#
+# 入口 × 上游矩阵：
+#   anthropic-messages 入口 → OpenAI Chat 上游    : _apply_thinking_to_chat
+#   openai-responses 入口 → OpenAI Chat 上游      : _apply_reasoning_to_chat
+#   openai-completions 入口 → Chat 上游           : 整包透传（reasoning_effort 等原样保留）
+#   Responses 入口 → Responses 上游 / anthropic 入口 → Anthropic 上游（direct）：整包透传
+# 响应方向（上游思考内容 → 客户端）已有完整转换（thinking 块 / reasoning item），此处只处理请求方向。
+# ---------------------------------------------------------------------------
+
+def _budget_to_effort(budget):
+    """Anthropic budget_tokens（token 预算）→ OpenAI reasoning_effort 档位（近似映射）。
+
+    Anthropic 的深度是 token 预算，OpenAI 系是 low/medium/high 档位，两者不同构，
+    只能做阈值近似：≥8192 → high，≥2048 → medium，其余 → low。
+    """
+    try:
+        b = int(budget or 0)
+    except (TypeError, ValueError):
+        return None
+    if b <= 0:
+        return None
+    if b >= 8192:
+        return "high"
+    if b >= 2048:
+        return "medium"
+    return "low"
+
+
+def _infer_thinking_style(service):
+    """auto 模式下按上游 URL / 模型名推断思考参数风格。
+
+    - dashscope / qwen        → enable_thinking（布尔开关）
+    - deepseek / kimi / moonshot → thinking（Anthropic 风格对象，可带 budget_tokens）
+    - 其他 OpenAI 兼容网关    → reasoning_effort（OpenAI 标准档位）
+    """
+    url = (service.account.openai_url or "").lower()
+    model = (service.model or "").lower()
+    if "dashscope" in url or "qwen" in url or "qwen" in model:
+        return "enable_thinking"
+    if "deepseek" in url or "moonshot" in url or "kimi" in url or "kimi" in model:
+        return "passthrough"
+    return "effort"
+
+
+def _apply_thinking_to_chat(chat, thinking, service):
+    """Anthropic Messages thinking 配置 → OpenAI Chat 请求参数（按服务 thinking_mode）。"""
+    if service.thinking_mode == "none" or not thinking or not isinstance(thinking, dict):
+        return
+    mode = service.thinking_mode
+    if mode == "auto":
+        mode = _infer_thinking_style(service)
+    enabled = thinking.get("type") != "disabled"
+    if mode == "passthrough":
+        # 上游原生支持 Anthropic 风格 thinking（DeepSeek V3.2 / Kimi K2 / 兼容网关）：
+        # 原样保留 type 与 budget_tokens（Kimi 支持 budget 控制深度）
+        out = {"type": thinking.get("type", "enabled")}
+        if enabled and thinking.get("budget_tokens"):
+            out["budget_tokens"] = thinking["budget_tokens"]
+        chat["thinking"] = out
+    elif mode == "enable_thinking":
+        # DashScope / Qwen 兼容模式：布尔开关
+        chat["enable_thinking"] = enabled
+    elif mode == "effort":
+        # OpenAI 标准档位：budget → low/medium/high；enabled 无预算时用 medium 兜底
+        effort = _budget_to_effort(thinking.get("budget_tokens")) if enabled else None
+        if enabled and not effort:
+            effort = "medium"
+        if effort:
+            chat["reasoning_effort"] = effort
+        # disabled 时 OpenAI 系无关闭语义，忽略（由模型默认决定）
+
+
+def _apply_reasoning_to_chat(chat, req, service):
+    """OpenAI Responses reasoning（effort 档位）→ OpenAI Chat 请求参数（按服务 thinking_mode）。
+
+    兼容两种入参：Responses 的 reasoning: {effort} 对象，或顶层 reasoning_effort 标量。
+    """
+    if service.thinking_mode == "none":
+        return
+    reasoning = req.get("reasoning") or {}
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if not effort:
+        effort = req.get("reasoning_effort")
+    if not effort:
+        return
+    mode = service.thinking_mode
+    if mode == "auto":
+        mode = _infer_thinking_style(service)
+    if mode == "effort":
+        chat["reasoning_effort"] = effort
+    elif mode == "passthrough":
+        # Responses 无 token 预算概念，effort 存在即开启思考（深度由上游默认）
+        chat["thinking"] = {"type": "enabled"}
+    elif mode == "enable_thinking":
+        chat["enable_thinking"] = True
+
+
 def convert_request(req, service):
     """将 Anthropic Messages 格式转为 OpenAI chat completions 格式。"""
     raw_messages = list(req.get("messages", []))
@@ -1653,11 +1767,10 @@ def convert_request(req, service):
     if "top_p" in req:
         openai_req["top_p"] = req["top_p"]
 
-    # 处理 thinking 参数（Claude Code 的扩展思考功能）
-    # 上游 API 如果支持 reasoning 模式，会通过模型本身启用，这里仅记录日志
+    # 处理 thinking 参数（Claude Code 的扩展思考功能）：
+    # 按服务 thinking_mode 映射到上游（auto 推断 / passthrough 原样 / effort 档位 / enable_thinking 布尔）
     if "thinking" in req:
-        thinking_config = req["thinking"]
-        logger.debug(f"[THINKING] Received thinking config: {thinking_config}")
+        _apply_thinking_to_chat(openai_req, req["thinking"], service)
 
     # 转换 tools: Anthropic -> OpenAI
     tools = req.get("tools", [])

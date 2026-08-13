@@ -38,6 +38,14 @@
       "listen_address": "11013"
     },
     {
+      "comment": "Claude Code 转换（Anthropic 入口 → OpenAI 上游，思考深度映射为 reasoning_effort）",
+      "account": "acc-1",
+      "api": "anthropic-messages",
+      "model": "qwen3-max",
+      "listen_address": "11014",
+      "thinking_mode": "effort"
+    },
+    {
       "comment": "Claude Code 直连（Anthropic 透传）",
       "account": "acc-2",
       "api": "anthropic-messages",
