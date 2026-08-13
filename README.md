@@ -204,6 +204,8 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `anthropic-messages` | Anthropic Messages | 账号有 anthropic 端点 → 透传（direct）；只有 openai 端点 → 转换发送（claude） |
 | 未声明 | — | 回退旧 `client` 字段；无 client 时按请求自动识别（兼容旧配置） |
 
+> **developer 角色规范化**：Chat/Responses 整包透传前，会把 OpenAI 特有的 `developer` 角色统一降级为 `system`（chat 的 `messages` 与 responses 的 `input` 消息项都会处理）。多数非 OpenAI 上游（DeepSeek / Kimi / Qwen 等）的角色枚举不含 `developer`（DeepSeek 只认 `system / user / assistant / tool` 等），不降级会直接 400（典型报错：`unknown variant developer`）。`system` 是所有上游都接受的通用角色，语义与 OpenAI 换名前的发送方式一致，且不影响 `reasoning_effort` / `thinking` 等字段；未含 developer 角色时请求体保持字节级原样透传。
+
 > **模型列表拿不到协议**：`/models` 接口只返回模型 id，不含协议类型（同一中转账号下三种协议的模型可能并存），所以协议必须在配置中显式声明——这正是 pi 中 `provider.api` 的做法。桌面客户端「服务配置」里也已提供 `api` 下拉。
 
 ### Codex 接入（Responses 协议）

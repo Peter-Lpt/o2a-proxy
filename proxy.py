@@ -1050,6 +1050,26 @@ def _strip_cache_control(obj):
     return obj
 
 
+def normalize_roles(payload):
+    """将 OpenAI 特有的 developer 角色规范化为 system（chat messages 与 responses input 均处理）。
+
+    多数非 OpenAI 上游（DeepSeek / Kimi / Qwen 等）的角色枚举不含 developer（DeepSeek
+    只认 system / user / assistant / tool 等），透传前统一降级为 system——与
+    _responses_to_chat 已有的规范化一致；system 是所有上游都接受的通用角色，且不影响
+    reasoning_effort / thinking 等其它字段。返回是否发生修改（未修改时透传保持字节一致）。
+    """
+    changed = False
+    for key in ("messages", "input"):
+        items = payload.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == "developer":
+                item["role"] = "system"
+                changed = True
+    return changed
+
+
 def _responses_content_to_text(content):
     """将 Responses API 消息 content parts 提取为纯文本。"""
     if isinstance(content, str):

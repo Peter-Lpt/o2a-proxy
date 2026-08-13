@@ -39,6 +39,7 @@ from proxy import (
     is_cache_stats_enabled,
     load_config,
     logger,
+    normalize_roles,
     resolve_mode,
     sse_event,
 )
@@ -1286,11 +1287,17 @@ async def handle_request(request: web.Request):
                     f"elapsed={time.time()-req_start:.3f}s")
         # api=openai-completions：Chat 整包透传（直连上游，零转换）
         if service.api == "openai-completions":
+            # developer 角色降级为 system（DeepSeek 等上游不接受 developer）
+            if normalize_roles(payload):
+                body = json.dumps(payload).encode("utf-8")
             return await handle_passthrough(request, service, body, stream, req_start)
         # api=openai-responses + upstream=responses：Responses 整包透传（如 DeepSeek 官方）
         if (service.api == "openai-responses"
                 and service.upstream_api == "openai-responses"):
             target = _responses_url(service.account.openai_url)
+            # input 中 developer 角色消息项同样降级为 system
+            if normalize_roles(payload):
+                body = json.dumps(payload).encode("utf-8")
             return await handle_passthrough(request, service, body, stream, req_start,
                                             target=target, responses_usage=True)
         chat = _responses_to_chat(payload, service)

@@ -227,6 +227,30 @@ async def test_chat_passthrough(harness):
     assert upstream_bodies and upstream_bodies[0] == sent, "chat 请求体被重建"
 
 
+async def test_chat_passthrough_developer_role(harness):
+    """api=openai-completions：developer 角色在透传前规范化为 system（DeepSeek 等上游不接受 developer）。"""
+    mock_behavior["chat"] = "default"
+    del upstream_bodies[:]
+    payload = {"model": "deepseek-v4-flash",
+               "messages": [
+                   {"role": "developer", "content": "你是系统提示词"},
+                   {"role": "user", "content": "你好"},
+               ],
+               "stream": True, "max_tokens": 4096}
+    async with harness.session.post(f"http://127.0.0.1:{harness.ports['chat']}/chat/completions",
+                                    json=payload) as resp:
+        body = await resp.text()
+        assert resp.status == 200, f"HTTP {resp.status}"
+        assert '"delta"' in body, "应收到 chat 流式响应"
+    assert upstream_bodies
+    up = json.loads(upstream_bodies[-1])
+    assert up["messages"][0]["role"] == "system", "developer 应被规范化为 system"
+    assert up["messages"][0]["content"] == "你是系统提示词"
+    assert up["messages"][1]["role"] == "user"
+    # 其余字段保持透传
+    assert up["stream"] is True and up["max_tokens"] == 4096 and up["model"] == "deepseek-v4-flash"
+
+
 async def test_responses_passthrough(harness):
     """api=openai-responses + upstream=responses：Responses 整包透传（字节一致）。"""
     del upstream_bodies[:]
@@ -241,6 +265,58 @@ async def test_responses_passthrough(harness):
         assert resp.status == 200, f"HTTP {resp.status}"
         assert "response.output_text.delta" in body, "应透传 Responses 事件"
     assert upstream_bodies and upstream_bodies[0] == sent, "responses 请求体被重建"
+
+
+async def test_responses_passthrough_developer_role(harness):
+    """api=openai-responses + upstream=responses：input 中 developer 消息项规范化为 system。"""
+    del upstream_bodies[:]
+    payload = {"model": "deepseek-v4-flash",
+               "input": [
+                   {"type": "message", "role": "developer",
+                    "content": [{"type": "input_text", "text": "你是系统提示词"}]},
+                   {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}]},
+               ],
+               "stream": True, "max_output_tokens": 4096}
+    async with harness.session.post(
+            f"http://127.0.0.1:{harness.ports['responses_passthrough']}/v1/responses",
+            json=payload) as resp:
+        body = await resp.text()
+        assert resp.status == 200, f"HTTP {resp.status}"
+        assert "response.output_text.delta" in body, "应透传 Responses 事件"
+    assert upstream_bodies
+    up = json.loads(upstream_bodies[-1])
+    assert up["input"][0]["role"] == "system", "responses input 的 developer 应被规范化为 system"
+    assert up["input"][1]["role"] == "user"
+    assert up["input"][0]["type"] == "message" and up["input"][0]["content"][0]["type"] == "input_text"
+
+
+def test_normalize_roles_unit():
+    """normalize_roles 纯函数边界：input 为字符串 / 非列表 / 无 developer 时零修改。"""
+    from proxy import normalize_roles
+
+    # chat messages：developer 降级，其余不动
+    payload = {"model": "m", "messages": [
+        {"role": "developer", "content": "a"},
+        {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "c"},
+    ]}
+    assert normalize_roles(payload) is True
+    assert payload["messages"][0]["role"] == "system"
+
+    # responses input 字符串形态：不改
+    p2 = {"model": "m", "input": "hello"}
+    assert normalize_roles(p2) is False
+    assert p2["input"] == "hello"
+
+    # 无 developer：零修改（透传保持字节一致）
+    p3 = {"model": "m", "messages": [{"role": "user", "content": "x"}]}
+    assert normalize_roles(p3) is False
+
+    # input 非列表（None / dict）
+    p4 = {"model": "m", "input": None}
+    assert normalize_roles(p4) is False
+
 
 
 async def test_responses_convert(harness):
