@@ -24,5 +24,10 @@ proxy_*.log
 mac/node_modules/
 mac/dist/
 
-# Agent subagent artifacts
+# pi subagent artifacts
 .pi-subagents/
+
+# pi 项目级 workflow 配置（本地保留，不入库）
+.pi/
+workflows/
+WORKFLOWS.md
