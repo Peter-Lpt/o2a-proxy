@@ -6,7 +6,7 @@
       <button class="cal-nav" title="下一月" @click="shiftMonth(1)">▶</button>
       <div class="cal-dim" role="group" aria-label="热力维度">
         <button class="cal-dim-btn" :class="{ active: dim === 'requests' }" @click="dim = 'requests'">请求</button>
-        <button class="cal-dim-btn" :class="{ active: dim === 'cost' }" @click="dim = 'cost'">费用</button>
+        <button v-if="showCost" class="cal-dim-btn" :class="{ active: dim === 'cost' }" @click="dim = 'cost'">费用</button>
       </div>
       <span class="cal-legend"><i class="lg" style="opacity:0.15"></i><i class="lg" style="opacity:0.4"></i><i class="lg" style="opacity:0.65"></i><i class="lg" style="opacity:1"></i><span>少→多</span></span>
     </div>
@@ -43,7 +43,7 @@
 import { onMounted, ref, watch } from "vue";
 import { api } from "../api";
 
-const props = defineProps<{ service: string }>();
+const props = defineProps<{ service: string; showCost?: boolean }>();
 const emit = defineEmits<{
   select: [start: string, end: string];
   quick: [key: string];
@@ -56,6 +56,13 @@ const daily = ref<Record<string, { requests: number; cost: number }>>({});
 const start = ref<string | null>(null); // 区间起点
 const end = ref<string | null>(null); // 区间终点
 const dim = ref<"requests" | "cost">("requests"); // 热力维度
+// 订阅制服务（无价格）时强制回到请求数维度
+watch(
+  () => props.showCost,
+  (v) => {
+    if (v === false) dim.value = "requests";
+  }
+);
 const view = ref<{ year: number; month: number }>({
   year: new Date().getFullYear(),
   month: new Date().getMonth(),
@@ -103,7 +110,7 @@ function buildCells() {
     const disabled = d.getTime() > today.getTime();
     const info = daily.value[date] || { requests: 0, cost: 0 };
     const reqTitle = info.requests > 0 ? ` · ${info.requests} 次` : " · 无请求";
-    const costTitle = info.cost > 0 ? ` · ¥${info.cost.toFixed(4)}` : "";
+    const costTitle = props.showCost !== false && info.cost > 0 ? ` · ¥${info.cost.toFixed(4)}` : "";
     arr.push({
       date,
       requests: info.requests,

@@ -90,6 +90,7 @@ fn load_account_aliases(stats_dir: &Path) -> BTreeMap<String, String> {
 /// 参考 proxy.py CacheStats._calc_cost：按当前 pricing.json 重算单次请求费用。
 /// 历史记录写入时可能缺少 cost 或定价表后补，读取时统一重算，保证口径一致。
 /// 账号级定价（pricing.json["accounts"]，键可为账号 id 或 name）优先，全局兜底。
+/// no_cost（订阅制，如 opencode token/code plan）时直接返回 0，不按 token 计价。
 fn recalc_cost(
     model: &str,
     input: i64,
@@ -99,7 +100,11 @@ fn recalc_cost(
     pricing: &Value,
     account: &str,
     aliases: &BTreeMap<String, String>,
+    no_cost: bool,
 ) -> f64 {
+    if no_cost {
+        return 0.0;
+    }
     let Some(pricing_obj) = pricing.as_object() else {
         return 0.0;
     };
@@ -166,12 +171,53 @@ fn recalc_cost(
     input_cost + output_cost + cache_read_cost + cache_write_cost
 }
 
+/// 读取 config.json 的服务列表，返回（服务总数, 订阅制 pricing=none 服务名集合）。
+/// 用于：1) 统计读取时对订阅制服务重算 cost 为 0；2) 前端决定是否展示费用。
+fn load_services_pricing(stats_dir: &Path) -> (usize, BTreeSet<String>) {
+    let mut no_cost = BTreeSet::new();
+    let mut total = 0usize;
+    let p = stats_dir
+        .parent()
+        .map(|d| d.join("config.json"))
+        .unwrap_or_else(|| Path::new("config.json").to_path_buf());
+    if let Some(cfg) = read_json(&p) {
+        if let Some(services) = cfg.get("services").and_then(|s| s.as_array()) {
+            for svc in services {
+                total += 1;
+                let no_cost_svc = svc
+                    .get("pricing")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s == "none")
+                    .unwrap_or(false);
+                if no_cost_svc {
+                    if let Some(name) = svc.get("comment").and_then(|v| v.as_str()) {
+                        no_cost.insert(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+    (total, no_cost)
+}
+
+/// 当前所选服务集合是否展示费用：
+/// - 具体服务：非订阅制才展示；
+/// - 全部视图：无服务定义时默认展示，否则只要存在任一按量服务就展示。
+fn show_cost(total: usize, no_cost: &BTreeSet<String>, service: &str) -> bool {
+    if service.is_empty() {
+        total == 0 || total > no_cost.len()
+    } else {
+        !no_cost.contains(service)
+    }
+}
+
 /// 读取某天原始记录，并统一按当前定价重算 cost 字段。
 fn read_records(
     stats_dir: &Path,
     date_str: &str,
     pricing: &Value,
     aliases: &BTreeMap<String, String>,
+    no_cost_services: &BTreeSet<String>,
 ) -> Vec<Value> {
     let p = stats_dir.join(format!("{date_str}.jsonl"));
     let Ok(s) = std::fs::read_to_string(&p) else {
@@ -186,7 +232,13 @@ fn read_records(
             let write = rec["cache_write_tokens"].as_i64().unwrap_or(0);
             let output = rec["output_tokens"].as_i64().unwrap_or(0);
             let account = rec["account"].as_str().unwrap_or("").to_string();
-            rec["cost"] = json!(recalc_cost(&model, input, read, write, output, pricing, &account, aliases));
+            let no_cost = rec["service"]
+                .as_str()
+                .map(|s| no_cost_services.contains(s))
+                .unwrap_or(false);
+            rec["cost"] = json!(recalc_cost(
+                &model, input, read, write, output, pricing, &account, aliases, no_cost
+            ));
             rec
         })
         .collect()
@@ -385,6 +437,7 @@ fn get_stats_impl(
 ) -> Result<Value, String> {
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
+    let (svc_total, no_cost_services) = load_services_pricing(dir);
     let now = chrono::Local::now();
     let today = now.date_naive();
     let today_str = today.format("%Y-%m-%d").to_string();
@@ -426,7 +479,7 @@ fn get_stats_impl(
     let mut by_date: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for d in &need {
         let ds = d.format("%Y-%m-%d").to_string();
-        let recs = read_records(dir, &ds, &pricing, &aliases)
+        let recs = read_records(dir, &ds, &pricing, &aliases, &no_cost_services)
             .into_iter()
             .filter(|r| matches_service(r, service, primary))
             .collect();
@@ -528,6 +581,7 @@ fn get_stats_impl(
 
     Ok(json!({
         "updatedAt": now.to_rfc3339(),
+        "showCost": show_cost(svc_total, &no_cost_services, service),
         "current": current,
         "today": today_obj,
         "month": {
@@ -720,8 +774,9 @@ pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, Strin
 fn get_live_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
+    let (_svc_total, no_cost_services) = load_services_pricing(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let records: Vec<Value> = read_records(&dir, &today_str, &pricing, &aliases)
+    let records: Vec<Value> = read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services)
         .into_iter()
         .filter(|r| matches_service(r, service, &primary))
         .rev()
@@ -752,13 +807,14 @@ pub fn get_daily(
     }
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
+    let (_svc_total, no_cost_services) = load_services_pricing(dir);
     let s = NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap_or_else(|_| chrono::Local::now().date_naive());
     let e = NaiveDate::parse_from_str(end, "%Y-%m-%d").unwrap_or(s);
     let (s, e) = if s <= e { (s, e) } else { (e, s) };
     let mut out: Vec<Value> = Vec::new();
     for d in date_range(s, e) {
         let ds = d.format("%Y-%m-%d").to_string();
-        let recs = read_records(dir, &ds, &pricing, &aliases);
+        let recs = read_records(dir, &ds, &pricing, &aliases, &no_cost_services);
         let mut req = 0usize;
         let mut cost = 0.0f64;
         for r in recs.iter().filter(|r| matches_service(r, service, primary)) {
@@ -913,6 +969,100 @@ mod tests {
 
         let live = get_live(&dir.join("cache_stats"), "svc1", "svc1").unwrap();
         assert_eq!(live["records"].as_array().unwrap().len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn subscription_pricing_hides_cost() {
+        // 订阅制服务（pricing:none）：统计重算 cost 为 0，showCost=false；
+        // 按量服务正常计价，showCost=true；全部视图混合时仍显示费用。
+        let dir = std::env::temp_dir().join(format!("o2a_pricing_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("cache_stats")).unwrap();
+        // 定价表（重算口径：input=1/百万，output=2/百万）
+        fs::write(
+            dir.join("pricing.json"),
+            json!({
+                "deepseek": {"models": {"deepseek-v4-flash": {"tiers": [{"input": 1, "output": 2}]}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("config.json"),
+            json!({
+                "services": [
+                    {"comment": "paid", "model": "deepseek-v4-flash"},
+                    {"comment": "sub", "model": "deepseek-v4-flash", "pricing": "none"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let now = chrono::Local::now();
+        let date = now.format("%Y-%m-%d").to_string();
+        let hour = now.format("%H").to_string();
+        let rec = |svc: &str, input: i64| {
+            json!({
+                "timestamp": format!("{date}T{hour}:00:00"),
+                "service": svc,
+                "model": "deepseek-v4-flash",
+                "input_tokens": input,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "cost": 999.0
+            })
+        };
+        fs::write(
+            dir.join("cache_stats").join(format!("{date}.jsonl")),
+            format!(
+                "{}\n{}\n",
+                serde_json::to_string(&rec("paid", 1_000_000)).unwrap(),
+                serde_json::to_string(&rec("sub", 1_000_000)).unwrap()
+            ),
+        )
+        .unwrap();
+
+        // 按量服务：有费用、显示费用
+        let paid = get_stats(&dir.join("cache_stats"), "paid", "paid", "today", None, None).unwrap();
+        assert_eq!(paid["showCost"], true);
+        assert_eq!(paid["today"]["cost"], 1.0); // 1M input × 1/百万
+
+        // 订阅制服务：费用恒 0、隐藏费用
+        let sub = get_stats(&dir.join("cache_stats"), "sub", "sub", "today", None, None).unwrap();
+        assert_eq!(sub["showCost"], false);
+        assert_eq!(sub["today"]["cost"], 0.0);
+        assert_eq!(sub["today"]["cost"], 0.0);
+
+        // 全部视图：存在按量服务 → 仍显示费用（订阅制贡献 0）
+        let all = get_stats(&dir.join("cache_stats"), "", "", "today", None, None).unwrap();
+        assert_eq!(all["showCost"], true);
+        assert_eq!(all["today"]["cost"], 1.0);
+
+        // 全部订阅制：隐藏费用（同时只保留 sub 记录，模拟订阅制账号的历史）
+        fs::write(
+            dir.join("config.json"),
+            json!({
+                "services": [
+                    {"comment": "sub", "model": "deepseek-v4-flash", "pricing": "none"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("cache_stats").join(format!("{date}.jsonl")),
+            format!(
+                "{}\n",
+                serde_json::to_string(&rec("sub", 1_000_000)).unwrap()
+            ),
+        )
+        .unwrap();
+        let all_sub = get_stats(&dir.join("cache_stats"), "", "", "month", None, None).unwrap();
+        assert_eq!(all_sub["showCost"], false);
+        assert_eq!(all_sub["today"]["cost"], 0.0);
 
         let _ = fs::remove_dir_all(&dir);
     }

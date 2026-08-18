@@ -79,7 +79,7 @@
         </div>
 
         <!-- KPI 汇总（当前小时 / 今日 / 本月） -->
-        <div class="kpi-grid">
+        <div class="kpi-grid" :class="{ 'no-fee': !showCost }">
           <div class="kpi">
             <span class="kpi-l">请求数</span>
             <b class="kpi-v">{{ fmtNum(stats.today?.requests) }}</b>
@@ -95,7 +95,7 @@
             <b class="kpi-v" :class="hitClass(stats.today?.hitRate)">{{ fmtPct(stats.today?.hitRate) }}</b>
             <span class="kpi-s">时 {{ fmtPct(stats.current?.hitRate) }} · 月 {{ fmtPct(stats.month?.hitRate) }}</span>
           </div>
-          <div class="kpi">
+          <div v-if="showCost" class="kpi">
             <span class="kpi-l">费用</span>
             <b class="kpi-v cost">¥{{ fmtCost(stats.today?.cost) }}</b>
             <span class="kpi-s">时 ¥{{ fmtCost(stats.current?.cost) }} · 月 ¥{{ fmtCost(stats.month?.cost) }}</span>
@@ -117,7 +117,7 @@
             <button class="icon-btn" :class="{ spinning: statsLoading }" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
           </div>
         </div>
-        <CalendarHeat v-if="calOpen" :service="statsService" @select="onCalSelect" @quick="onCalQuick" />
+        <CalendarHeat v-if="calOpen" :service="statsService" :show-cost="showCost" @select="onCalSelect" @quick="onCalQuick" />
 
         <div v-if="statsError" class="stats-err"><Icon name="alert" :size="12" />{{ statsError }}</div>
 
@@ -135,19 +135,19 @@
         <div v-if="modelStats.length" class="card model-stats-card">
           <div class="fc-h">
             <span>{{ rangeLabel }}按模型</span>
-            <span class="model-stats-total">总费用 ¥{{ fmtCost(modelStats.reduce((a, m) => a + (m.cost || 0), 0)) }}</span>
+            <span v-if="showCost" class="model-stats-total">总费用 ¥{{ fmtCost(modelStats.reduce((a, m) => a + (m.cost || 0), 0)) }}</span>
           </div>
           <div class="model-stats-list">
             <div v-for="m in modelStats" :key="m.model" class="ms-row">
               <span class="m">{{ m.model }}</span>
               <span class="n">{{ fmtNum(m.requests) }} 次</span>
               <span class="n">{{ fmtNum(m.input + m.read + m.output) }} tok</span>
-              <span class="c">¥{{ fmtCost(m.cost) }}</span>
+              <span v-if="showCost" class="c">¥{{ fmtCost(m.cost) }}</span>
             </div>
           </div>
         </div>
         <div v-else class="card">
-          <div class="empty-tip">还没有按模型的统计数据，代理跑起来后这里会展示各模型的用量与费用。</div>
+          <div class="empty-tip">还没有按模型的统计数据，代理跑起来后这里会展示各模型的用量。</div>
         </div>
 
         <div v-if="anyRunning" class="card live-card">
@@ -358,6 +358,8 @@ const ALL = "__all__";
 const cfg = reactive<any>({});
 const status = reactive<any>({ services: [] });
 const stats = reactive<any>({});
+// 当前所选服务集合是否展示费用（订阅制如 opencode token/code plan 不计价）
+const showCost = computed(() => stats.showCost !== false);
 const liveRecords = ref<any[]>([]);
 const selected = ref<string>(ALL);
 // 配置文件位置（UI 设置项）
@@ -574,6 +576,9 @@ const accStatsText = (acc: any) => {
   if (stt === "err") return "统计读取失败";
   if (!st) return "今日 —";
   const svcN = (cfg.services || []).filter((s: any) => s.account === acc.id).length;
+  // 账号下存在按量计费服务才显示费用（订阅制账号只显示请求数）
+  const showFee = (cfg.services || []).some((s: any) => s.account === acc.id && s.pricing !== "none");
+  if (!showFee) return `服务×${svcN} · 今日 ${fmtNum(st.today.requests)} 次`;
   return `服务×${svcN} · 今日 ¥${fmtCost(st.today.cost)} / ${fmtNum(st.today.requests)} 次 · 本月 ¥${fmtCost(st.month.cost)}`;
 };
 

@@ -191,6 +191,7 @@ export CONFIG_FILE=/etc/o2a-proxy/config.json
 | `services[].context_1m` | 1M 上下文模式（影响默认 `max_tokens`） |
 | `services[].max_tokens` | 最大输出 token（缺省 4096） |
 | `services[].thinking_mode` | **思考深度透传模式**（默认 `auto`）：`auto`（按上游 URL/模型自动推断）/ `passthrough`（Anthropic 风格 `thinking` 对象原样透传，DeepSeek V3.2 / Kimi K2 / 兼容网关）/ `effort`（`budget_tokens` → `reasoning_effort` 档位，OpenAI 标准）/ `enable_thinking`（布尔开关，DashScope/Qwen 兼容模式）/ `none`（不透传）。见下文「思考深度透传」 |
+| `services[].pricing` | **计价模式**（可选，默认按 `pricing.json` 计费）：`none` 表示订阅制（如 opencode token/code plan），按 token 计价无意义——统计记录 cost 恒为 0，桌面端统计面板/热力图隐藏费用展示，仅保留请求数与 token 用量 |
 
 > **兼容**：旧格式（`services[].openai_base_url` / `openai_api_key` 内嵌，`mode` 字段）读取时自动迁移为账号结构，无需手动改配置。
 

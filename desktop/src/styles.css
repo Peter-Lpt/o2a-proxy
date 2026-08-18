@@ -340,6 +340,10 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   gap: 7px;
   margin-bottom: 10px;
 }
+/* 订阅制服务（无价格）时隐藏费用卡，KPI 由 4 列变 3 列 */
+.kpi-grid.no-fee {
+  grid-template-columns: repeat(3, 1fr);
+}
 .kpi {
   display: flex;
   flex-direction: column;

@@ -121,6 +121,13 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
         .current_dir(&state.root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Windows 下禁用子进程控制台窗口（CREATE_NO_WINDOW）：
+    // 否则从 GUI 桌面端启动 python 引擎时会弹出一个 cmd 黑窗。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
     // 配置未显式指定统计目录时，把默认目录传给代理，保证两端路径一致
     let has_stats_dir = crate::read_config_value(state)
         .ok()

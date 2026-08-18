@@ -173,8 +173,13 @@ async def record_stats(service: Service, model: str, usage: dict) -> None:
     """记录缓存统计（写盘放到线程池，避免阻塞事件循环）。"""
     if is_cache_stats_enabled() and usage and usage.get("input_tokens"):
         await asyncio.to_thread(
-            get_stats(service.name, service.account.id).record, model, usage
+            _stats_for(service).record, model, usage
         )
+
+
+def _stats_for(service: Service):
+    """返回该服务的统计实例；pricing=none（订阅制）时不记录价格。"""
+    return get_stats(service.name, service.account.id, no_cost=service.pricing == "none")
 
 
 def upstream_timeout(*, total=None):
@@ -1052,7 +1057,7 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
         converted = _convert_usage(data.get("usage") or {})
         if converted.get("input_tokens") and is_cache_stats_enabled():
             await asyncio.to_thread(
-                get_stats(service.name, service.account.id).record, model, converted
+                _stats_for(service).record, model, converted
             )
         if not req.get("input"):
             # Chat 直通：上游本就是 chat.completion，原样返回
@@ -1132,7 +1137,7 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
             usage = _convert_usage(usage)
         if (usage.get("input_tokens") or usage.get("output_tokens")) and is_cache_stats_enabled():
             await asyncio.to_thread(
-                get_stats(service.name, service.account.id).record, model, usage
+                _stats_for(service).record, model, usage
             )
         # 任务状态：Anthropic stop_reason == end_turn 视为最终答复
         _task_finish(request.app, _classify(data.get("stop_reason")))

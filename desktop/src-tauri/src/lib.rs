@@ -270,11 +270,14 @@ fn read_config_value(state: &AppState) -> Result<serde_json::Value, String> {
 fn open_path(p: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW：避免打开资源管理器时闪烁 cmd 窗口
         std::process::Command::new("cmd")
             .arg("/C")
             .arg("start")
             .arg("")
             .arg(p)
+            .creation_flags(0x08000000)
             .spawn()
             .map_err(|e| e.to_string())?;
     }

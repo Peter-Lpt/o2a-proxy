@@ -126,7 +126,8 @@ class Service:
     """
 
     def __init__(self, name, account, client, host, port, model, override_model=True,
-                 max_tokens=4096, proxy="", api="", upstream_api="", thinking_mode="auto"):
+                 max_tokens=4096, proxy="", api="", upstream_api="", thinking_mode="auto",
+                 pricing=""):
         self.name = name
         self.account = account
         self.client = client
@@ -139,6 +140,9 @@ class Service:
         self.api = (api or "").strip()
         self.upstream_api = (upstream_api or "openai-completions").strip()
         self.thinking_mode = (thinking_mode or "auto").strip() or "auto"
+        # 计价模式："" = 按 pricing.json 计价；"none" = 订阅制（token plan / code plan 等），
+        # 按 token 计价无意义，统计记录与面板不显示价格
+        self.pricing = (pricing or "").strip()
         self._mode_override = None  # auto 服务每次请求识别后临时指定
 
     @property
@@ -184,7 +188,7 @@ class Service:
         """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
         s = Service(self.name, self.account, self.client, self.host, self.port,
                     self.model, self.override_model, self.max_tokens, self.proxy, self.api,
-                    self.upstream_api)
+                    self.upstream_api, self.thinking_mode, self.pricing)
         s._mode_override = mode
         return s
 
@@ -362,6 +366,10 @@ def load_config():
                 client = svc.get("client") or mode_to_client.get(mode, "auto")
                 if client not in ("anthropic", "openai", "auto"):
                     client = "auto"
+                pricing = svc.get("pricing", "")
+                if pricing not in ("", "none"):
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 pricing '{pricing}' 非法，忽略（仅支持 none）")
+                    pricing = ""
                 services.append(Service(
                     name=svc.get("comment") or svc.get("model") or mode,
                     account=acc,
@@ -375,6 +383,7 @@ def load_config():
                     api=api,
                     upstream_api=upstream_api,
                     thinking_mode=thinking_mode,
+                    pricing=pricing,
                 ))
     if not services and API_KEY:
         # 回退：环境变量配置（单服务）
@@ -393,11 +402,13 @@ def load_config():
 class CacheStats:
     """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。"""
 
-    def __init__(self, stats_dir="cache_stats", retention_days=30, service=None, account=None):
+    def __init__(self, stats_dir="cache_stats", retention_days=30, service=None, account=None,
+                 no_cost=False):
         self.stats_dir = stats_dir
         self.retention_days = retention_days
         self.service = service or ""
         self.account = account or ""
+        self.no_cost = no_cost
         self._lock = threading.Lock()
         self._last_hour = None
         self._pricing = None
@@ -533,8 +544,9 @@ class CacheStats:
         cache_hit_rate, cache_coverage = self._compute_rates(
             input_tokens, cache_read, cache_write
         )
-        cost = self._calc_cost(model, input_tokens, cache_read, cache_write, output_tokens,
-                               account=self.account)
+        cost = 0.0 if self.no_cost else self._calc_cost(
+            model, input_tokens, cache_read, cache_write, output_tokens, account=self.account
+        )
         return {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "service": self.service,
@@ -797,7 +809,7 @@ _stats = {}
 _stats_lock = threading.Lock()
 
 
-def get_stats(service=None, account=None):
+def get_stats(service=None, account=None, no_cost=False):
     """获取 CacheStats 实例（线程安全的懒初始化，按服务区分）。"""
     key = service or "default"
     if key not in _stats:
@@ -806,7 +818,7 @@ def get_stats(service=None, account=None):
                 stats_dir = os.environ.get("CACHE_STATS_DIR", "cache_stats")
                 retention = int(os.environ.get("CACHE_STATS_RETENTION_DAYS", "30"))
                 _stats[key] = CacheStats(stats_dir=stats_dir, retention_days=retention,
-                                         service=service, account=account)
+                                         service=service, account=account, no_cost=no_cost)
     return _stats[key]
 
 
