@@ -29,16 +29,30 @@ pub struct AppState {
     pub root: PathBuf,
     pub python: String,
     pub default_stats_dir: PathBuf,
+    /// UI 保存的配置文件位置覆盖（settings.json，位于系统用户配置目录，win/mac 各自的标准位置）
+    pub settings_file: PathBuf,
+    /// 绿色版（root 来自打包资源目录）：配置文件默认落到持久用户目录，
+    /// 避免解压临时目录被清理导致配置丢失
+    pub persistent_config: bool,
     pub children: Mutex<HashMap<String, std::process::Child>>,
     /// 共享悬浮窗当前显示的服务（空串 = 全部视图）。
     /// 用于区分"切到不同服务"（保持打开只换内容）与"切到同一服务"（开关）。
     pub shared_float: Mutex<String>,
 }
 
-fn find_root() -> PathBuf {
+/// 定位引擎根目录（含 proxy.py 的目录）。优先级：
+/// 1. O2A_ROOT 环境变量（显式指定，含 proxy.py 才用）
+/// 2. 打包资源目录（绿色版内嵌引擎，随 exe 解压）
+/// 3. 开发模式：从 cwd 向上最多 6 层找含 proxy.py 的目录
+fn find_root(app: &tauri::App) -> PathBuf {
     if let Ok(p) = std::env::var("O2A_ROOT") {
         if Path::new(&p).join("proxy.py").exists() {
             return PathBuf::from(p);
+        }
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        if dir.join("proxy.py").exists() {
+            return dir;
         }
     }
     let mut dir = std::env::current_dir().unwrap_or_default();
@@ -81,12 +95,80 @@ fn find_python() -> String {
     }
 }
 
+/// 把可能是目录的路径归一化为具体文件：已存在目录或以分隔符结尾 → 目录下 filename；否则当作文件。
+fn to_file_if_dir(p: &Path, filename: &str) -> PathBuf {
+    let s = p.to_string_lossy();
+    if p.is_dir() || s.ends_with('/') || s.ends_with('\\') {
+        p.join(filename)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+fn env_resolved_path_opt(env: &str, filename: &str) -> Option<PathBuf> {
+    let raw = std::env::var_os(env)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())?;
+    Some(to_file_if_dir(&raw, filename))
+}
+
+/// UI 保存的配置位置（settings.json 的 "config" 字段）。
+/// 位置不能存进 config.json 自身（鸡生蛋），故放系统用户配置目录：
+/// Windows `%APPDATA%\com.o2aproxy.desktop\settings.json`，
+/// macOS `~/Library/Application Support/com.o2aproxy.desktop/settings.json`。
+fn settings_path(app: &tauri::App) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("settings.json"))
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join("o2a-settings.json")
+        })
+}
+
+fn saved_config_override(settings_file: &Path) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(settings_file).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let s = v.get("config")?.as_str()?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(s))
+}
+
+/// config.json 位置优先级：O2A_CONFIG 环境变量 > UI 保存的设置 > 默认项目根
+/// （proxy.py 所在目录，Windows/macOS 一致）。
 fn config_path(state: &AppState) -> PathBuf {
+    if let Some(p) = env_resolved_path_opt("O2A_CONFIG", "config.json") {
+        return p;
+    }
+    if let Some(p) = saved_config_override(&state.settings_file) {
+        return to_file_if_dir(&p, "config.json");
+    }
+    if state.persistent_config {
+        // 绿色版：配置文件放持久用户目录（与 settings.json 同目录），
+        // 避免资源解压临时目录被清理导致配置丢失
+        return state
+            .settings_file
+            .parent()
+            .map(|d| d.join("config.json"))
+            .unwrap_or_else(|| state.root.join("config.json"));
+    }
     state.root.join("config.json")
 }
 
+/// auth.json 位置：优先 O2A_AUTH 环境变量；未指定时跟随 config.json 所在目录，
+/// 保证整套配置一起迁移（与 proxy.py 的解析逻辑一致）。
 fn auth_path(state: &AppState) -> PathBuf {
-    state.root.join("auth.json")
+    if let Some(p) = env_resolved_path_opt("O2A_AUTH", "auth.json") {
+        return p;
+    }
+    config_path(state)
+        .parent()
+        .map(|d| d.join("auth.json"))
+        .unwrap_or_else(|| state.root.join("auth.json"))
 }
 
 fn read_auth(state: &AppState) -> serde_json::Value {
@@ -736,6 +818,79 @@ fn emit_panel_visible(app: &tauri::AppHandle, visible: bool) {
     let _ = app.emit("panel-visible", visible);
 }
 
+/// 查询当前生效的配置文件位置（用于 UI 展示与编辑）。
+#[tauri::command]
+fn get_config_location(state: State<'_, AppState>) -> serde_json::Value {
+    let env_set = std::env::var_os("O2A_CONFIG")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let saved = saved_config_override(&state.settings_file);
+    let source = if env_set {
+        "env"
+    } else if saved.is_some() {
+        "settings"
+    } else {
+        "default"
+    };
+    serde_json::json!({
+        "config": config_path(&state),
+        "auth": auth_path(&state),
+        "source": source,
+        "saved": saved,
+        "settings_file": state.settings_file,
+    })
+}
+
+/// UI 保存配置文件位置覆盖；path 为空串 = 恢复默认。
+/// 返回保存后生效的位置信息（同 get_config_location）。
+#[tauri::command]
+fn set_config_location(state: State<'_, AppState>, path: String) -> Result<serde_json::Value, String> {
+    let raw = path.trim().to_string();
+
+    // 读旧设置（文件可能不存在），保持其他字段
+    let mut v = std::fs::read_to_string(&state.settings_file)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    if raw.is_empty() {
+        // 恢复默认：移除 override，重新走环境变量 / 项目根
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("config");
+        }
+    } else {
+        let loc = PathBuf::from(&raw);
+        let resolved = to_file_if_dir(&loc, "config.json");
+        // 父目录必须存在（配置文件本身可不存在，首次创建场景）；目录已存在亦可
+        if let Some(parent) = resolved.parent() {
+            let parent = parent.to_path_buf();
+            if !parent.as_os_str().is_empty() && !parent.exists() {
+                return Err(format!("目录不存在: {}", parent.display()));
+            }
+        }
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "config".into(),
+                serde_json::Value::String(loc.to_string_lossy().to_string()),
+            );
+            obj.insert(
+                "_readme".into(),
+                serde_json::Value::String(
+                    "由 o2a-proxy 桌面端写入：覆盖默认配置文件位置（config.json / auth.json 跟随）".into(),
+                ),
+            );
+        }
+    }
+
+    if let Some(parent) = state.settings_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&state.settings_file, serde_json::to_string_pretty(&v).unwrap_or_default())
+        .map_err(|e| e.to_string())?;
+
+    Ok(get_config_location(state))
+}
+
 /// 通知前端悬浮窗可见性（按窗口 label）：隐藏时暂停轮询。
 fn emit_float_visible(app: &tauri::AppHandle, label: &str, visible: bool) {
     let _ = app.emit(
@@ -967,6 +1122,11 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
+        // 单实例：重复启动时唤起已有实例（显示面板），避免多开残留进程
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            let _ = toggle_panel(app.clone());
+        }))
         .invoke_handler(tauri::generate_handler![
             resolve_root,
             resolve_python,
@@ -983,6 +1143,8 @@ pub fn run() {
             get_live,
             fetch_models,
             open_config_file,
+            get_config_location,
+            set_config_location,
             toggle_panel,
             hide_panel,
             toggle_float,
@@ -1003,12 +1165,22 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            let root = find_root();
+            let root = find_root(app);
+            // 绿色版判定：root 来自打包资源目录（非 O2A_ROOT、非开发目录）
+            let resource_root = app
+                .path()
+                .resource_dir()
+                .ok()
+                .filter(|d| d.join("proxy.py").exists());
+            let persistent_config =
+                std::env::var_os("O2A_ROOT").is_none() && resource_root.as_ref() == Some(&root);
             let state = AppState {
                 root: root.clone(),
                 python: find_python(),
                 // 默认统计目录：应用（项目根）下的相对目录
                 default_stats_dir: root.join("cache_stats"),
+                settings_file: settings_path(app),
+                persistent_config,
                 children: Mutex::new(HashMap::new()),
                 shared_float: Mutex::new(String::new()),
             };
@@ -1083,10 +1255,15 @@ pub fn run() {
                 .visible(false)
                 .build()?;
             panel.on_window_event(panel_events(app.handle().clone()));
-            // 测试/演示用：O2A_SHOW_PANEL=1 时启动即显示面板
-            if std::env::var_os("O2A_SHOW_PANEL").is_some() {
+            // 启动即显示面板（绿色版/双击启动必须有可见反馈；
+            // 设 O2A_SHOW_PANEL=0 可恢复纯托盘模式）
+            if std::env::var_os("O2A_SHOW_PANEL").map(|v| v == "0").unwrap_or(false) {
+                // 纯托盘模式：保持隐藏
+            } else {
+                position_panel(app.handle(), &panel)?;
                 panel.show()?;
                 panel.set_focus()?;
+                emit_panel_visible(app.handle(), true);
             }
 
             // 全平台统一：预创建 1 个共享悬浮窗（隐藏），显示哪个服务由

@@ -105,6 +105,41 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 
 ## 配置说明
 
+### 配置文件位置（默认与可指定）
+
+**默认位置**：`config.json` 与 `auth.json` 均读取**项目根目录**（即与 `proxy.py` 同目录，Windows/macOS 完全一致，不区分平台）。桌面客户端同样以该目录为准（通过 `O2A_ROOT` 环境变量或自动向上查找含 `proxy.py` 的目录定位项目根）。
+
+**指定其他位置**（多环境 / 绿色部署 / 不想把配置放进代码目录时），支持环境变量与命令行参数，优先级：命令行参数 = 环境变量 > 默认项目根：
+
+| 方式 | 说明 |
+|---|---|
+| `O2A_CONFIG` 环境变量 | 指定 `config.json` 路径；指向目录时取目录下 `config.json` |
+| `O2A_AUTH` 环境变量（可选） | 指定 `auth.json` 路径；**不设置时自动跟随 config.json 所在目录**，整套配置一起迁移 |
+| `python proxy_async.py --config <路径|目录> [--auth <路径|目录>]` | 命令行指定（写入等价环境变量） |
+| `CONFIG_FILE=<路径> ./start-proxy.sh` | 脚本启动方式；同样接受目录 |
+
+**桌面客户端**还可在「配置」页的「配置文件位置」卡片直接设置（路径输入 + 「浏览文件/浏览目录」系统原生选择器 + 应用位置 / 恢复默认）：
+该设置保存在系统用户配置目录（Windows `%APPDATA%\com.o2aproxy.desktop\settings.json`，macOS `~/Library/Application Support/com.o2aproxy.desktop/settings.json`），
+优先级低于环境变量；桌面端启动代理子进程时会把生效位置传给引擎，两端读写同一份配置。
+
+示例（把配置放到独立目录）：
+
+```bash
+# 方式一：环境变量（引擎 / 桌面端 / start-proxy.sh 通用）
+export O2A_CONFIG=/etc/o2a-proxy/config.json
+export O2A_AUTH=/etc/o2a-proxy/auth.json   # 可选，默认跟随 config 目录
+python proxy_async.py
+
+# 方式二：命令行参数（仅引擎）
+python proxy_async.py --config /etc/o2a-proxy/config.json --auth /etc/o2a-proxy/auth.json
+
+# 方式三：启动脚本
+export CONFIG_FILE=/etc/o2a-proxy/config.json
+./start-proxy.sh
+```
+
+> 桌面客户端读取自身进程环境的 `O2A_CONFIG`/`O2A_AUTH`，并在启动代理子进程时继承传递，两端读写同一份配置。
+
 ```json
 {
   "auth_token": "your-auth-token",

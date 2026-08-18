@@ -5,7 +5,12 @@
 set -euo pipefail
 
 PROXY_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_FILE="${PROXY_DIR}/config.json"
+# 配置文件位置：默认项目根；可用 CONFIG_FILE 或 O2A_CONFIG 环境变量覆盖
+# （指向目录时取目录下 config.json）
+CONFIG_FILE="${CONFIG_FILE:-${O2A_CONFIG:-${PROXY_DIR}/config.json}}"
+if [ -d "$CONFIG_FILE" ]; then
+    CONFIG_FILE="${CONFIG_FILE}/config.json"
+fi
 
 echo "============================================"
 echo "  o2a-proxy 多服务代理"
@@ -158,8 +163,9 @@ if [ -n "$CLAUDE_URL" ]; then
     echo ""
 fi
 
-# 启动代理
+# 启动代理（引擎通过 O2A_CONFIG 读取同一份配置）
 echo "启动代理..."
 echo "按 Ctrl+C 停止代理"
 echo ""
+export O2A_CONFIG="$CONFIG_FILE"
 exec python3 "$PROXY_DIR/proxy_async.py"

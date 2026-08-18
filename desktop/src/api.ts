@@ -22,6 +22,8 @@ export const api = {
   fetchModels: (baseUrl: string, apiKey: string) =>
     invoke<any>("fetch_models", { baseUrl, apiKey }),
   openConfigFile: () => invoke<void>("open_config_file"),
+  getConfigLocation: () => invoke<any>("get_config_location"),
+  setConfigLocation: (path: string) => invoke<any>("set_config_location", { path }),
   toggleFloat: () => invoke<boolean>("toggle_float"),
   toggleFloatFor: (service: string) => invoke<boolean>("toggle_float_for", { service }),
   togglePanel: () => invoke<boolean>("toggle_panel"),

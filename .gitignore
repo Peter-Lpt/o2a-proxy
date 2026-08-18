@@ -17,6 +17,9 @@ __pycache__/
 # Cache statistics data
 cache_stats/
 
+# 绿色版可执行文件（构建产物，随源码重新打包）
+o2a-proxy.exe
+
 # Proxy runtime logs
 proxy_*.log
 

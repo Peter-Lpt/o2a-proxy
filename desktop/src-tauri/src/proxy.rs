@@ -133,6 +133,10 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     if !has_stats_dir {
         cmd.env("CACHE_STATS_DIR", &state.default_stats_dir);
     }
+    // 配置位置显式传给子进程：可能来自环境变量或 UI 保存的 settings.json（子进程读不到后者），
+    // 保证子进程与桌面端读写同一份 config.json / auth.json。
+    cmd.env("O2A_CONFIG", crate::config_path(state));
+    cmd.env("O2A_AUTH", crate::auth_path(state));
     let mut child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
     // 代理日志同时输出到当前终端（pnpm tauri dev / 前台运行）和日志文件（面板查看）
     if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
@@ -249,6 +253,64 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn settings_override_resolves_config_and_auth() {
+        // 环境变量优先级高于设置：测试环境若设置了 O2A_CONFIG 则跳过（不保证设置生效）
+        if std::env::var_os("O2A_CONFIG").is_some() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("o2a_settings_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = root.join("settings.json");
+        let state = AppState {
+            root: root.clone(),
+            python: "python".to_string(),
+            default_stats_dir: root.join("cache_stats"),
+            settings_file: settings.clone(),
+            persistent_config: false,
+            children: Mutex::new(std::collections::HashMap::new()),
+            shared_float: Mutex::new(String::new()),
+        };
+
+        // 1) 无设置：默认项目根，auth 跟随
+        assert_eq!(crate::config_path(&state), root.join("config.json"));
+        assert_eq!(crate::auth_path(&state), root.join("auth.json"));
+
+        // 2) 设置指向目录（已存在）：取目录下 config.json，auth 跟随同目录
+        let cfg_dir = root.join("cfg");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            &settings,
+            serde_json::to_string(&serde_json::json!({"config": cfg_dir})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(crate::config_path(&state), cfg_dir.join("config.json"));
+        assert_eq!(crate::auth_path(&state), cfg_dir.join("auth.json"));
+
+        // 3) 设置指向具体文件：config 用该文件，auth 跟随其父目录
+        let cfg_file = root.join("conf").join("my-config.json");
+        std::fs::create_dir_all(cfg_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &settings,
+            serde_json::to_string(&serde_json::json!({"config": cfg_file})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(crate::config_path(&state), cfg_file);
+        assert_eq!(
+            crate::auth_path(&state),
+            root.join("conf").join("auth.json")
+        );
+
+        // 4) 尾部分隔符视为目录
+        assert_eq!(
+            crate::to_file_if_dir(&cfg_dir.join(""), "config.json"),
+            cfg_dir.join("config.json")
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn start_service_detects_immediate_exit() {
         // 缺 API Key 时代理启动即退出（确定性失败，避免 Windows 端口复用语义差异）
         let root = std::env::temp_dir().join(format!("o2a_proxy_svc_test_{}", std::process::id()));
@@ -278,6 +340,8 @@ mod tests {
             root: root.clone(),
             python: "python".to_string(),
             default_stats_dir: root.join("cache_stats"),
+            settings_file: root.join("settings.json"),
+            persistent_config: false,
             children: Mutex::new(std::collections::HashMap::new()),
             shared_float: Mutex::new(String::new()),
         };
@@ -310,6 +374,8 @@ mod tests {
             root: root.clone(),
             python: "python".to_string(),
             default_stats_dir: root.join("cache_stats"),
+            settings_file: root.join("settings.json"),
+            persistent_config: false,
             children: Mutex::new(std::collections::HashMap::new()),
             shared_float: Mutex::new(String::new()),
         };

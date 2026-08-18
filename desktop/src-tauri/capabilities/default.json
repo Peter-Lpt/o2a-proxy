@@ -5,6 +5,7 @@
   "windows": ["panel", "float", "float_*"],
   "permissions": [
     "core:default",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "dialog:default"
   ]
 }

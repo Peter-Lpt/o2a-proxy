@@ -187,6 +187,25 @@
               <div class="model-hint">留空使用默认目录：{{ status.statsDir || "…" }}</div>
             </div>
             <div class="card form-card">
+              <div class="fc-h">配置文件位置 <span class="fc-sub">config.json / auth.json 的读写位置</span></div>
+              <label>路径
+                <div class="field-row">
+                  <input v-model="cfgLocInput" type="text" spellcheck="false" placeholder="绝对路径或目录（目录时取目录下 config.json）" />
+                  <button type="button" class="btn btn-sm" @click="browseConfigFile">浏览文件</button>
+                  <button type="button" class="btn btn-sm" @click="browseConfigDir">浏览目录</button>
+                </div>
+              </label>
+              <div class="model-hint">
+                当前生效：<code class="loc-path">{{ cfgLoc?.config || "…" }}</code>
+                <span class="src-tag" :class="cfgLoc?.source">{{ srcLabel }}</span>
+              </div>
+              <div class="form-actions" style="margin-top:8px">
+                <button type="button" class="btn btn-sm btn-primary" @click="saveConfigLocation">应用位置</button>
+                <button type="button" class="btn btn-sm" @click="resetConfigLocation">恢复默认</button>
+              </div>
+              <p class="hint">切换位置会立即加载该位置的配置进行编辑；运行中的服务需重启后按新位置读取。auth.json 默认跟随 config.json 所在目录，可用环境变量 O2A_AUTH 单独指定。</p>
+            </div>
+            <div class="card form-card">
               <div class="fc-h">概览</div>
               <div class="ov-rows">
                 <div class="ov-row"><span class="ov-k">服务</span><b>{{ serviceList.length }}</b><span class="ov-sub">{{ runningCount }} 运行中 · {{ stoppedCount }} 已停止</span></div>
@@ -324,6 +343,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { emit, listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, fmtCost, fmtNum, fmtPct } from "./api";
 import { hitTier } from "./format";
 import CalendarHeat from "./components/CalendarHeat.vue";
@@ -340,6 +360,9 @@ const status = reactive<any>({ services: [] });
 const stats = reactive<any>({});
 const liveRecords = ref<any[]>([]);
 const selected = ref<string>(ALL);
+// 配置文件位置（UI 设置项）
+const cfgLoc = ref<any>(null);
+const cfgLocInput = ref("");
 const svcTabs = ref<HTMLElement | null>(null);
 let tabsDrag: { startX: number; startScroll: number; moved: boolean } | null = null;
 
@@ -857,6 +880,16 @@ async function loadConfig() {
   }
 }
 
+async function loadConfigLocation() {
+  try {
+    cfgLoc.value = await api.getConfigLocation();
+    cfgLocInput.value = cfgLoc.value?.config || "";
+  } catch (e: any) {
+    cfgLoc.value = null;
+    showToast("读取配置位置失败: " + e, "error");
+  }
+}
+
 async function loadStatus() {
   try {
     const s = await api.getStatus();
@@ -1087,6 +1120,68 @@ async function saveConfig() {
   }
 }
 
+// 配置文件位置来源标签
+const srcLabel = computed(() => {
+  const s = cfgLoc.value?.source;
+  return s === "env"
+    ? "环境变量 O2A_CONFIG"
+    : s === "settings"
+      ? "UI 设置"
+      : "默认位置";
+});
+
+// 浏览选择：具体 config.json 文件 / 配置目录（config.json + auth.json 一起放）
+async function browseConfigFile() {
+  const sel = await openDialog({
+    title: "选择 config.json",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "JSON 配置", extensions: ["json"] }],
+  });
+  if (typeof sel === "string" && sel) cfgLocInput.value = sel;
+}
+
+async function browseConfigDir() {
+  const sel = await openDialog({
+    title: "选择配置目录（存放 config.json 与 auth.json）",
+    multiple: false,
+    directory: true,
+  });
+  if (typeof sel === "string" && sel) cfgLocInput.value = sel;
+}
+
+async function saveConfigLocation() {
+  const p = cfgLocInput.value.trim();
+  if (!p) {
+    showToast("请输入配置文件路径", "error");
+    return;
+  }
+  try {
+    cfgLoc.value = await api.setConfigLocation(p);
+    cfgLocInput.value = cfgLoc.value?.config || p;
+    await loadConfig();
+    await loadStatus();
+    showToast(
+      "配置位置已应用" + (anyRunning.value ? "，运行中的服务重启后生效" : ""),
+      "success"
+    );
+  } catch (e: any) {
+    showToast("设置失败: " + e, "error");
+  }
+}
+
+async function resetConfigLocation() {
+  try {
+    cfgLoc.value = await api.setConfigLocation("");
+    cfgLocInput.value = cfgLoc.value?.config || "";
+    await loadConfig();
+    await loadStatus();
+    showToast("已恢复默认位置", "success");
+  } catch (e: any) {
+    showToast("恢复失败: " + e, "error");
+  }
+}
+
 function totalOf(o: any): number {
   return Number(o?.input || 0) + Number(o?.read || 0) + Number(o?.output || 0);
 }
@@ -1307,7 +1402,7 @@ function onVisibilityChange() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadConfig(), loadStatus()]);
+  await Promise.all([loadConfig(), loadStatus(), loadConfigLocation()]);
   loadStats();
   loadLive();
   loadAccountStats();

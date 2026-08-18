@@ -19,6 +19,15 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../../proxy.py": "proxy.py",
+      "../../proxy_async.py": "proxy_async.py"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "skip"
+      }
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

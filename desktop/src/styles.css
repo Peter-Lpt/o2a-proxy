@@ -509,6 +509,14 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 /* ---------- 配置页 ---------- */
 .fc-h { font-weight: 700; font-size: 12.5px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: baseline; }
 .fc-sub { color: var(--muted); font-weight: 400; font-size: 11px; font-family: var(--font-mono); }
+.loc-path { font-family: var(--font-mono); font-size: 11px; color: var(--text); word-break: break-all; }
+.src-tag {
+  margin-left: 8px; padding: 1px 7px; border-radius: 10px; font-size: 10.5px;
+  background: var(--border-soft); color: var(--muted); white-space: nowrap;
+}
+.src-tag.env { background: rgba(255, 193, 7, 0.15); color: var(--amber); }
+.src-tag.settings { background: rgba(76, 175, 80, 0.15); color: var(--green); }
+.src-tag.default { background: var(--border-soft); color: var(--muted-2); }
 form label, .acc-edit label { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); margin-bottom: 9px; }
 form label.inline, .acc-edit label.inline { flex-direction: row; align-items: center; gap: 7px; font-size: 12px; color: var(--text); }
 form input[type="text"], form input[type="number"], form input[type="password"], form select,
@@ -541,6 +549,7 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
 .field-row { display: flex; gap: 6px; }
 .field-row input { flex: 1; }
 .field-row .icon-btn { flex: none; }
+.field-row .btn { flex: none; white-space: nowrap; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .model-hint { font-size: 10.5px; color: var(--muted-2); margin-top: 2px; line-height: 1.5; }
 .model-hint.err { color: var(--red); }

@@ -7,8 +7,8 @@ Anthropic -> OpenAI 异步代理（asyncio + aiohttp 单进程版）
 - 客户端断开连接时立即停止读取上游并释放连接
 - 多服务多端口共享同一个事件循环和连接池
 
-用法与 proxy.py 完全一致：
-    python proxy_async.py [--service <comment|port>]
+用法：
+    python proxy_async.py [--service <comment|port>] [--config <路径|目录>] [--auth <路径|目录>]
 
 协议转换逻辑复用 proxy.py 中的纯函数，保证行为一致。
 """
@@ -1458,6 +1458,14 @@ def main():
         i = sys.argv.index("--service")
         if i + 1 < len(sys.argv):
             service_filter = sys.argv[i + 1]
+    # 配置文件位置可指定：--config / --auth（路径或目录，目录时取目录下 config.json / auth.json）
+    # 写入环境变量 O2A_CONFIG / O2A_AUTH，供 load_config / load_auth 解析，
+    # 与桌面端、start-proxy.sh 的环境变量方式保持一致。
+    for flag, env_name in (("--config", "O2A_CONFIG"), ("--auth", "O2A_AUTH")):
+        if flag in sys.argv:
+            i = sys.argv.index(flag)
+            if i + 1 < len(sys.argv):
+                os.environ[env_name] = sys.argv[i + 1]
     rc = asyncio.run(serve(service_filter))
     sys.exit(rc)
 

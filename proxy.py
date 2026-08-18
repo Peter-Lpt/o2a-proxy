@@ -212,6 +212,39 @@ def _responses_url(chat_url):
     return base + "/v1/responses"
 
 
+def _default_script_path(filename):
+    """默认配置目录 = 本文件（proxy.py）所在目录，即项目根，Windows/macOS 一致。"""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
+
+def _resolve_config_path(filename, env_name):
+    """解析配置文件路径：优先环境变量（O2A_CONFIG / O2A_AUTH），否则项目根。
+
+    - 环境变量指向已存在目录或以分隔符结尾 → 视为目录，取目录下 filename
+    - 环境变量指向具体文件 → 直接用
+    - 未设置 → 项目根（proxy.py 所在目录）
+    """
+    env = os.environ.get(env_name, "").strip()
+    if env:
+        if os.path.isdir(env) or env.endswith(("/", "\\")):
+            return os.path.join(env, filename)
+        return env
+    return _default_script_path(filename)
+
+
+def _config_file_path():
+    """config.json 路径：O2A_CONFIG 可指定文件或目录（目录时取目录下 config.json）。"""
+    return _resolve_config_path("config.json", "O2A_CONFIG")
+
+
+def _auth_file_path():
+    """auth.json 路径：默认跟随 config.json 所在目录（整套配置一起迁移）；
+    也可用 O2A_AUTH 单独指定文件或目录。"""
+    if os.environ.get("O2A_AUTH", "").strip():
+        return _resolve_config_path("auth.json", "O2A_AUTH")
+    return os.path.join(os.path.dirname(_config_file_path()), "auth.json")
+
+
 def load_auth():
     """从 auth.json 读取账号密钥（对齐 pi 的 auth.json 模式，敏感凭证独立存放）。
 
@@ -222,8 +255,9 @@ def load_auth():
     }
 
     文件不存在或解析失败时返回空 dict（回退 config.json 内嵌 api_key）。
+    路径：默认项目根（proxy.py 同目录），可用 O2A_CONFIG / O2A_AUTH 环境变量指定。
     """
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auth.json")
+    path = _auth_file_path()
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
@@ -257,7 +291,7 @@ def load_config():
     - 旧结构：services[] 内嵌 openai_base_url/openai_api_key —— 自动迁移为账号
     - 密钥分离：auth.json 按账号 id/name 提供 api_key，优先于 config.json 内嵌
     """
-    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config_path = _config_file_path()
     auth = load_auth()
     services = []
     if os.path.exists(config_path):
