@@ -3,6 +3,25 @@
 本项目版本格式遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。桌面客户端版本同时记录于
 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`desktop/src-tauri/tauri.conf.json`（三处保持一致）。
 
+## [0.2.0] - 2026-08-19
+
+目录结构整理 + 代码收拢为 Python 包（行为等价重构，默认统计目录路径有变化）。
+
+### 结构变化
+
+- **Python 逻辑收拢为 `o2a/` 包**：`engine.py`（原 `proxy_async.py`）、`convert.py`（协议转换）、`config.py`（账号/服务/配置）、`stats.py`（缓存统计与计费）、`base.py`（日志/常量/项目根定位）
+- **根目录兼容 shim**：`proxy.py` / `proxy_async.py` 改为 re-export 兼容层——桌面端路径探测（`find_root`）、绿色版组装、旧导入方式（`import proxy` / `import proxy_async`）全部不受影响；新增 `python -m o2a` 入口
+- **脚本收拢**：`start-proxy.sh` / `cache-stats.sh` / `cache-summary.sh` 移入 `scripts/`
+- **测试收拢**：三个 `test_*.py` 移入 `tests/`（新增 `conftest.py` 注入项目根；CI 与 pytest 双路径均可运行）
+- **运行时数据分离**：统计默认目录由 `cache_stats/` 改为 `<项目根>/data/cache_stats`；运行日志收拢到 `logs/`（均为运行时生成，已入 .gitignore）
+- **.gitignore 修正**：`o2a-proxy.exe` → `o2a-desktop.exe`，新增 `data/`、`logs/`、`.pi-subagents/`、`.pytest_cache/`、`vite-dev.*.log`
+- **桌面端适配**：`default_stats_dir` 同步为 `root/data/cache_stats`；绿色版打包（`build-portable.sh`）与 Tauri 资源（`tauri.conf.json`）增加 `o2a/` 包目录
+
+### 行为说明
+
+- 配置加载优先级、统计语义、协议转换逻辑均未变化；`cache_stats_dir` 显式配置时仍以项目根解析相对路径
+- 已有历史统计数据可手动迁移：`cache_stats/*` → `data/cache_stats/`
+
 ## [0.1.1] - 2026-08-12
 
 协议审计专项修复（30 项问题，含 3 个 P1 级流式终止缺陷，均已在真实引擎上实证复现并修复）。

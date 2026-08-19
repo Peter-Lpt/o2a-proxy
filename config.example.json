@@ -1,7 +1,7 @@
 {
   "auth_token": "qs-cc",
   "cache_stats_enabled": true,
-  "cache_stats_dir": "cache_stats",
+  "cache_stats_dir": "data/cache_stats",
   "cache_stats_retention_days": 30,
   "stream_timeout": 600,
   "accounts": [

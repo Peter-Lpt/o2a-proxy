@@ -6,6 +6,7 @@ auth.json
 .claude/
 .codex/
 .workbuddy/
+.pi-subagents/
 
 # System files
 .DS_Store
@@ -13,19 +14,21 @@ auth.json
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
 
-# Cache statistics data
+# 运行时数据与日志（程序生成，随源码重新生成）
 cache_stats/
+data/
+logs/
+proxy_*.log
+vite-dev.*.log
 
 # 绿色版可执行文件（构建产物，随源码重新打包）
 o2a-proxy.exe
+o2a-desktop.exe
 
-# Proxy runtime logs
-proxy_*.log
-
-# Electron build output
-mac/node_modules/
-mac/dist/
+# 前端构建输出
+desktop/dist/
 
 # pi subagent artifacts
 .pi-subagents/

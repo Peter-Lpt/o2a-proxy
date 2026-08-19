@@ -23,33 +23,39 @@ flowchart LR
     end
     subgraph Proxy["o2a-proxy（本机）"]
         DESK["desktop/ 桌面客户端<br/>Tauri 2 + Vue 3"]
-        ASYNC["proxy_async.py<br/>asyncio + aiohttp 引擎"]
-        CORE["proxy.py<br/>核心库（转换 / 配置 / 统计）"]
-        STATS[("cache_stats/<br/>JSONL + 小时聚合")]
+        ENGINE["proxy_async.py / python -m o2a<br/>o2a/engine.py（asyncio + aiohttp）"]
+        CORE["o2a/ 核心包<br/>config.py / convert.py / stats.py"]
+        STATS[("data/cache_stats/<br/>JSONL + 小时聚合")]
     end
     subgraph Upstream["上游模型服务"]
         DS["DashScope / DeepSeek / Kimi 等<br/>OpenAI 兼容 API"]
     end
-    CC -- "Anthropic Messages" --> ASYNC
-    CX -- "OpenAI Responses" --> ASYNC
-    ASYNC -- "协议转换 / 配置 / 统计" --> CORE
-    ASYNC -- "Chat Completions" --> DS
-    DESK -- "启停 / 统计 / 配置" --> ASYNC
+    CC -- "Anthropic Messages" --> ENGINE
+    CX -- "OpenAI Responses" --> ENGINE
+    ENGINE -- "协议转换 / 配置 / 统计" --> CORE
+    ENGINE -- "Chat Completions" --> DS
+    DESK -- "启停 / 统计 / 配置" --> ENGINE
     DESK -- "读取统计文件" --> STATS
-    ASYNC -- "写入统计" --> STATS
+    ENGINE -- "写入统计" --> STATS
 ```
+
+> `proxy.py` / `proxy_async.py` 为根目录**兼容 shim**（真实实现收拢在 `o2a/` 包中），保留文件名供桌面端路径探测、绿色版组装与旧导入方式使用。
 
 ### 组件说明
 
 | 组件 | 说明 |
 |---|---|
-| `proxy_async.py` | **唯一引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消 |
-| `proxy.py` | **核心库**：协议转换、配置加载、缓存统计与定价等纯函数（线程版引擎已合并删除，保留文件名供桌面端探测与导入） |
+| `o2a/engine.py` | **唯一引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消（等价旧 `proxy_async.py`） |
+| `o2a/convert.py` | **协议转换**：Anthropic ↔ OpenAI Chat / Responses 互转、整包透传、思考深度映射 |
+| `o2a/config.py` | **配置模型**：账号/服务体系、config.json / auth.json 加载与旧格式迁移 |
+| `o2a/stats.py` | **缓存统计**：JSONL 记录 + 小时聚合 + 计费（等价旧 CacheStats） |
+| `o2a/base.py` | 公共基础：日志、环境变量常量、项目根定位与配置路径解析 |
+| `proxy.py` / `proxy_async.py` | 根目录兼容 shim（re-export `o2a` 包符号，行为不变） |
 | `desktop/` | Tauri 2 + Vue 3 桌面客户端：托盘启停、悬浮看板、统计面板、配置编辑器、模型列表联想 |
-| `cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
+| `data/cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
 | `pricing.json` | 模型定价数据，用于费用估算（支持按账号覆盖，见下文） |
 | `auth.json` | API Key 独立存放（对齐 pi 的 auth.json 模式，可选） |
-| `cache-stats.py` | 命令行统计查看工具 |
+| `cache-stats.py` | 命令行统计查看工具（走 HTTP /stats 接口） |
 
 ## 安装
 
@@ -60,7 +66,7 @@ pip install -r requirements.txt
 cp config.example.json config.json
 cp auth.example.json auth.json   # API Key 放这里，config.json 不存 Key
 # 编辑 auth.json 填入各账号 API Key；编辑 config.json 填账号端点与服务
-python proxy_async.py
+python proxy_async.py            # 或 python -m o2a
 ```
 
 也可以使用环境变量兜底（无 `config.json` 时，单服务）：
@@ -69,7 +75,7 @@ python proxy_async.py
 export DASHSCOPE_API_KEY=sk-xxx
 export DASHSCOPE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
 export PROXY_PORT=11011
-python proxy_async.py
+python proxy_async.py            # 或 python -m o2a
 ```
 
 ### 2. 桌面客户端（推荐）
@@ -116,7 +122,7 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 | `O2A_CONFIG` 环境变量 | 指定 `config.json` 路径；指向目录时取目录下 `config.json` |
 | `O2A_AUTH` 环境变量（可选） | 指定 `auth.json` 路径；**不设置时自动跟随 config.json 所在目录**，整套配置一起迁移 |
 | `python proxy_async.py --config <路径|目录> [--auth <路径|目录>]` | 命令行指定（写入等价环境变量） |
-| `CONFIG_FILE=<路径> ./start-proxy.sh` | 脚本启动方式；同样接受目录 |
+| `CONFIG_FILE=<路径> ./scripts/start-proxy.sh` | 脚本启动方式；同样接受目录 |
 
 **桌面客户端**还可在「配置」页的「配置文件位置」卡片直接设置（路径输入 + 「浏览文件/浏览目录」系统原生选择器 + 应用位置 / 恢复默认）：
 该设置保存在系统用户配置目录（Windows `%APPDATA%\com.o2aproxy.desktop\settings.json`，macOS `~/Library/Application Support/com.o2aproxy.desktop/settings.json`），
@@ -135,7 +141,7 @@ python proxy_async.py --config /etc/o2a-proxy/config.json --auth /etc/o2a-proxy/
 
 # 方式三：启动脚本
 export CONFIG_FILE=/etc/o2a-proxy/config.json
-./start-proxy.sh
+./scripts/start-proxy.sh
 ```
 
 > 桌面客户端读取自身进程环境的 `O2A_CONFIG`/`O2A_AUTH`，并在启动代理子进程时继承传递，两端读写同一份配置。
@@ -144,7 +150,7 @@ export CONFIG_FILE=/etc/o2a-proxy/config.json
 {
   "auth_token": "your-auth-token",
   "cache_stats_enabled": true,
-  "cache_stats_dir": "cache_stats",
+  "cache_stats_dir": "data/cache_stats",
   "cache_stats_retention_days": 30,
   "accounts": [
     {
@@ -173,7 +179,7 @@ export CONFIG_FILE=/etc/o2a-proxy/config.json
 |---|---|
 | `auth_token` | 认证令牌（可选，建议生产启用） |
 | `cache_stats_enabled` | 是否记录缓存统计 |
-| `cache_stats_dir` | 统计目录；**留空默认 `<项目根>/cache_stats`**（应用所在位置的相对目录），显式填写时相对路径基于项目根解析 |
+| `cache_stats_dir` | 统计目录；**留空默认 `<项目根>/data/cache_stats`**（应用所在位置的相对目录），显式填写时相对路径基于项目根解析 |
 | `cache_stats_retention_days` | 统计保留天数 |
 | `accounts[].id` | 账号唯一 id（服务引用它，自动生成不可改） |
 | `accounts[].name` | 账号显示名 |
@@ -328,8 +334,8 @@ experimental_bearer_token = "qs-cc"
 ## 统计与费用
 
 - **口径**：`缓存命中率 = 缓存读 / (缓存读 + 输入)`，对齐 Anthropic 官方定义
-- **记录文件**：`cache_stats/YYYY-MM-DD.jsonl`（每次请求一条）
-- **聚合文件**：`cache_stats/summary/<服务>/YYYY-MM-DD.json`（逐小时汇总，含费用）
+- **记录文件**：`data/cache_stats/YYYY-MM-DD.jsonl`（每次请求一条）
+- **聚合文件**：`data/cache_stats/summary/<服务>/YYYY-MM-DD.json`（逐小时汇总，含费用）
 - **命令行查看**：
 
 ```bash
@@ -348,25 +354,35 @@ python cache-stats.py day
 
 ```text
 o2a-proxy/
-├── proxy_async.py          # asyncio 引擎（唯一引擎）
-├── proxy.py                # 核心库（转换/配置/统计纯函数）
-├── config.example.json     # 配置模板
-├── pricing.json            # 模型定价
-├── requirements.txt        # Python 依赖
-├── cache-stats.py          # 命令行统计
-├── desktop/                # Tauri 2 + Vue 3 桌面客户端
-│   ├── src-tauri/          # Rust 后端（托盘 / 进程管理 / 统计聚合）
-│   ├── src/                # Vue 前端（面板 / 悬浮窗 / 图表）
-│   └── scripts/            # 图标生成等脚本
-└── cache_stats/            # 统计数据（不提交）
+├── o2a/                     # Python 包（核心实现）
+│   ├── engine.py            # asyncio 引擎（原 proxy_async.py）
+│   ├── convert.py           # 协议转换（Anthropic ↔ OpenAI Chat / Responses）
+│   ├── config.py            # 账号 / 服务 / 配置加载
+│   ├── stats.py             # 缓存统计与计费
+│   ├── base.py              # 日志 / 常量 / 项目根定位
+│   └── __main__.py          # python -m o2a 入口
+├── proxy_async.py           # 兼容 shim → o2a.engine（桌面端子进程入口）
+├── proxy.py                 # 兼容 shim → o2a 包（桌面端路径探测 / 旧导入）
+├── cache-stats.py           # 命令行统计（走 /stats 接口）
+├── config.example.json      # 配置模板
+├── pricing.json             # 模型定价
+├── requirements.txt         # Python 依赖
+├── scripts/                 # shell 脚本（start-proxy / cache-stats / cache-summary）
+├── tests/                   # pytest 测试（conftest.py 注入项目根）
+├── desktop/                 # Tauri 2 + Vue 3 桌面客户端
+│   ├── src-tauri/           # Rust 后端（托盘 / 进程管理 / 统计聚合）
+│   ├── src/                 # Vue 前端（面板 / 悬浮窗 / 图表）
+│   └── scripts/             # 打包 / 图标生成脚本
+├── data/cache_stats/        # 统计数据（运行时生成，不提交）
+└── logs/                    # 运行日志（运行时生成，不提交）
 ```
 
 测试：
 
 ```bash
 cd desktop/src-tauri && cargo test   # Rust 单测（统计聚合 / 进程管理 / 模型列表 / key 分流）
-python test_cache_stats.py           # 统计逻辑测试
-python test_codex_direct.py          # 端到端：Chat 整包透传 / Responses 透传 / Responses→Chat 转换（mock 上游，两引擎）
+python -m pytest tests/ -v           # Python 全量测试
+python tests/test_codex_direct.py    # 端到端：Chat 整包透传 / Responses 透传 / Responses→Chat 转换（mock 上游）
 ```
 
 > `test_codex_direct.py` 复用真实 `config.json` 中 ds 服务的账号配置，把上游指向本地 mock 服务器，不产生真实调用。

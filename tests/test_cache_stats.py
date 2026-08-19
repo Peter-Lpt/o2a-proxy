@@ -8,7 +8,7 @@ import sys
 from datetime import datetime
 
 # 导入 proxy 模块
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from proxy import CacheStats
 
 

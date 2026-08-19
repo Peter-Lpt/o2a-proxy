@@ -22,6 +22,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 cp "$TAURI_BIN" "$OUT/o2a-proxy.exe"
 cp "$ROOT/proxy.py" "$ROOT/proxy_async.py" "$ROOT/config.example.json" "$OUT/"
+cp -r "$ROOT/o2a" "$OUT/o2a"
 
 # 使用说明（若不存在则生成）
 if [ ! -f "$OUT/使用说明.txt" ]; then
@@ -45,7 +46,8 @@ o2a-proxy 绿色版（免安装）
     不会随程序文件夹丢失；也可在「配置」页的「配置文件位置」卡片自定义。
 
 关于引擎
-  - proxy.py / proxy_async.py 为内置代理引擎（与程序同目录，请勿删除）。
+  - proxy.py / proxy_async.py 为内置代理引擎入口（与程序同目录，请勿删除）。
+  - o2a/ 为代理引擎实现包（与 proxy.py 同目录，请勿删除）。
   - 如需在桌面端之外单独使用引擎：python proxy_async.py --service <名称>
 EOF
 fi

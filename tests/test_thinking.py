@@ -9,7 +9,7 @@ auto 推断（dashscope / deepseek / kimi / 其他网关）与边界（disabled 
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from proxy import (
     Account,

@@ -8,6 +8,23 @@ use std::time::Duration;
 
 use crate::AppState;
 
+/// 递归复制目录（测试准备临时引擎目录用：root/proxy.py + root/o2a/）。
+#[cfg(test)]
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let e = entry?;
+        let from = e.path();
+        let to = dst.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 fn config_services(state: &AppState) -> Vec<serde_json::Value> {
     crate::read_config_value(state)
         .ok()
@@ -272,7 +289,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
-            default_stats_dir: root.join("cache_stats"),
+            default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: settings.clone(),
             persistent_config: false,
             children: Mutex::new(std::collections::HashMap::new()),
@@ -329,6 +346,7 @@ mod tests {
             .join("..");
         std::fs::copy(repo.join("proxy_async.py"), root.join("proxy_async.py")).unwrap();
         std::fs::copy(repo.join("proxy.py"), root.join("proxy.py")).unwrap();
+        copy_dir_recursive(&repo.join("o2a"), &root.join("o2a")).unwrap();
 
         let cfg = serde_json::json!({
             "cache_stats_enabled": false,
@@ -346,7 +364,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
-            default_stats_dir: root.join("cache_stats"),
+            default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,
             children: Mutex::new(std::collections::HashMap::new()),
@@ -380,7 +398,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
-            default_stats_dir: root.join("cache_stats"),
+            default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,
             children: Mutex::new(std::collections::HashMap::new()),

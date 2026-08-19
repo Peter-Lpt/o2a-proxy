@@ -168,4 +168,6 @@ echo "启动代理..."
 echo "按 Ctrl+C 停止代理"
 echo ""
 export O2A_CONFIG="$CONFIG_FILE"
+# 切换到项目根，使相对路径（config.json / data/ / logs/ 等）以项目根为基准
+cd "$PROXY_DIR"
 exec python3 "$PROXY_DIR/proxy_async.py"

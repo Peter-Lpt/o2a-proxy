@@ -48,7 +48,7 @@ jobs:
       - name: 安装依赖
         run: pip install -r requirements.txt pytest
       - name: 运行测试
-        run: python -m pytest test_cache_stats.py test_codex_direct.py -v
+        run: python -m pytest tests/test_cache_stats.py tests/test_codex_direct.py tests/test_thinking.py -v
 
   # 桌面端前端：类型检查（vue-tsc）+ 构建（vite）
   desktop-build:

@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 
 DATE="${1:-$(date +%Y-%m-%d)}"
-FILE="cache_stats/${DATE}.jsonl"
+FILE="../data/cache_stats/${DATE}.jsonl"
 
 if [ ! -f "$FILE" ]; then
     echo "文件不存在: $FILE"

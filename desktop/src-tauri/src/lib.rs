@@ -1180,8 +1180,8 @@ pub fn run() {
             let state = AppState {
                 root: root.clone(),
                 python: find_python(),
-                // 默认统计目录：应用（项目根）下的相对目录
-                default_stats_dir: root.join("cache_stats"),
+                // 默认统计目录：应用（项目根）下的相对目录（data/cache_stats）
+                default_stats_dir: root.join("data").join("cache_stats"),
                 settings_file: settings_path(app),
                 persistent_config,
                 children: Mutex::new(HashMap::new()),
