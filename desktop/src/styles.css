@@ -204,6 +204,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   transition: color 0.15s, background 0.15s;
 }
 .icon-btn:hover { color: var(--text); background: var(--bg3); }
+.icon-btn.active {
+  color: var(--blue);
+  background: var(--blue-dim);
+  border-color: var(--blue);
+}
 .float-btn {
   display: inline-flex;
   align-items: center;
@@ -333,16 +338,16 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset;
 }
 
-/* ---------- KPI 汇总卡：当前小时 / 今日 / 本月 ---------- */
+/* ---------- KPI 汇总卡：请求/错误/Token/命中率/费用 ---------- */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 7px;
   margin-bottom: 10px;
 }
-/* 订阅制服务（无价格）时隐藏费用卡，KPI 由 4 列变 3 列 */
+/* 订阅制服务（无价格）时隐藏费用卡，KPI 由 5 列变 4 列 */
 .kpi-grid.no-fee {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
 }
 .kpi {
   display: flex;
@@ -371,10 +376,44 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* ---------- 性能条：平均耗时 / 首字 / 输出速度 ---------- */
+.perf-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 7px 12px;
+  margin-bottom: 10px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.perf-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.perf-chip + .perf-chip { padding-left: 12px; border-left: 1px solid var(--border-soft); }
+.perf-l { color: var(--muted); font-size: 10px; }
+.perf-v { color: var(--text); font-size: 13px; font-weight: 700; }
+.perf-note { margin-left: auto; color: var(--muted-2); font-size: 9.5px; white-space: nowrap; }
+
 /* ---------- 图表头部 ---------- */
 /* 轻量历史入口：今日/本月两档 + 日历（自定义区间） */
-.chart-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 9px; }
-.chart-left { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.chart-head { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 9px; gap: 6px; flex-wrap: wrap; }
+.chart-left { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.range-lbl { font-size: 11px; color: var(--muted); flex: none; }
+.range-select {
+  background-color: var(--bg2);
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2393a0b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  border: 1px solid var(--border-soft); border-radius: 8px;
+  padding: 4px 24px 4px 9px; font-size: 11.5px; color: var(--text);
+  outline: none; transition: border-color 0.15s;
+}
+.range-select:hover, .range-select:focus { border-color: var(--blue); }
 .cal-btn {
   display: inline-flex;
   align-items: center;
@@ -439,6 +478,23 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 }
 .stats-err svg { flex: none; margin-top: 1px; }
 
+/* 历史数据提示：当前区间为空但存在旧数据时 */
+.hist-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding: 7px 11px;
+  border-radius: 8px;
+  background: var(--blue-dim);
+  border: 1px solid rgba(79, 140, 255, 0.28);
+  color: var(--muted);
+  font-size: 11px;
+}
+.hist-hint svg { color: var(--blue); flex: none; }
+.hist-hint b { color: var(--text); }
+.hist-hint .btn { margin-left: auto; }
+
 /* 首启引导卡 */
 .guide-card {
   border-color: rgba(79, 140, 255, 0.35);
@@ -461,7 +517,9 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 .model-stats-list { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
 .ms-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; padding: 3px 0; }
 .ms-row .m { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-family: var(--font-mono); font-size: 11px; }
+.ms-row .m.svc { color: var(--green); }
 .ms-row .n { color: var(--muted); font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 10.5px; }
+.ms-row .n.meta-sm { color: var(--muted-2); }
 .ms-row .c { color: var(--amber); min-width: 62px; text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-mono); font-size: 10.5px; }
 .model-stats-total { font-size: 11px; color: var(--muted); font-family: var(--font-mono); }
 .empty-tip {
@@ -505,6 +563,14 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 .lf-row .t { color: var(--muted-2); }
 .lf-row .svc { color: var(--green); font-size: 9.5px; }
 .lf-row .k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.lf-row .meta { color: var(--muted-2); font-size: 9.5px; flex: none; white-space: nowrap; }
+.lf-row .err-lbl {
+  flex: 1; overflow: hidden; text-overflow: ellipsis;
+  color: var(--red); display: inline-flex; align-items: center; gap: 3px;
+}
+.lf-row.err { color: var(--red); }
+.lf-row.err .t { color: var(--red); }
+.lf-row.err svg { flex: none; }
 .lf-row .h { font-weight: 600; }
 .lf-row .h.good { color: var(--green); }
 .lf-row .h.mid { color: var(--amber); }
@@ -626,6 +692,7 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
     align-items: start;
   }
   .stats-panel > .kpi-grid,
+  .stats-panel > .perf-row,
   .stats-panel > .guide-card,
   .stats-panel > .chart-head,
   .stats-panel > .cal,
@@ -634,6 +701,7 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
   }
   .stats-panel > .card { margin-bottom: 10px; }
   .stats-panel > .model-stats-card { grid-column: 2; }
+  .stats-panel > .svc-stats-card { grid-column: 2; }
   .stats-panel > .live-card { grid-column: 2; }
 }
 

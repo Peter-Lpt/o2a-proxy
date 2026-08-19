@@ -9,30 +9,58 @@ use serde_json::{json, Map, Value};
 #[derive(Default, Clone)]
 struct Agg {
     requests: i64,
+    errors: i64,
     input: i64,
     read: i64,
     write: i64,
     output: i64,
     cost: f64,
+    // 延迟聚合（毫秒）
+    total_duration_ms: f64,
+    first_token_samples: i64,
+    total_first_token_ms: f64,
+    token_speed_samples: i64,
+    total_speed: f64,
 }
 
 impl Agg {
     fn add_record(&mut self, rec: &Value) {
         self.requests += 1;
+        let status = rec["status"].as_str().unwrap_or("ok");
+        if status == "error" || rec.get("error").is_some() {
+            self.errors += 1;
+        }
         self.input += rec["input_tokens"].as_i64().unwrap_or(0);
         self.read += rec["cache_read_tokens"].as_i64().unwrap_or(0);
         self.write += rec["cache_write_tokens"].as_i64().unwrap_or(0);
         self.output += rec["output_tokens"].as_i64().unwrap_or(0);
         self.cost += rec["cost"].as_f64().unwrap_or(0.0);
+        if let Some(d) = rec["duration_ms"].as_f64() {
+            self.total_duration_ms += d;
+        }
+        if let Some(f) = rec["first_token_ms"].as_f64() {
+            self.first_token_samples += 1;
+            self.total_first_token_ms += f;
+        }
+        if let Some(s) = rec["output_tokens_per_sec"].as_f64() {
+            self.token_speed_samples += 1;
+            self.total_speed += s;
+        }
     }
 
     fn add_agg(&mut self, other: &Agg) {
         self.requests += other.requests;
+        self.errors += other.errors;
         self.input += other.input;
         self.read += other.read;
         self.write += other.write;
         self.output += other.output;
         self.cost += other.cost;
+        self.total_duration_ms += other.total_duration_ms;
+        self.first_token_samples += other.first_token_samples;
+        self.total_first_token_ms += other.total_first_token_ms;
+        self.token_speed_samples += other.token_speed_samples;
+        self.total_speed += other.total_speed;
     }
 
     fn to_json(&self) -> Value {
@@ -40,6 +68,7 @@ impl Agg {
         let denom_cov = denom_hit + self.write;
         json!({
             "requests": self.requests,
+            "errors": self.errors,
             "input": self.input,
             "read": self.read,
             "write": self.write,
@@ -47,6 +76,9 @@ impl Agg {
             "cost": (self.cost * 10000.0).round() / 10000.0,
             "hitRate": if denom_hit > 0 { self.read as f64 / denom_hit as f64 } else { 0.0 },
             "coverage": if denom_cov > 0 { self.read as f64 / denom_cov as f64 } else { 0.0 },
+            "avgDurationMs": if self.requests > 0 { (self.total_duration_ms / self.requests as f64 * 10.0).round() / 10.0 } else { 0.0 },
+            "avgFirstTokenMs": if self.first_token_samples > 0 { (self.total_first_token_ms / self.first_token_samples as f64).round() } else { 0.0 },
+            "avgTokensPerSec": if self.token_speed_samples > 0 { (self.total_speed / self.token_speed_samples as f64 * 10.0).round() / 10.0 } else { 0.0 },
         })
     }
 }
@@ -55,6 +87,41 @@ fn read_json(path: &Path) -> Option<Value> {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// 扫描统计目录，返回有数据文件的日期（升序）。用于让前端感知“旧数据”存在，
+/// 即使当前区间/今日为空也能提示用户查看历史。
+fn list_data_dates(dir: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.ends_with(".jsonl") && name.len() >= 11 {
+                let date = &name[..10];
+                // 形如 YYYY-MM-DD
+                let mut ok = date.len() == 10
+                    && date.as_bytes().get(4) == Some(&b'-')
+                    && date.as_bytes().get(7) == Some(&b'-');
+                if ok {
+                    for b in date.as_bytes() {
+                        if *b == b'-' {
+                            continue;
+                        }
+                        if !b.is_ascii_digit() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok && !out.iter().any(|x| x == date) {
+                    out.push(date.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// 从 dir 起向上查找第一个存在的文件（最多向上 5 层），用于定位项目根的
@@ -327,6 +394,35 @@ fn sum_by_model(records: &[Value], service: &str, primary: &str) -> Vec<Value> {
     out
 }
 
+/// 按服务聚合（“全部”视图下展示各服务用量/错误，多服务 UI 支持）。
+/// 具体服务视图仍返回该服务的单条聚合。
+fn sum_by_service(records: &[Value], service: &str, primary: &str) -> Vec<Value> {
+    let mut map: BTreeMap<String, Agg> = BTreeMap::new();
+    for rec in records {
+        let svc = match rec.get("service").and_then(|v| v.as_str()) {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => primary.to_string(),
+        };
+        if !service.is_empty() && svc != service {
+            continue;
+        }
+        map.entry(svc).or_default().add_record(rec);
+    }
+    let mut out: Vec<Value> = map
+        .into_iter()
+        .map(|(name, agg)| {
+            let mut v = agg.to_json();
+            v["service"] = json!(name);
+            v
+        })
+        .collect();
+    out.sort_by_key(|a| {
+        // 按服务名稳定升序
+        a["service"].as_str().unwrap_or("").to_string()
+    });
+    out
+}
+
 fn aggregate_minutes(records: &[Value], service: &str, primary: &str) -> Vec<Value> {
     let by_model = aggregate_minutes_by_model(records, service, primary);
     let mut map: BTreeMap<String, Agg> = BTreeMap::new();
@@ -348,11 +444,17 @@ fn aggregate_minutes(records: &[Value], service: &str, primary: &str) -> Vec<Val
 fn agg_from_json(v: &Value) -> Agg {
     Agg {
         requests: v["requests"].as_i64().unwrap_or(0),
+        errors: v["errors"].as_i64().unwrap_or(0),
         input: v["input"].as_i64().unwrap_or(0),
         read: v["read"].as_i64().unwrap_or(0),
         write: v["write"].as_i64().unwrap_or(0),
         output: v["output"].as_i64().unwrap_or(0),
         cost: v["cost"].as_f64().unwrap_or(0.0),
+        total_duration_ms: v["avgDurationMs"].as_f64().unwrap_or(0.0) * v["requests"].as_f64().unwrap_or(0.0),
+        first_token_samples: 0,
+        total_first_token_ms: 0.0,
+        token_speed_samples: 0,
+        total_speed: 0.0,
     }
 }
 
@@ -394,8 +496,9 @@ fn aggregate_minutes_by_model(records: &[Value], service: &str, primary: &str) -
 fn zero_day(date: &str) -> Value {
     json!({
         "date": date,
-        "requests": 0, "input": 0, "read": 0, "write": 0, "output": 0,
+        "requests": 0, "errors": 0, "input": 0, "read": 0, "write": 0, "output": 0,
         "cost": 0.0, "hitRate": 0.0, "coverage": 0.0,
+        "avgDurationMs": 0.0, "avgFirstTokenMs": 0.0, "avgTokensPerSec": 0.0,
     })
 }
 
@@ -507,7 +610,7 @@ fn get_stats_impl(
         .and_then(|t| t.get("hours").and_then(|h| h.get(&cur_hour)))
         .cloned()
         .unwrap_or_else(|| {
-            json!({"hour": cur_hour, "requests":0,"input":0,"read":0,"write":0,"output":0,"cost":0,"hitRate":0,"coverage":0})
+            json!({"hour": cur_hour, "requests":0,"errors":0,"input":0,"read":0,"write":0,"output":0,"cost":0,"hitRate":0,"coverage":0,"avgDurationMs":0,"avgFirstTokenMs":0,"avgTokensPerSec":0})
         });
     let today_obj = today_day
         .as_ref()
@@ -576,6 +679,7 @@ fn get_stats_impl(
     };
 
     let by_model = sum_by_model(&range_records, service, primary);
+    let by_service = sum_by_service(&range_records, service, primary);
     let range_agg = agg_of_records(&range_records);
     let prev_records = collect_records(&by_date, &prev);
     let prev_agg = agg_of_records(&prev_records);
@@ -592,11 +696,19 @@ fn get_stats_impl(
         prev_label(rng).to_string()
     };
 
+    // 历史数据可用性：供前端在“今日/当前区间为空”时提示用户查看旧数据
+    let available_dates = list_data_dates(dir);
+    let has_older_data = available_dates.iter().any(|d| d.as_str() < today_str.as_str());
+    let last_data_date = available_dates.last().cloned().unwrap_or_default();
+
     Ok(json!({
         "updatedAt": now.to_rfc3339(),
         "showCost": show_cost(svc_total, &no_cost_services, service),
         "current": current,
         "today": today_obj,
+        "availableDays": available_dates,
+        "hasOlderData": has_older_data,
+        "lastDataDate": last_data_date,
         "month": {
             "requests": month_total.requests,
             "input": month_total.input,
@@ -616,6 +728,7 @@ fn get_stats_impl(
         "seriesKind": series_kind,
         "series": series,
         "byModel": by_model,
+        "byService": by_service,
         "rangeAgg": range_agg,
         "prevAgg": prev_agg,
     }))
@@ -744,7 +857,7 @@ fn hourly_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, Naiv
                 out.push(v);
             }
             None => out.push(json!({
-                "label": hh, "requests":0,"input":0,"read":0,"write":0,"output":0,"cost":0.0,"hitRate":0.0,"coverage":0.0
+                "label": hh, "requests":0,"errors":0,"input":0,"read":0,"write":0,"output":0,"cost":0.0,"hitRate":0.0,"coverage":0.0,"avgDurationMs":0,"avgFirstTokenMs":0,"avgTokensPerSec":0
             })),
         }
     }

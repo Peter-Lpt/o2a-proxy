@@ -35,10 +35,11 @@
     <div class="feed-wrap" data-tauri-drag-region="false">
       <div class="feed">
         <div v-if="!liveFeed.length" class="empty">等待请求…</div>
-        <div v-for="(r, i) in liveFeed" :key="r.key" class="row" :class="{ flash: i === 0 }">
+        <div v-for="(r, i) in liveFeed" :key="r.key" class="row" :class="{ flash: i === 0, err: r.isErr }">
           <span class="t">{{ r.time }}</span>
           <span v-if="r.service" class="svc">{{ r.service }}</span>
-          <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+          <span v-if="r.isErr" class="err-lbl" :title="r.err">{{ r.err }}</span>
+          <span v-else class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}<span v-if="r.speed > 0" class="spd" :title="'输出 ' + r.speed + ' tok/s'">·{{ fmtSpeed(r.speed) }}</span></span>
           <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
         </div>
       </div>
@@ -61,6 +62,11 @@ const records = ref<any[]>([]);
 const theme = ref<Theme>(getTheme());
 let timers: any[] = [];
 let resizeTimer: any = null;
+
+function fmtSpeed(s: number): string {
+  if (!s || isNaN(s) || s <= 0) return "";
+  return s >= 1000 ? (s / 1000).toFixed(1) + "k/s" : s.toFixed(0) + "/s";
+}
 
 // 初始服务从 URL 解析（#/float?service=xxx；共享窗口初始为全部）；
 // 由 Rust 发 float-switch 事件在共享窗口内切换服务。
@@ -226,13 +232,21 @@ const sparkRange = computed(() => {
   return [first, last];
 });
 
-const liveFeed = computed(() =>
-  (records.value || [])
+const liveFeed = computed(() => {
+  // 严格按时间倒序（最新在前），防御多服务交错/缓存导致旧记录跑到前面
+  const sorted = [...(records.value || [])].sort((a: any, b: any) => {
+    const ta = Date.parse(String(a.timestamp || "").replace("T", " "));
+    const tb = Date.parse(String(b.timestamp || "").replace("T", " "));
+    if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
+    return 0;
+  });
+  return sorted
     .slice(0, 24)
     .map((r: any) => {
       const rate = Number(r.cache_hit_rate || 0);
+      const isErr = !!r.error || r.status === "error";
       return {
-        key: `${r.timestamp}_${r.service}_${r.output_tokens}`,
+        key: `${r.timestamp}_${r.service}_${r.output_tokens}_${r.error || ""}`,
         time: String(r.timestamp || "").slice(11, 19),
         service: r.service || "",
         total:
@@ -243,9 +257,14 @@ const liveFeed = computed(() =>
         output: Number(r.output_tokens || 0),
         hitPct: (rate * 100).toFixed(0),
         hitCls: hitTier(rate, true),
+        isErr,
+        err: isErr ? String(r.error || r.status || "error") : "",
+        duration: Number(r.duration_ms || 0),
+        firstToken: Number(r.first_token_ms || 0),
+        speed: Number(r.output_tokens_per_sec || 0),
       };
-    })
-);
+    });
+});
 
 async function refresh() {
   try {
@@ -434,6 +453,13 @@ onUnmounted(() => {
 .t { color: var(--muted); flex: none; }
 .svc { color: var(--muted); flex: none; font-size: 10px; }
 .k { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.k .spd { color: var(--muted-2); font-size: 9.5px; }
+.err-lbl {
+  flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--red);
+}
+.row.err .t { color: var(--red); }
+.row.err .svc { color: var(--red); }
+.row.err .h { color: var(--red); }
 .h { flex: none; font-weight: 700; min-width: 36px; text-align: right; }
 .h.good { color: var(--green); }
 .h.mid { color: var(--amber); }

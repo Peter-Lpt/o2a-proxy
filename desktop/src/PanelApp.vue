@@ -78,38 +78,73 @@
           </div>
         </div>
 
-        <!-- KPI 汇总（当前小时 / 今日 / 本月） -->
-        <div class="kpi-grid" :class="{ 'no-fee': !showCost }">
+        <!-- KPI 汇总：默认当前小时/今日/本月锚点；历史/自定义区间时切换到所选区间 -->
+        <div class="kpi-grid" :class="{ 'no-fee': !showCost, historical: isHistoricalRange }">
           <div class="kpi">
             <span class="kpi-l">请求数</span>
-            <b class="kpi-v">{{ fmtNum(stats.today?.requests) }}</b>
-            <span class="kpi-s">时 {{ fmtNum(stats.current?.requests) }} · 月 {{ fmtNum(stats.month?.requests) }}</span>
+            <b class="kpi-v">{{ fmtNum(kpiMain.requests) }}</b>
+            <span class="kpi-s">{{ kpiSub.requests }}</span>
+          </div>
+          <div class="kpi">
+            <span class="kpi-l">错误</span>
+            <b class="kpi-v" :class="errCls(kpiMain.errors)">{{ fmtNum(kpiMain.errors) }}</b>
+            <span class="kpi-s">{{ kpiSub.errors }}</span>
           </div>
           <div class="kpi">
             <span class="kpi-l">Token</span>
-            <b class="kpi-v">{{ fmtNum(totalOf(stats.today)) }}</b>
-            <span class="kpi-s">时 {{ fmtNum(totalOf(stats.current)) }} · 月 {{ fmtNum(totalOf(stats.month)) }}</span>
+            <b class="kpi-v">{{ fmtNum(kpiMain.tokens) }}</b>
+            <span class="kpi-s">{{ kpiSub.tokens }}</span>
           </div>
           <div class="kpi">
             <span class="kpi-l">命中率</span>
-            <b class="kpi-v" :class="hitClass(stats.today?.hitRate)">{{ fmtPct(stats.today?.hitRate) }}</b>
-            <span class="kpi-s">时 {{ fmtPct(stats.current?.hitRate) }} · 月 {{ fmtPct(stats.month?.hitRate) }}</span>
+            <b class="kpi-v" :class="hitClass(kpiMain.hitRate)">{{ fmtPct(kpiMain.hitRate) }}</b>
+            <span class="kpi-s">{{ kpiSub.hitRate }}</span>
           </div>
           <div v-if="showCost" class="kpi">
             <span class="kpi-l">费用</span>
-            <b class="kpi-v cost">¥{{ fmtCost(stats.today?.cost) }}</b>
-            <span class="kpi-s">时 ¥{{ fmtCost(stats.current?.cost) }} · 月 ¥{{ fmtCost(stats.month?.cost) }}</span>
+            <b class="kpi-v cost">¥{{ fmtCost(kpiMain.cost) }}</b>
+            <span class="kpi-s">{{ kpiSub.cost }}</span>
           </div>
+        </div>
+
+        <!-- 性能条：平均耗时 / 首字 / 输出速度（近一段时间） -->
+        <div class="perf-row">
+          <div class="perf-chip" :title="'平均单次耗时（含流式总时长）'">
+            <span class="perf-l">平均耗时</span>
+            <b class="perf-v">{{ fmtMs(perf.duration) || "—" }}</b>
+          </div>
+          <div class="perf-chip" :title="'平均首 token 延迟（流式请求）'">
+            <span class="perf-l">首字</span>
+            <b class="perf-v">{{ fmtMs(perf.firstToken) || "—" }}</b>
+          </div>
+          <div class="perf-chip" :title="'平均输出 token 速度'">
+            <span class="perf-l">输出速度</span>
+            <b class="perf-v">{{ perf.speed ? fmtSpeed(perf.speed) : "—" }}</b>
+          </div>
+          <span class="perf-note">选自当前{{ isHistoricalRange ? "区间" : "时段" }}已完成请求 · {{ fmtNum(perf.samples) }} 次</span>
+        </div>
+
+        <!-- 当前区间为空但存在历史数据：提示用户查看旧数据 -->
+        <div v-if="kpiMain.requests === 0 && stats.hasOlderData && !isHistoricalRange" class="hist-hint">
+          <Icon name="sparkles" :size="12" />
+          <span>今日暂无数据，但历史共有 <b>{{ fmtNum(stats.availableDays?.length) }}</b> 天记录<template v-if="stats.lastDataDate">（最近 {{ stats.lastDataDate }}）</template>。</span>
+          <button class="btn btn-sm" @click="calOpen = true">查看历史</button>
         </div>
 
         <div class="chart-head">
           <div class="chart-left">
-            <div class="seg">
-              <button class="seg-btn" :class="{ active: range === 'today' }" @click="setRange('today')">今日</button>
-              <button class="seg-btn" :class="{ active: range === 'month' }" @click="setRange('month')">本月</button>
-            </div>
-            <button class="cal-btn" :class="{ active: range === 'custom' }" :title="calOpen ? '收起日历' : '自定义日期区间'" @click="calOpen = !calOpen">
-              {{ range === 'custom' ? rangeLabel : '日历' }}<span class="cal-caret">{{ calOpen ? '▲' : '▼' }}</span>
+            <span class="range-lbl">时间</span>
+            <select class="chart-select range-select" :value="rangeSelectValue" @change="onRangeSelect" :title="'统计时间区间（' + rangeLabel + '）'">
+              <option value="today">今日</option>
+              <option value="yesterday">昨日</option>
+              <option value="week">本周</option>
+              <option value="month">本月</option>
+              <option value="7d">近 7 天</option>
+              <option value="30d">近 30 天</option>
+              <option v-if="range === 'custom'" value="custom">自定义 {{ rangeLabel }}</option>
+            </select>
+            <button class="cal-btn" :class="{ active: calOpen }" :title="calOpen ? '收起日历' : '自定义日期区间'" @click="calOpen = !calOpen">
+              {{ calOpen ? '收起' : '日历' }}<span class="cal-caret">{{ calOpen ? '▲' : '▼' }}</span>
             </button>
           </div>
           <div class="chart-head-right">
@@ -150,6 +185,22 @@
           <div class="empty-tip">还没有按模型的统计数据，代理跑起来后这里会展示各模型的用量。</div>
         </div>
 
+        <!-- 多服务视图：全部 下按服务汇总（含错误） -->
+        <div v-if="selected === ALL && serviceStats.length" class="card svc-stats-card">
+          <div class="fc-h"><span>{{ rangeLabel }}按服务</span><span class="model-stats-total">共 {{ fmtNum(serviceTotal) }} 次</span></div>
+          <div class="model-stats-list">
+            <div v-for="s in serviceStats" :key="s.service" class="ms-row">
+              <span class="m svc">{{ s.service }}</span>
+              <span class="n">{{ fmtNum(s.requests) }} 次</span>
+              <span class="n">{{ fmtNum(s.errors) }} 错</span>
+              <span class="n">{{ fmtNum(s.input + s.read + s.output) }} tok</span>
+              <span v-if="s.avgDurationMs" class="n meta-sm">{{ fmtMs(s.avgDurationMs) }}</span>
+              <span v-if="showCost" class="c">¥{{ fmtCost(s.cost) }}</span>
+            </div>
+          </div>
+          <p class="hint">「全部」视图下按服务拆分用量与错误，便于多服务排查。</p>
+        </div>
+
         <div v-if="anyRunning" class="card live-card">
           <div class="live-head">
             <span class="live-title"><span class="live-dot"></span>实时调用</span>
@@ -157,10 +208,17 @@
           </div>
           <Spark :points="liveSpark" :height="40" class="live-spark" />
           <div class="live-feed">
-            <div v-for="r in liveFeed" :key="r.key" class="lf-row">
+            <div v-for="r in liveFeed" :key="r.key" class="lf-row" :class="{ err: r.isErr }">
               <span class="t">{{ r.time }}</span>
               <span v-if="r.service" class="svc">{{ r.service }}</span>
-              <span class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+              <span v-if="r.isErr" class="err-lbl">
+                <Icon name="alert" :size="10" />{{ r.err }}
+              </span>
+              <span v-else class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+              <span v-if="!r.isErr && r.duration > 0" class="meta" :title="'耗时 ' + r.duration + 'ms'">
+                {{ fmtMs(r.duration) }}<span v-if="r.firstToken > 0" :title="'首 token ' + r.firstToken + 'ms'">·首{{ fmtMs(r.firstToken) }}</span>
+                <span v-if="r.speed > 0" :title="'输出速度 ' + r.speed + ' tok/s'">·{{ fmtSpeed(r.speed) }}</span>
+              </span>
               <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
             </div>
           </div>
@@ -1191,8 +1249,83 @@ function totalOf(o: any): number {
   return Number(o?.input || 0) + Number(o?.read || 0) + Number(o?.output || 0);
 }
 
+// 当前所选区间是否属于历史/自定义（今日之外）。历史/自定义时顶部 KPI 行
+// 切到所选区间汇总，让日期筛选的作用范围覆盖整页统计，而非只影响图表。
+const isHistoricalRange = computed(
+  () => range.value === "custom" || ["yesterday", "week", "lastweek", "month", "lastmonth"].includes(range.value)
+);
+// 顶部 KPI 主值：默认今日锚点；历史/自定义区间改用所选区间汇总（rangeAgg）
+const kpiMain = computed(() => {
+  if (!isHistoricalRange.value) {
+    return {
+      requests: Number(stats.today?.requests || 0),
+      errors: Number(stats.today?.errors || 0),
+      tokens: totalOf(stats.today),
+      hitRate: stats.today?.hitRate || 0,
+      cost: Number(stats.today?.cost || 0),
+    };
+  }
+  const ra = stats.rangeAgg || {};
+  return {
+    requests: Number(ra.requests || 0),
+    errors: Number(ra.errors || 0),
+    tokens: totalOf(ra),
+    hitRate: ra.hitRate || 0,
+    cost: Number(ra.cost || 0),
+  };
+});
+// 顶部 KPI 副标签
+const kpiSub = computed(() => {
+  const fmtN = (v: any) => fmtNum(v || 0);
+  if (!isHistoricalRange.value) {
+    return {
+      requests: `时 ${fmtN(stats.current?.requests)} · 月 ${fmtN(stats.month?.requests)}`,
+      errors: `时 ${fmtN(stats.current?.errors)} · 月 ${fmtN(stats.month?.errors)}`,
+      tokens: `时 ${fmtN(totalOf(stats.current))} · 月 ${fmtN(totalOf(stats.month))}`,
+      hitRate: `时 ${fmtPct(stats.current?.hitRate)} · 月 ${fmtPct(stats.month?.hitRate)}`,
+      cost: `时 ¥${fmtCost(stats.current?.cost)} · 月 ¥${fmtCost(stats.month?.cost)}`,
+    };
+  }
+  const pa = stats.prevAgg || {};
+  return {
+    requests: `${rangeLabel.value} · 较${prevLabel.value} ${fmtN(pa.requests)}`,
+    errors: `${rangeLabel.value} 错误 ${fmtN(kpiMain.value.errors)}`,
+    tokens: `${rangeLabel.value} · 较${prevLabel.value} ${fmtN(totalOf(pa))}`,
+    hitRate: `${rangeLabel.value} · 较${prevLabel.value} ${fmtPct(pa.hitRate)}`,
+    cost: `${rangeLabel.value} · 较${prevLabel.value} ¥${fmtCost(pa.cost)}`,
+  };
+});
+
+// 性能条（平均耗时 / 首字 / 输出速度）：来自当前时段（today）或所选区间（rangeAgg）
+const perf = computed(() => {
+  const src = isHistoricalRange.value ? stats.rangeAgg || {} : stats.today || {};
+  return {
+    duration: Number(src.avgDurationMs || 0),
+    firstToken: Number(src.avgFirstTokenMs || 0),
+    speed: Number(src.avgTokensPerSec || 0),
+    samples: Number(src.requests || 0),
+  };
+});
+
+// 耗时格式化：<1000ms 显示 ms，否则显示 s 并保留一位小数
+function fmtMs(ms: number): string {
+  if (!ms || isNaN(ms) || ms <= 0) return "";
+  if (ms < 1000) return ms.toFixed(0) + "ms";
+  return (ms / 1000).toFixed(1) + "s";
+}
+// 输出速度格式化：tok/s，>=1000 显示 k
+function fmtSpeed(s: number): string {
+  if (!s || isNaN(s) || s <= 0) return "";
+  return s >= 1000 ? (s / 1000).toFixed(1) + "k/s" : s.toFixed(0) + "/s";
+}
+
 function hitClass(r: number): string {
   return hitTier(r, false);
+}
+
+function errCls(n: number | undefined): string {
+  const v = Number(n || 0);
+  return v > 0 ? "mid" : "";
 }
 
 const modelOptions = computed(() => (stats.byModel || []).map((m: any) => m.model));
@@ -1206,6 +1339,12 @@ const modelStats = computed(() => {
   const arr = stats.byModel || [];
   return (arr as any[]).filter((m: any) => !modelFilter.value || m.model === modelFilter.value);
 });
+
+// 多服务“全部”视图：按服务汇总（后端 byService）
+const serviceStats = computed(() => stats.byService || []);
+const serviceTotal = computed(() =>
+  (serviceStats.value as any[]).reduce((a: number, s: any) => a + Number(s.requests || 0), 0)
+);
 
 // 所选范围的相关文案与同比
 const rangeLabel = computed(() => {
@@ -1261,26 +1400,38 @@ const chartHit = computed(() => chartData.value.hit);
 const liveSpark = computed(() =>
   liveRecords.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
-const liveFeed = computed(() =>
-  liveRecords.value
-    .slice(0, 30)
-    .map((r: any) => {
-      const rate = Number(r.cache_hit_rate || 0);
-      return {
-        key: `${r.timestamp}_${r.service}_${r.output_tokens}`,
-        time: String(r.timestamp || "").slice(11, 19),
-        service: r.service || "",
-        total:
-          Number(r.input_tokens || 0) +
-          Number(r.cache_read_tokens || 0) +
-          Number(r.cache_write_tokens || 0),
-        cacheRead: Number(r.cache_read_tokens || 0),
-        output: Number(r.output_tokens || 0),
-        hitPct: (rate * 100).toFixed(0),
-        hitCls: hitTier(rate, true),
-      };
-    })
-);
+const liveFeed = computed(() => {
+  // 严格按时间倒序（最新在前）：后端已倒序，这里再做一次防御性排序，
+  // 避免多服务交错或缓存顺序导致旧记录跑到新请求前面。
+  const sorted = [...liveRecords.value].sort((a, b) => {
+    const ta = Date.parse(String(a.timestamp || "").replace("T", " "));
+    const tb = Date.parse(String(b.timestamp || "").replace("T", " "));
+    if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
+    return 0;
+  });
+  return sorted.slice(0, 30).map((r: any) => {
+    const rate = Number(r.cache_hit_rate || 0);
+    const isErr = !!r.error || r.status === "error";
+    return {
+      key: `${r.timestamp}_${r.service}_${r.output_tokens}_${r.error || ""}`,
+      time: String(r.timestamp || "").slice(11, 19),
+      service: r.service || "",
+      total:
+        Number(r.input_tokens || 0) +
+        Number(r.cache_read_tokens || 0) +
+        Number(r.cache_write_tokens || 0),
+      cacheRead: Number(r.cache_read_tokens || 0),
+      output: Number(r.output_tokens || 0),
+      hitPct: (rate * 100).toFixed(0),
+      hitCls: hitTier(rate, true),
+      isErr,
+      err: isErr ? String(r.error || r.status || "error") : "",
+      duration: Number(r.duration_ms || 0),
+      firstToken: Number(r.first_token_ms || 0),
+      speed: Number(r.output_tokens_per_sec || 0),
+    };
+  });
+});
 
 // 近 5 分钟汇总（命中率用近 5 分钟 token 加权）
 const liveSum = computed(() => {
@@ -1316,6 +1467,24 @@ function setRange(r: RangeKey) {
   loadStats();
 }
 
+// 时间区间下拉的当前值：今日/昨日/本周/本月直接映射；自定义区间统一回 "custom"
+const rangeSelectValue = computed(() =>
+  ["today", "yesterday", "week", "month"].includes(range.value)
+    ? range.value
+    : "custom"
+);
+
+// 时间区间下拉切换
+function onRangeSelect(e: Event) {
+  const v = (e.target as HTMLSelectElement).value;
+  if (["today", "yesterday", "week", "month"].includes(v)) {
+    setRange(v as RangeKey);
+  } else if (v === "7d" || v === "30d") {
+    onQuickRange(v);
+  }
+  // v === "custom"：当前已是自定义，无需处理
+}
+
 // 自定义区间：起止日期（YYYY-MM-DD）；保持日历展开，便于用户看到选中区间并可微调
 function setCustomRange(start: string, end: string) {
   customRange.value = { start, end };
@@ -1345,6 +1514,11 @@ function onCalQuick(key: string) {
   const days = key === "7d" ? 6 : 29;
   const start = iso(new Date(now.getTime() - days * 86400000));
   setCustomRange(start, iso(now));
+}
+
+// 图表头部快捷区间：近7天 / 近30天（复用日历快捷逻辑）
+function onQuickRange(key: string) {
+  onCalQuick(key);
 }
 
 watch(selected, () => {

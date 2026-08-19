@@ -160,12 +160,37 @@ async def stream_write(resp: web.StreamResponse, data: bytes) -> None:
         raise ClientGone() from None
 
 
-async def record_stats(service: Service, model: str, usage: dict) -> None:
-    """记录缓存统计（写盘放到线程池，避免阻塞事件循环）。"""
-    if is_cache_stats_enabled() and usage and usage.get("input_tokens"):
-        await asyncio.to_thread(
-            _stats_for(service).record, model, usage
-        )
+async def record_stats(service: Service, model: str, usage: dict,
+                       error: str = None, req_start: float = None,
+                       first_chunk_ts: float = None) -> None:
+    """记录缓存统计（写盘放到线程池，避免阻塞事件循环）。
+
+    支持记录错误调用（error 非空）与耗时指标（duration_ms / first_token_ms /
+    output_tokens_per_sec）。
+    """
+    if not is_cache_stats_enabled():
+        return
+    if not usage and not error:
+        return
+    meta = {}
+    if req_start is not None:
+        meta["duration_ms"] = (time.time() - req_start) * 1000.0
+    if first_chunk_ts is not None and req_start is not None:
+        meta["first_token_ms"] = (first_chunk_ts - req_start) * 1000.0
+    output_tokens = 0
+    if usage:
+        output_tokens = usage.get("output_tokens", 0) or 0
+    if output_tokens and first_chunk_ts is not None and req_start is not None:
+        gen_seconds = time.time() - first_chunk_ts
+        if gen_seconds > 0:
+            meta["output_tokens_per_sec"] = output_tokens / gen_seconds
+    elif output_tokens and req_start is not None:
+        total_seconds = time.time() - req_start
+        if total_seconds > 0:
+            meta["output_tokens_per_sec"] = output_tokens / total_seconds
+    await asyncio.to_thread(
+        _stats_for(service).record, model, usage or {}, error=error, meta=meta
+    )
 
 
 def _stats_for(service: Service):
@@ -216,6 +241,8 @@ async def handle_claude_stream(request: web.Request, service: Service,
                 err_body = await up.text()
                 logger.error(f"Upstream error {up.status}: {err_body}")
                 logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
+                await record_stats(service, openai_request.get("model") or service.model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return error_response(up.status, f"upstream error: {err_body}")
 
             logger.info(f"[FWD] upstream connected status={up.status} "
@@ -308,7 +335,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             "type": "message_stop",
                         }).encode())
                         finished = True
-                        await record_stats(service, model, latest_usage)
+                        await record_stats(service, model, latest_usage, req_start=req_start, first_chunk_ts=first_chunk_ts)
                         break
                     if now - last_prog_ts >= 5.0:
                         last_prog_ts = now
@@ -341,7 +368,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                 "type": "message_stop",
                             }).encode())
                             finished = True
-                            await record_stats(service, model, latest_usage)
+                            await record_stats(service, model, latest_usage, req_start=req_start, first_chunk_ts=first_chunk_ts)
                         logger.info(f"[STREAM] completed finished={finished} chunks={n_chunks} "
                                     f"total_elapsed={time.time()-req_start:.2f}s "
                                     f"reasoning_bytes={reasoning_bytes} text_bytes={text_bytes} "
@@ -389,7 +416,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                                 "type": "message_stop",
                             }).encode())
                             finished = True
-                            await record_stats(service, model, latest_usage)
+                            await record_stats(service, model, latest_usage, req_start=req_start, first_chunk_ts=first_chunk_ts)
                         continue
 
                     choice = choices[0]
@@ -604,7 +631,7 @@ async def handle_claude_stream(request: web.Request, service: Service,
                             "type": "message_stop",
                         }).encode())
                         finished = True
-                        await record_stats(service, model, latest_usage)
+                        await record_stats(service, model, latest_usage, req_start=req_start, first_chunk_ts=first_chunk_ts)
                     logger.info(f"[STREAM] upstream closed without [DONE] chunks={n_chunks} "
                                 f"elapsed={time.time()-req_start:.2f}s "
                                 f"finished={finished}")
@@ -614,6 +641,9 @@ async def handle_claude_stream(request: web.Request, service: Service,
                 raise
             except Exception as e:
                 logger.error(f"Stream error: {e}", exc_info=True)
+                await record_stats(service, model, latest_usage,
+                                   error=f"stream error: {e}", req_start=req_start,
+                                   first_chunk_ts=first_chunk_ts)
                 try:
                     if not finished and started:
                         await stream_write(resp, sse_event({
@@ -635,6 +665,8 @@ async def handle_claude_stream(request: web.Request, service: Service,
         err_body = str(e)
         logger.error(f"Upstream request failed: {err_body[:500]}")
         logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
+        await record_stats(service, openai_request.get("model") or service.model, {},
+                           error="upstream request failed", req_start=req_start)
         if resp is None:
             # 尚未发出响应头，可以正常返回 502
             return error_response(502, f"upstream error: {err_body[:300]}")
@@ -667,12 +699,16 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
                 err_body = await up.text()
                 logger.error(f"Upstream error {up.status}: {err_body}")
                 logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
+                await record_stats(service, openai_request.get("model") or service.model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return error_response(up.status, f"upstream error: {err_body}")
             raw = await up.json(content_type=None)
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"Upstream request failed: {err_body[:500]}")
         logger.error(f"Sent request: {_payload_summary(openai_request, body)}")
+        await record_stats(service, openai_request.get("model") or service.model, {},
+                           error="upstream request failed", req_start=req_start)
         return error_response(502, f"upstream error: {err_body[:300]}")
 
     logger.info(f"[NONSTREAM] completed elapsed={time.time()-req_start:.2f}s "
@@ -726,6 +762,7 @@ async def handle_claude_non_stream(request: web.Request, service: Service,
          "cache_read_input_tokens": cached_tokens,
          "cache_creation_input_tokens": cache_write_tokens,
          "reasoning_tokens": converted_usage.get("reasoning_tokens", 0)},
+        req_start=req_start,
     )
 
     return json_response({
@@ -786,6 +823,8 @@ async def handle_passthrough(request: web.Request, service: Service,
             if up.status != 200:
                 err = await up.text()
                 # 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                await record_stats(service, model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return openai_error_response(up.status, f"upstream error: {err}")
             if not stream:
                 raw = await up.read()
@@ -793,7 +832,8 @@ async def handle_passthrough(request: web.Request, service: Service,
                     data = json.loads(raw)
                     converted = _convert_usage(data.get("usage") or {})
                     if converted.get("input_tokens"):
-                        await record_stats(service, data.get("model") or model, converted)
+                        await record_stats(service, data.get("model") or model, converted,
+                                           req_start=req_start)
                     # 任务状态：非流式单次响应，用 finish_reason 判定是否最终答复
                     fr = ((data.get("choices") or [{}])[0].get("finish_reason"))
                     has_tool = bool((data.get("choices") or [{}])[0]\
@@ -812,6 +852,7 @@ async def handle_passthrough(request: web.Request, service: Service,
             latest_usage = None
             finish_reason = None
             done_seen = False
+            first_chunk_ts = None
             _task_begin(request.app)
             try:
                 while True:
@@ -820,6 +861,8 @@ async def handle_passthrough(request: web.Request, service: Service,
                         break
                     stripped = line.strip()
                     if stripped.startswith(b"data:"):
+                        if first_chunk_ts is None:
+                            first_chunk_ts = time.time()
                         piece = stripped[5:].strip()
                         if piece == b"[DONE]":
                             done_seen = True
@@ -865,7 +908,8 @@ async def handle_passthrough(request: web.Request, service: Service,
                 except Exception:
                     pass
             finally:
-                await record_stats(service, model, latest_usage)
+                await record_stats(service, model, latest_usage,
+                                   req_start=req_start, first_chunk_ts=first_chunk_ts)
                 if not responses_usage:
                     _task_finish(request.app, _classify(finish_reason))
                 _task_end(request.app)
@@ -875,6 +919,7 @@ async def handle_passthrough(request: web.Request, service: Service,
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[passthrough] upstream failed: {err_body[:500]}")
+        await record_stats(service, model, {}, error="upstream request failed", req_start=req_start)
         if resp is None:
             return openai_error_response(502, f"upstream error: {err_body[:300]}")
         # 流已开始：结束当前响应，不能返回新的错误响应头
@@ -909,6 +954,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
             if up.status != 200:
                 err = await up.text()
                 # 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                await record_stats(service, service.model if service.override_model else (req.get("model") or service.model), {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return openai_error_response(up.status, f"upstream error: {err}")
 
             resp = web.StreamResponse(status=200, headers={
@@ -922,6 +969,7 @@ async def handle_openai_stream(request: web.Request, service: Service,
             latest_usage = None
             done_seen = False
             finish_reason = None
+            first_chunk_ts = None
             if is_responses:
                 translator = _ResponsesStreamTranslator(model)
             _task_begin(request.app)
@@ -941,6 +989,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
                         # Chat 直通：原样转发每行，仅顺带提取 usage 供统计
                         stripped = line.strip()
                         if stripped.startswith(b"data:") :
+                            if first_chunk_ts is None:
+                                first_chunk_ts = time.time()
                             piece = stripped[5:].strip()
                             if piece == b"[DONE]":
                                 done_seen = True
@@ -960,6 +1010,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
                         await stream_write(resp, line)
                         continue
                     if line.startswith(b"data:"):
+                        if first_chunk_ts is None:
+                            first_chunk_ts = time.time()
                         data_str = line[5:].strip().decode("utf-8", errors="replace")
                         if data_str == "[DONE]":
                             done_seen = True
@@ -1000,7 +1052,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
                 except Exception:
                     pass
             finally:
-                await record_stats(service, model, latest_usage)
+                await record_stats(service, model, latest_usage,
+                                   req_start=req_start, first_chunk_ts=first_chunk_ts)
                 if not is_responses:
                     _task_finish(request.app, _classify(finish_reason))
                 _task_end(request.app)
@@ -1009,6 +1062,8 @@ async def handle_openai_stream(request: web.Request, service: Service,
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[codex] upstream failed: {err_body[:500]}")
+        await record_stats(service, service.model if service.override_model else (req.get("model") or service.model), {},
+                           error="upstream request failed", req_start=req_start)
         if resp is None:
             return openai_error_response(502, f"upstream error: {err_body[:300]}")
         try:
@@ -1036,20 +1091,21 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
             if up.status != 200:
                 err = await up.text()
                 # 原样透传上游错误体，避免丢失 type/code/param
+                await record_stats(service, model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return openai_error_response(up.status, f"upstream error: {err}")
             raw = await up.read()
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[codex] upstream failed: {err_body[:500]}")
+        await record_stats(service, model, {}, error="upstream request failed", req_start=req_start)
         return openai_error_response(502, f"upstream error: {err_body[:300]}")
 
     try:
         data = json.loads(raw)
         converted = _convert_usage(data.get("usage") or {})
         if converted.get("input_tokens") and is_cache_stats_enabled():
-            await asyncio.to_thread(
-                _stats_for(service).record, model, converted
-            )
+            await record_stats(service, model, converted, req_start=req_start)
         if not req.get("input"):
             # Chat 直通：上游本就是 chat.completion，原样返回
             fr = ((data.get("choices") or [{}])[0].get("finish_reason"))
@@ -1069,6 +1125,8 @@ async def handle_openai_non_stream(request: web.Request, service: Service,
             # Chat 直通：任何转换异常都原样返回上游响应
             return web.Response(body=raw, status=200, content_type="application/json")
         # Responses 转换失败：返回明确错误，不能把 Chat 结构错位地当作 Responses 返回
+        await record_stats(service, model, {}, error=f"response convert failed: {e}",
+                           req_start=req_start)
         return openai_error_response(
             500, f"response convert failed: {e}")
 
@@ -1112,11 +1170,15 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
                 err = await up.text()
                 logger.error(f"[direct] upstream error {up.status}: {err}")
                 # 原样透传上游错误体
+                await record_stats(service, service.model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return error_response(up.status, f"upstream error: {err}")
             raw = await up.read()
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[direct] upstream failed: {err_body[:500]}")
+        await record_stats(service, service.model, {}, error="upstream request failed",
+                           req_start=req_start)
         return error_response(502, f"upstream error: {err_body[:300]}")
 
     try:
@@ -1127,9 +1189,7 @@ async def handle_direct_non_stream(request: web.Request, service: Service,
         if "prompt_tokens" in usage or "completion_tokens" in usage:
             usage = _convert_usage(usage)
         if (usage.get("input_tokens") or usage.get("output_tokens")) and is_cache_stats_enabled():
-            await asyncio.to_thread(
-                _stats_for(service).record, model, usage
-            )
+            await record_stats(service, model, usage, req_start=req_start)
         # 任务状态：Anthropic stop_reason == end_turn 视为最终答复
         _task_finish(request.app, _classify(data.get("stop_reason")))
     except Exception as e:
@@ -1157,6 +1217,8 @@ async def handle_direct_stream(request: web.Request, service: Service,
                 err = await up.text()
                 logger.error(f"[direct] upstream error {up.status}: {err}")
                 # 原样透传上游错误体
+                await record_stats(service, service.model, {},
+                                   error=f"upstream HTTP {up.status}", req_start=req_start)
                 return error_response(up.status, f"upstream error: {err}")
 
             resp = web.StreamResponse(status=200, headers={
@@ -1169,6 +1231,7 @@ async def handle_direct_stream(request: web.Request, service: Service,
             model = service.model
             latest_usage = None
             stop_reason = None
+            first_chunk_ts = None
             _task_begin(request.app)
             try:
                 while True:
@@ -1177,6 +1240,8 @@ async def handle_direct_stream(request: web.Request, service: Service,
                         break
                     await stream_write(resp, line)
                     if line.startswith(b"data:"):
+                        if first_chunk_ts is None:
+                            first_chunk_ts = time.time()
                         data_str = line[5:].strip().decode("utf-8", errors="replace")
                         if data_str == "[DONE]":
                             break
@@ -1220,12 +1285,15 @@ async def handle_direct_stream(request: web.Request, service: Service,
             finally:
                 if latest_usage and ("prompt_tokens" in latest_usage or "completion_tokens" in latest_usage):
                     latest_usage = _convert_usage(latest_usage)
-                await record_stats(service, model, latest_usage)
+                await record_stats(service, model, latest_usage,
+                                   req_start=req_start, first_chunk_ts=first_chunk_ts)
                 _task_finish(request.app, _classify(stop_reason))
                 _task_end(request.app)
     except aiohttp.ClientError as e:
         err_body = str(e)
         logger.error(f"[direct] upstream failed: {err_body[:500]}")
+        await record_stats(service, service.model, {}, error="upstream request failed",
+                           req_start=req_start)
         if resp is None:
             return error_response(502, f"upstream error: {err_body[:300]}")
         try:

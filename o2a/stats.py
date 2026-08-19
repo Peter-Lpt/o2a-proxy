@@ -148,8 +148,14 @@ class CacheStats:
         cache_coverage = cache_read / denom_cov if denom_cov > 0 else 0.0
         return cache_hit_rate, cache_coverage
 
-    def _build_record(self, model, usage):
-        """构建一条统计记录。"""
+    def _build_record(self, model, usage, error=None, meta=None):
+        """构建一条统计记录。
+
+        usage 为空时仍可记录一次错误调用（error 非空）。meta 可携带：
+        - duration_ms: 总耗时（毫秒）
+        - first_token_ms: 首 token 耗时（毫秒，流式请求）
+        - output_tokens_per_sec: 输出 token 速度（tok/s）
+        """
         input_tokens = usage.get("input_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
         cache_write = usage.get("cache_creation_input_tokens", 0)
@@ -160,11 +166,12 @@ class CacheStats:
         cost = 0.0 if self.no_cost else self._calc_cost(
             model, input_tokens, cache_read, cache_write, output_tokens, account=self.account
         )
-        return {
+        record = {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
             "service": self.service,
             "account": self.account,
             "model": model,
+            "status": "error" if error else "ok",
             "input_tokens": input_tokens,
             "cache_read_tokens": cache_read,
             "cache_write_tokens": cache_write,
@@ -173,6 +180,13 @@ class CacheStats:
             "cache_coverage": round(cache_coverage, 4),
             "cost": round(cost, 6),
         }
+        if error:
+            record["error"] = error
+        if meta:
+            for key in ("duration_ms", "first_token_ms", "output_tokens_per_sec"):
+                if key in meta and meta[key] is not None:
+                    record[key] = round(float(meta[key]), 2)
+        return record
 
     def _format_log(self, record):
         """格式化单次请求的缓存日志。"""
@@ -186,11 +200,14 @@ class CacheStats:
             f"out={record['output_tokens']:,}"
         )
 
-    def record(self, model, usage):
-        """记录一次请求的缓存统计。"""
-        if not usage:
+    def record(self, model, usage, error=None, meta=None):
+        """记录一次请求的缓存统计（成功或失败）。
+
+        error 非空时记录为一次失败调用；usage 可为空字典。meta 见 _build_record。
+        """
+        if not usage and not error:
             return
-        record = self._build_record(model, usage)
+        record = self._build_record(model, usage or {}, error=error, meta=meta)
 
         with self._lock:
             # 写入 JSONL（文件锁防多进程，仅 Unix 支持）
