@@ -78,7 +78,10 @@ fn log_path(state: &AppState, name: &str) -> PathBuf {
         .chars()
         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect();
-    state.root.join(format!("proxy_{}.log", safe))
+    // 日志统一收拢到项目根 logs/（目录不存在时自动创建）
+    let dir = state.root.join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join(format!("proxy_{}.log", safe))
 }
 
 fn read_log_tail(p: &std::path::Path, max: usize) -> String {
