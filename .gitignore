@@ -26,6 +26,7 @@ vite-dev.*.log
 # 绿色版可执行文件（构建产物，随源码重新打包）
 o2a-proxy.exe
 o2a-desktop.exe
+o2a-desktop.exe.bak
 
 # 前端构建输出
 desktop/dist/

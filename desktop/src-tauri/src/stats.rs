@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -57,21 +57,34 @@ fn read_json(path: &Path) -> Option<Value> {
         .and_then(|s| serde_json::from_str(&s).ok())
 }
 
+/// 从 dir 起向上查找第一个存在的文件（最多向上 5 层），用于定位项目根的
+/// pricing.json / config.json。默认统计目录为 <项目根>/data/cache_stats（自 v0.2 起），
+/// 旧布局 <项目根>/cache_stats 与自定义绝对目录同样兼容。
+fn find_up(dir: &Path, filename: &str) -> PathBuf {
+    let mut cur = Some(dir);
+    for _ in 0..5 {
+        let d = cur.unwrap_or(Path::new(""));
+        let candidate = d.join(filename);
+        if candidate.is_file() {
+            return candidate;
+        }
+        cur = d.parent();
+        if cur.is_none() {
+            break;
+        }
+    }
+    // 兜底：相对进程 CWD（原行为）
+    Path::new(filename).to_path_buf()
+}
+
 fn load_pricing(stats_dir: &Path) -> Value {
-    let p = stats_dir
-        .parent()
-        .map(|d| d.join("pricing.json"))
-        .unwrap_or_else(|| Path::new("pricing.json").to_path_buf());
-    read_json(&p).unwrap_or(Value::Null)
+    read_json(&find_up(stats_dir, "pricing.json")).unwrap_or(Value::Null)
 }
 
 /// 读取 config.json 的 accounts，构建账号 id -> name 别名映射（用于定价按 name 匹配）。
 fn load_account_aliases(stats_dir: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    let p = stats_dir
-        .parent()
-        .map(|d| d.join("config.json"))
-        .unwrap_or_else(|| Path::new("config.json").to_path_buf());
+    let p = find_up(stats_dir, "config.json");
     if let Some(cfg) = read_json(&p) {
         if let Some(accounts) = cfg.get("accounts").and_then(|a| a.as_array()) {
             for a in accounts {
@@ -1065,6 +1078,32 @@ mod tests {
         assert_eq!(all_sub["today"]["cost"], 0.0);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_up_locates_project_root_files_both_layouts() {
+        // 新布局 <root>/data/cache_stats（v0.2 起默认）与旧布局 <root>/cache_stats
+        // 都能从统计目录向上找到项目根的 pricing.json / config.json。
+        let root = std::env::temp_dir().join(format!("o2a_findup_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for layout in ["cache_stats", "data/cache_stats"] {
+            let stats_dir = root.join(layout);
+            std::fs::create_dir_all(&stats_dir).unwrap();
+            std::fs::write(root.join("pricing.json"), "{\"x\":1}").unwrap();
+            std::fs::write(root.join("config.json"), "{\"accounts\":[]}").unwrap();
+
+            assert_eq!(find_up(&stats_dir, "pricing.json"), root.join("pricing.json"));
+            assert_eq!(find_up(&stats_dir, "config.json"), root.join("config.json"));
+
+            // 定价/别名正常加载
+            assert!(load_pricing(&stats_dir).get("x").is_some());
+            assert!(load_account_aliases(&stats_dir).is_empty());
+
+            std::fs::remove_file(root.join("pricing.json")).unwrap();
+            std::fs::remove_file(root.join("config.json")).unwrap();
+            std::fs::remove_dir_all(&stats_dir).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
 }
