@@ -42,17 +42,13 @@ pub struct AppState {
 
 /// 定位引擎根目录（含 proxy.py 的目录）。优先级：
 /// 1. O2A_ROOT 环境变量（显式指定，含 proxy.py 才用）
-/// 2. 打包资源目录（绿色版内嵌引擎，随 exe 解压）
-/// 3. 开发模式：从 cwd 向上最多 6 层找含 proxy.py 的目录
+/// 2. 开发模式：从 cwd 向上最多 6 层找含 proxy.py 的目录
+/// 3. 打包资源目录（绿色版内嵌引擎）——仅当 cwd 向上找不到时兜底，
+///    避免 dev 模式下 resource_dir（target/debug）混入引擎文件时被误判为打包版
 fn find_root(app: &tauri::App) -> PathBuf {
     if let Ok(p) = std::env::var("O2A_ROOT") {
         if Path::new(&p).join("proxy.py").exists() {
             return PathBuf::from(p);
-        }
-    }
-    if let Ok(dir) = app.path().resource_dir() {
-        if dir.join("proxy.py").exists() {
-            return dir;
         }
     }
     let mut dir = std::env::current_dir().unwrap_or_default();
@@ -62,6 +58,11 @@ fn find_root(app: &tauri::App) -> PathBuf {
         }
         if !dir.pop() {
             break;
+        }
+    }
+    if let Ok(dir) = app.path().resource_dir() {
+        if dir.join("proxy.py").exists() {
+            return dir;
         }
     }
     std::env::current_dir().unwrap_or_default()

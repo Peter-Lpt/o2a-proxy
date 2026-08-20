@@ -82,28 +82,28 @@
         <div class="kpi-grid" :class="{ 'no-fee': !showCost, historical: isHistoricalRange }">
           <div class="kpi">
             <span class="kpi-l">请求数</span>
-            <b class="kpi-v">{{ fmtNum(kpiMain.requests) }}</b>
-            <span class="kpi-s">{{ kpiSub.requests }}</span>
+            <b class="kpi-v" :title="`请求 ${fmtNum(kpiMain.requests)} 次（今日/区间）`">{{ fmtNum(kpiMain.requests) }}</b>
+            <span class="kpi-s" :title="kpiSub.requests">{{ kpiSub.requests }}</span>
           </div>
           <div class="kpi">
             <span class="kpi-l">错误</span>
-            <b class="kpi-v" :class="errCls(kpiMain.errors)">{{ fmtNum(kpiMain.errors) }}</b>
-            <span class="kpi-s">{{ kpiSub.errors }}</span>
+            <b class="kpi-v" :class="errCls(kpiMain.errors)" :title="`错误 ${fmtNum(kpiMain.errors)} 次（今日/区间）`">{{ fmtNum(kpiMain.errors) }}</b>
+            <span class="kpi-s" :title="kpiSub.errors">{{ kpiSub.errors }}</span>
           </div>
           <div class="kpi">
             <span class="kpi-l">Token</span>
-            <b class="kpi-v">{{ fmtNum(kpiMain.tokens) }}</b>
-            <span class="kpi-s">{{ kpiSub.tokens }}</span>
+            <b class="kpi-v" :title="`Token ${fmtNum(kpiMain.tokens)}（输入+缓存读+输出）`">{{ fmtNum(kpiMain.tokens) }}</b>
+            <span class="kpi-s" :title="kpiSub.tokens">{{ kpiSub.tokens }}</span>
           </div>
           <div class="kpi">
             <span class="kpi-l">命中率</span>
-            <b class="kpi-v" :class="hitClass(kpiMain.hitRate)">{{ fmtPct(kpiMain.hitRate) }}</b>
-            <span class="kpi-s">{{ kpiSub.hitRate }}</span>
+            <b class="kpi-v" :class="hitClass(kpiMain.hitRate)" :title="`命中率 ${fmtPct(kpiMain.hitRate)}（缓存读 / 输入+读）`">{{ fmtPct(kpiMain.hitRate) }}</b>
+            <span class="kpi-s" :title="kpiSub.hitRate">{{ kpiSub.hitRate }}</span>
           </div>
           <div v-if="showCost" class="kpi">
             <span class="kpi-l">费用</span>
-            <b class="kpi-v cost">¥{{ fmtCost(kpiMain.cost) }}</b>
-            <span class="kpi-s">{{ kpiSub.cost }}</span>
+            <b class="kpi-v cost" :title="`费用 ¥${fmtCost(kpiMain.cost)}`">¥{{ fmtCost(kpiMain.cost) }}</b>
+            <span class="kpi-s" :title="kpiSub.cost">{{ kpiSub.cost }}</span>
           </div>
         </div>
 
@@ -134,15 +134,13 @@
         <div class="chart-head">
           <div class="chart-left">
             <span class="range-lbl">时间</span>
-            <select class="chart-select range-select" :value="rangeSelectValue" @change="onRangeSelect" :title="'统计时间区间（' + rangeLabel + '）'">
-              <option value="today">今日</option>
-              <option value="yesterday">昨日</option>
-              <option value="week">本周</option>
-              <option value="month">本月</option>
-              <option value="7d">近 7 天</option>
-              <option value="30d">近 30 天</option>
-              <option v-if="range === 'custom'" value="custom">自定义 {{ rangeLabel }}</option>
-            </select>
+            <SelectBox
+              :model-value="rangeSelectValue"
+              :options="rangeSelectOptions"
+              size="sm"
+              :title="'统计时间区间（' + rangeLabel + '）'"
+              @update:model-value="onRangeSelect"
+            />
             <button class="cal-btn" :class="{ active: calOpen }" :title="calOpen ? '收起日历' : '自定义日期区间'" @click="calOpen = !calOpen">
               {{ calOpen ? '收起' : '日历' }}<span class="cal-caret">{{ calOpen ? '▲' : '▼' }}</span>
             </button>
@@ -174,10 +172,10 @@
           </div>
           <div class="model-stats-list">
             <div v-for="m in modelStats" :key="m.model" class="ms-row">
-              <span class="m">{{ m.model }}</span>
-              <span class="n">{{ fmtNum(m.requests) }} 次</span>
-              <span class="n">{{ fmtNum(m.input + m.read + m.output) }} tok</span>
-              <span v-if="showCost" class="c">¥{{ fmtCost(m.cost) }}</span>
+              <span class="m" :title="m.model">{{ m.model }}</span>
+              <span class="n" :title="`${fmtNum(m.requests)} 次请求`">{{ fmtNum(m.requests) }} 次</span>
+              <span class="n" :title="`${fmtNum(m.input + m.read + m.output)} tok（输入+缓存读+输出）`">{{ fmtNum(m.input + m.read + m.output) }} tok</span>
+              <span v-if="showCost" class="c" :title="`费用 ¥${fmtCost(m.cost)}`">¥{{ fmtCost(m.cost) }}</span>
             </div>
           </div>
         </div>
@@ -190,12 +188,12 @@
           <div class="fc-h"><span>{{ rangeLabel }}按服务</span><span class="model-stats-total">共 {{ fmtNum(serviceTotal) }} 次</span></div>
           <div class="model-stats-list">
             <div v-for="s in serviceStats" :key="s.service" class="ms-row">
-              <span class="m svc">{{ s.service }}</span>
-              <span class="n">{{ fmtNum(s.requests) }} 次</span>
-              <span class="n">{{ fmtNum(s.errors) }} 错</span>
-              <span class="n">{{ fmtNum(s.input + s.read + s.output) }} tok</span>
-              <span v-if="s.avgDurationMs" class="n meta-sm">{{ fmtMs(s.avgDurationMs) }}</span>
-              <span v-if="showCost" class="c">¥{{ fmtCost(s.cost) }}</span>
+              <span class="m svc" :title="s.service">{{ s.service }}</span>
+              <span class="n" :title="`${fmtNum(s.requests)} 次请求`">{{ fmtNum(s.requests) }} 次</span>
+              <span class="n" :title="`错误 ${fmtNum(s.errors)} 次`">{{ fmtNum(s.errors) }} 错</span>
+              <span class="n" :title="`${fmtNum(s.input + s.read + s.output)} tok（输入+缓存读+输出）`">{{ fmtNum(s.input + s.read + s.output) }} tok</span>
+              <span v-if="s.avgDurationMs" class="n meta-sm" :title="`平均耗时 ${fmtMs(s.avgDurationMs)}`">{{ fmtMs(s.avgDurationMs) }}</span>
+              <span v-if="showCost" class="c" :title="`费用 ¥${fmtCost(s.cost)}`">¥{{ fmtCost(s.cost) }}</span>
             </div>
           </div>
           <p class="hint">「全部」视图下按服务拆分用量与错误，便于多服务排查。</p>
@@ -214,12 +212,12 @@
               <span v-if="r.isErr" class="err-lbl">
                 <Icon name="alert" :size="10" />{{ r.err }}
               </span>
-              <span v-else class="k">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
+              <span v-else class="k" :title="`输入+缓存读+缓存写 ${fmtNum(r.total)} tok · 缓存读 ${fmtNum(r.cacheRead)} · 输出 ${fmtNum(r.output)}`">↑{{ fmtNum(r.total) }} · 读{{ fmtNum(r.cacheRead) }} · ↓{{ fmtNum(r.output) }}</span>
               <span v-if="!r.isErr && r.duration > 0" class="meta" :title="'耗时 ' + r.duration + 'ms'">
                 {{ fmtMs(r.duration) }}<span v-if="r.firstToken > 0" :title="'首 token ' + r.firstToken + 'ms'">·首{{ fmtMs(r.firstToken) }}</span>
                 <span v-if="r.speed > 0" :title="'输出速度 ' + r.speed + ' tok/s'">·{{ fmtSpeed(r.speed) }}</span>
               </span>
-              <span class="h" :class="r.hitCls">{{ r.hitPct }}%</span>
+              <span class="h" :class="r.hitCls" :title="`命中率 ${r.hitPctFull}`">{{ r.hitPct }}%</span>
             </div>
           </div>
         </div>
@@ -1423,6 +1421,7 @@ const liveFeed = computed(() => {
       cacheRead: Number(r.cache_read_tokens || 0),
       output: Number(r.output_tokens || 0),
       hitPct: (rate * 100).toFixed(0),
+      hitPctFull: (rate * 100).toFixed(2) + "%",
       hitCls: hitTier(rate, true),
       isErr,
       err: isErr ? String(r.error || r.status || "error") : "",
@@ -1474,9 +1473,22 @@ const rangeSelectValue = computed(() =>
     : "custom"
 );
 
-// 时间区间下拉切换
-function onRangeSelect(e: Event) {
-  const v = (e.target as HTMLSelectElement).value;
+// 时间区间下拉选项（与模型过滤等下拉统一用 SelectBox 组件）；自定义区间时追加动态 label
+const rangeSelectOptions = computed(() => {
+  const opts = [
+    { value: "today", label: "今日" },
+    { value: "yesterday", label: "昨日" },
+    { value: "week", label: "本周" },
+    { value: "month", label: "本月" },
+    { value: "7d", label: "近 7 天" },
+    { value: "30d", label: "近 30 天" },
+  ];
+  if (range.value === "custom") opts.push({ value: "custom", label: `自定义 ${rangeLabel.value}` });
+  return opts;
+});
+
+// 时间区间下拉切换（SelectBox 直接传所选 value）
+function onRangeSelect(v: string) {
   if (["today", "yesterday", "week", "month"].includes(v)) {
     setRange(v as RangeKey);
   } else if (v === "7d" || v === "30d") {

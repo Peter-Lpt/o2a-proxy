@@ -8,6 +8,11 @@ import os
 import threading
 from datetime import datetime, timedelta
 
+try:
+    import fcntl  # POSIX 文件锁（与 base.HAS_FCNTL 同步；Windows 无此模块）
+except ImportError:
+    fcntl = None
+
 from .base import HAS_FCNTL, PROJECT_ROOT, logger
 from .config import load_config
 

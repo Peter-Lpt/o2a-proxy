@@ -131,8 +131,13 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
         children.remove(name);
     }
     let log = log_path(state, name);
+    // 追加写而非覆盖：保留历史日志，便于回溯（旧布局下的根目录 proxy_*.log 历史不会丢失）
     let file = Arc::new(Mutex::new(
-        File::create(&log).map_err(|e| format!("无法创建日志文件: {e}"))?,
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .map_err(|e| format!("无法创建日志文件: {e}"))?,
     ));
     let mut cmd = Command::new(&state.python);
     cmd.arg("proxy_async.py")

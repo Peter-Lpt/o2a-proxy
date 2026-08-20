@@ -17,7 +17,7 @@
         "ttl": "不确定，系统定期清理"
       }
     },
-    "last_updated": "2026-07-30",
+    "last_updated": "2026-08-17",
     "sources": {
       "qianwen_pricing_api": "https://platform-home.qianwenai.com/data/api.json?product=AliyunDeliveryService&action=GetSeriesModel",
       "qianwen_model_page": "https://www.qianwenai.com/models/{model-id}",
@@ -278,9 +278,15 @@
         "category": "third-party",
         "source": "https://www.qianwenai.com/models/deepseek-v4-flash-0731#overview",
         "tiers": [
-          { "range": "unlimited", "input": 1, "output": 2, "cache_hit": 0.2 }
+          {
+            "range": "unlimited",
+            "input": 1.5,
+            "output": 4.5,
+            "cache_hit": 0.15
+          }
         ],
-        "cache": true
+        "cache": true,
+        "peak_note": "统一按错峰（闲时）价计费：输入 1.5 / 输出 4.5 / 缓存命中 0.15（官方错峰时段为东八区 22:00-次日 08:00，当前模型不做忙时计费）"
       }
     }
   },
