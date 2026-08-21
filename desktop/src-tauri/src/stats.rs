@@ -1027,7 +1027,7 @@ mod tests {
         assert_eq!(lm["seriesKind"], "day");
         assert_eq!(lm["rangeAgg"]["requests"], 0);
 
-        // 自定义区间：跨多天 → 逐日；单日 → 逐小时
+        // 自定义区间：跨多天 → 逐日；单日 → 逐分钟
         let d = now.date_naive();
         let ds = d.format("%Y-%m-%d").to_string();
         let prev_ds = (d - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
