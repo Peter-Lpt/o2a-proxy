@@ -107,10 +107,10 @@
           </div>
         </div>
 
-        <!-- 性能条：平均耗时 / 首字 / 输出速度（近一段时间） -->
+        <!-- 性能条：耗时 / 首字 / 速度（近一段时间） -->
         <div class="perf-row">
           <div class="perf-chip" :title="'平均单次耗时（含流式总时长）'">
-            <span class="perf-l">平均耗时</span>
+            <span class="perf-l">耗时</span>
             <b class="perf-v">{{ fmtMs(perf.duration) || "—" }}</b>
           </div>
           <div class="perf-chip" :title="'平均首 token 延迟（流式请求）'">
@@ -118,10 +118,10 @@
             <b class="perf-v">{{ fmtMs(perf.firstToken) || "—" }}</b>
           </div>
           <div class="perf-chip" :title="'平均输出 token 速度'">
-            <span class="perf-l">输出速度</span>
+            <span class="perf-l">速度</span>
             <b class="perf-v">{{ perf.speed ? fmtSpeed(perf.speed) : "—" }}</b>
           </div>
-          <span class="perf-note">选自当前{{ isHistoricalRange ? "区间" : "时段" }}已完成请求 · {{ fmtNum(perf.samples) }} 次</span>
+          <span class="perf-note">{{ isHistoricalRange ? "区间" : "当前" }} · {{ fmtNum(perf.samples) }} 次</span>
         </div>
 
         <!-- 当前区间为空但存在历史数据：提示用户查看旧数据 -->
@@ -143,6 +143,9 @@
             />
             <button class="cal-btn" :class="{ active: calOpen }" :title="calOpen ? '收起日历' : '自定义日期区间'" @click="calOpen = !calOpen">
               {{ calOpen ? '收起' : '日历' }}<span class="cal-caret">{{ calOpen ? '▲' : '▼' }}</span>
+            </button>
+            <button v-if="range !== 'today'" class="cal-btn" title="重置为今日" @click="setRange('today')">
+              <Icon name="refresh" :size="10" />重置
             </button>
           </div>
           <div class="chart-head-right">

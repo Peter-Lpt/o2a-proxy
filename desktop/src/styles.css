@@ -379,8 +379,9 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
 /* ---------- 性能条：平均耗时 / 首字 / 输出速度 ---------- */
 .perf-row {
   display: flex;
+  flex-wrap: wrap; /* 窄窗时整块换行，避免挤压导致文字折裂 */
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   background: var(--bg2);
   border: 1px solid var(--border-soft);
   border-radius: var(--radius);
@@ -393,6 +394,7 @@ main::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
+  white-space: nowrap; /* 标签与数值保持一行，不折裂 */
 }
 .perf-chip + .perf-chip { padding-left: 12px; border-left: 1px solid var(--border-soft); }
 .perf-l { color: var(--muted); font-size: 10px; }

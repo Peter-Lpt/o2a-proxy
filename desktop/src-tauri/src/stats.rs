@@ -661,20 +661,10 @@ fn get_stats_impl(
         0
     };
     let (series_kind, series): (&str, Vec<Value>) = match rng {
-        "today" => (
-            "minute",
-            aggregate_minutes(&today_records, service, primary)
-                .into_iter()
-                .map(|mut v| {
-                    // label 用 "HH:MM"，避免完整时间戳过长导致横轴标签重叠
-                    let m = v["minute"].as_str().unwrap_or("");
-                    v["label"] = json!(if m.len() >= 16 { &m[11..16] } else { m });
-                    v
-                })
-                .collect(),
-        ),
-        "yesterday" => ("hour", hourly_series(&by_date, &cur)),
-        "custom" if custom_len <= 1 => ("hour", hourly_series(&by_date, &cur)),
+        // 单日区间（今日/昨日档、自定义单选某一天）一律按分钟展示，与“今日”粒度一致
+        "today" | "yesterday" => ("minute", minute_series(&range_records, service, primary)),
+        "custom" if custom_len <= 1 => ("minute", minute_series(&range_records, service, primary)),
+        // 多日区间（本周/近7天/自定义跨天）按日
         _ => ("day", daily_series(&by_date, &cur)),
     };
 
@@ -833,38 +823,19 @@ fn agg_of_records(records: &[Value]) -> Value {
     agg.to_json()
 }
 
-/// 单日逐小时序列（00..23 零值补齐），label 为 "HH"
-fn hourly_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, NaiveDate)) -> Vec<Value> {
-    let mut hours: BTreeMap<String, Agg> = BTreeMap::new();
-    for d in date_range(span.0, span.1) {
-        let ds = d.format("%Y-%m-%d").to_string();
-        if let Some(recs) = by_date.get(&ds) {
-            for rec in recs {
-                let ts = rec["timestamp"].as_str().unwrap_or("");
-                if ts.len() >= 13 {
-                    hours.entry(ts[11..13].to_string()).or_default().add_record(rec);
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for h in 0..24 {
-        let hh = format!("{h:02}");
-        match hours.get(&hh) {
-            Some(agg) => {
-                let mut v = agg.to_json();
-                v["label"] = json!(hh);
-                out.push(v);
-            }
-            None => out.push(json!({
-                "label": hh, "requests":0,"errors":0,"input":0,"read":0,"write":0,"output":0,"cost":0.0,"hitRate":0.0,"coverage":0.0,"avgDurationMs":0,"avgFirstTokenMs":0,"avgTokensPerSec":0
-            })),
-        }
-    }
-    out
+/// 今日逐分钟序列，label 用 "HH:MM"（完整时间戳过长导致横轴标签重叠）
+fn minute_series(records: &[Value], service: &str, primary: &str) -> Vec<Value> {
+    aggregate_minutes(records, service, primary)
+        .into_iter()
+        .map(|mut v| {
+            let m = v["minute"].as_str().unwrap_or("");
+            v["label"] = json!(if m.len() >= 16 { &m[11..16] } else { m });
+            v
+        })
+        .collect()
 }
 
-/// 多日逐日序列（区间内每天零值补齐），label 为 "MM-DD"
+// 多日逐日序列（区间内每天零值补齐），label 为 "MM-DD"
 fn daily_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, NaiveDate)) -> Vec<Value> {
     let mut out = Vec::new();
     for d in date_range(span.0, span.1) {
@@ -1036,12 +1007,11 @@ mod tests {
         assert_eq!(out["rangeAgg"]["requests"], 3);
         assert_eq!(out["prevAgg"]["requests"], 0);
 
-        // 昨日：逐小时序列 24 点
+        // 昨日：单日与“今日”一致按分钟展示（测试数据只有今天，昨日序列为空）
         let y = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "yesterday", None, None).unwrap();
         assert_eq!(y["range"], "yesterday");
-        assert_eq!(y["seriesKind"], "hour");
-        assert_eq!(y["series"].as_array().unwrap().len(), 24);
-        assert_eq!(y["series"][0]["label"], "00");
+        assert_eq!(y["seriesKind"], "minute");
+        assert_eq!(y["series"].as_array().unwrap().len(), 0);
         assert_eq!(y["rangeAgg"]["requests"], 0);
 
         // 本月：逐日序列
@@ -1084,8 +1054,22 @@ mod tests {
             Some(&ds),
         )
         .unwrap();
-        assert_eq!(c1["seriesKind"], "hour");
-        assert_eq!(c1["series"].as_array().unwrap().len(), 24);
+        // 自定义选中今天：与“今日”一致按分钟展示
+        assert_eq!(c1["seriesKind"], "minute");
+        assert_eq!(c1["series"].as_array().unwrap().len(), 3);
+        assert_eq!(c1["series"][0]["label"], format!("{hour}:12"));
+        // 自定义选中过去任意单日（此处为昨天）：同样按分钟
+        let c2 = get_stats(
+            &dir.join("cache_stats"),
+            "svc1",
+            "svc1",
+            "custom",
+            Some(&prev_ds),
+            Some(&prev_ds),
+        )
+        .unwrap();
+        assert_eq!(c2["seriesKind"], "minute");
+        assert_eq!(c2["series"].as_array().unwrap().len(), 0);
 
         // 热力图：每日请求数
         let dl = get_daily(&dir.join("cache_stats"), "svc1", "svc1", &prev_ds, &ds).unwrap();

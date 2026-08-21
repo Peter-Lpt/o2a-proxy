@@ -34,6 +34,7 @@
             ></button>
           </template>
         </div>
+        <span class="cal-hint">点两次同一天 = 单选该天</span>
       </div>
     </div>
   </div>
@@ -151,7 +152,8 @@ function cellCls(cell: Cell): Record<string, boolean> {
   };
 }
 
-// 点选：无选择或已有完整区间 → 重新开始；仅有起点 → 点终点生效（面板保持打开可微调）
+// 点选：无选择或已有完整区间 → 重新开始；仅有起点且点击同一天 → 单选该天
+// （起止同天的一次性选中）；否则 → 点终点生效（面板保持打开可微调）
 function pick(date: string) {
   if (!start.value || (start.value && end.value)) {
     start.value = date;
@@ -159,7 +161,9 @@ function pick(date: string) {
     return;
   }
   if (date === start.value) {
-    start.value = null;
+    const s = start.value;
+    end.value = s;
+    emit("select", s, s);
     return;
   }
   const [a, b] = [start.value, date].sort();
@@ -343,6 +347,12 @@ watch(
   grid-template-columns: repeat(7, 16px);
   gap: 2px;
   margin-bottom: 2px;
+}
+.cal-hint {
+  margin-top: 3px;
+  font-size: 8.5px;
+  color: var(--muted-2);
+  text-align: center;
 }
 .cal-dow span {
   height: 12px;
