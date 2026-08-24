@@ -106,17 +106,46 @@ const visibleOptions = computed(() => {
 
 const sizeClass = computed(() => (props.size === "sm" ? "sb-sm" : "sb-md"));
 
-function openMenu() {
+// ---- 视口感知定位 ----
+// 下拉菜单是 position:fixed，但会被 webview 窗口边界裁剪：小窗口（如悬浮窗
+// 默认高度 ~230px）里菜单超出窗口底部的选项点不到。因此：
+// 1. maxHeight 按窗口剩余空间收敛（不再固定 220px），菜单内部滚动选择；
+// 2. 下方空间不足且上方更宽裕时向上翻转（bottom 锚定，不依赖渲染后高度）。
+const MENU_MAX_H = 220;
+const MENU_MIN_H = 96; // 最小可视高度：保证至少能滚出几个选项
+const MENU_GAP = 4;
+const VIEWPORT_MARGIN = 8;
+
+function computeMenuStyle(): Record<string, string> {
   const root = rootEl.value;
-  if (!root) return;
+  if (!root) return {};
   const rect = root.getBoundingClientRect();
-  menuStyle.value = {
-    position: "fixed",
-    top: `${rect.bottom + 4}px`,
+  const vh = window.innerHeight;
+  const below = vh - rect.bottom - VIEWPORT_MARGIN;
+  const above = rect.top - VIEWPORT_MARGIN;
+  const base = {
     left: `${rect.left}px`,
     width: `${rect.width}px`,
-    maxHeight: "220px",
   };
+  // 下方放得下（或上下都不够时优先向下，符合直觉）
+  if (below >= MENU_MIN_H || below >= above) {
+    return {
+      ...base,
+      top: `${rect.bottom + MENU_GAP}px`,
+      maxHeight: `${Math.max(MENU_MIN_H, Math.min(MENU_MAX_H, below))}px`,
+    };
+  }
+  // 向上翻转
+  return {
+    ...base,
+    bottom: `${vh - rect.top + MENU_GAP}px`,
+    maxHeight: `${Math.max(MENU_MIN_H, Math.min(MENU_MAX_H, above))}px`,
+  };
+}
+
+function openMenu() {
+  if (!rootEl.value) return;
+  menuStyle.value = computeMenuStyle();
   open.value = true;
   // 高亮当前值，便于键盘直接确认
   const idx = visibleOptions.value.findIndex((o) => o.value === props.modelValue);
@@ -171,16 +200,10 @@ function onInput(e: Event) {
 
 function onViewportChange() {
   if (open.value) {
-    // 滚动/缩放时重新定位，保持对齐输入框
+    // 滚动/缩放时按当前视口重新定位（含向下/向上翻转与限高），保持对齐输入框
     const root = rootEl.value;
     if (!root) return close();
-    const rect = root.getBoundingClientRect();
-    menuStyle.value = {
-      ...menuStyle.value,
-      top: `${rect.bottom + 4}px`,
-      left: `${rect.left}px`,
-      width: `${rect.width}px`,
-    };
+    menuStyle.value = computeMenuStyle();
   }
 }
 

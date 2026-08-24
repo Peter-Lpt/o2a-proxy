@@ -149,7 +149,7 @@
             </button>
           </div>
           <div class="chart-head-right">
-            <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" :title="'按模型过滤（' + rangeLabel + '）'" />
+            <SelectBox v-model="modelFilter" :options="filterOptions" size="sm" :title="'按模型过滤整页统计（' + rangeLabel + '）'" />
             <button class="icon-btn" :class="{ spinning: statsLoading }" title="刷新" @click="loadStats()"><Icon name="refresh" :size="12" /></button>
           </div>
         </div>
@@ -973,7 +973,8 @@ async function loadStats() {
       statsService.value,
       range.value,
       isCustom && c ? c.start : undefined,
-      isCustom && c ? c.end : undefined
+      isCustom && c ? c.end : undefined,
+      modelFilter.value || undefined
     );
     Object.keys(stats).forEach((k) => delete (stats as any)[k]);
     Object.assign(stats, s || {});
@@ -1329,7 +1330,12 @@ function errCls(n: number | undefined): string {
   return v > 0 ? "mid" : "";
 }
 
-const modelOptions = computed(() => (stats.byModel || []).map((m: any) => m.model));
+// 模型下拉选项：用后端返回的区间内模型全集（models 不受过滤影响，
+// 保证选中某模型后仍能切换到其他模型）；旧版后端回退到 byModel 推导。
+const modelOptions = computed(() => {
+  if (Array.isArray(stats.models) && stats.models.length) return stats.models as string[];
+  return (stats.byModel || []).map((m: any) => m.model);
+});
 
 const filterOptions = computed(() => [
   { value: "", label: "全部模型" },
@@ -1398,13 +1404,21 @@ const chartRead = computed(() => chartData.value.read);
 const chartOutput = computed(() => chartData.value.output);
 const chartHit = computed(() => chartData.value.hit);
 
+// 实时调用同样跟随模型过滤：选中模型后，实时列表 / 迷你走势 / 近5min汇总
+// 只统计该模型的请求（记录自带 model 字段，客户端过滤即可）。
+const livePool = computed(() =>
+  !modelFilter.value
+    ? liveRecords.value
+    : liveRecords.value.filter((r: any) => r.model === modelFilter.value)
+);
+
 const liveSpark = computed(() =>
-  liveRecords.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
+  livePool.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
 const liveFeed = computed(() => {
   // 严格按时间倒序（最新在前）：后端已倒序，这里再做一次防御性排序，
   // 避免多服务交错或缓存顺序导致旧记录跑到新请求前面。
-  const sorted = [...liveRecords.value].sort((a, b) => {
+  const sorted = [...livePool.value].sort((a, b) => {
     const ta = Date.parse(String(a.timestamp || "").replace("T", " "));
     const tb = Date.parse(String(b.timestamp || "").replace("T", " "));
     if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
@@ -1437,7 +1451,7 @@ const liveFeed = computed(() => {
 
 // 近 5 分钟汇总（命中率用近 5 分钟 token 加权）
 const liveSum = computed(() => {
-  const pool = liveRecords.value;
+  const pool = livePool.value;
   if (!pool.length) return "等待请求…";
   const now = Date.now();
   let n = 0, inp = 0, rd = 0, wr = 0, out = 0;
@@ -1541,6 +1555,12 @@ watch(selected, () => {
   loadStats();
   loadLive();
   if (page.value === "config") fetchModels();
+});
+
+// 模型过滤切换：整页统计（KPI / 性能条 / 图表 / 按模型 / 按服务）按所选模型
+// 重新拉取（后端记录层过滤）；实时调用由 livePool 在前端同步过滤。
+watch(modelFilter, () => {
+  loadStats();
 });
 
 watch(page, (p) => {

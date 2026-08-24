@@ -367,6 +367,15 @@ fn matches_service(rec: &Value, service: &str, primary: &str) -> bool {
     }
 }
 
+/// 模型过滤（空串 = 不过滤）。与 matches_service 一样作用于记录层，
+/// 使所有聚合输出共享同一过滤口径。
+fn matches_model(rec: &Value, model: &str) -> bool {
+    if model.is_empty() {
+        return true;
+    }
+    rec.get("model").and_then(|v| v.as_str()) == Some(model)
+}
+
 fn sum_by_model(records: &[Value], service: &str, primary: &str) -> Vec<Value> {
     let mut map: BTreeMap<String, Agg> = BTreeMap::new();
     for rec in records {
@@ -520,15 +529,17 @@ pub fn get_stats(
     range: &str,
     start: Option<&str>,
     end: Option<&str>,
+    model: &str,
 ) -> Result<Value, String> {
     let key = format!(
-        "{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         dir.to_string_lossy(),
         service,
         primary,
         range,
         start.unwrap_or(""),
-        end.unwrap_or("")
+        end.unwrap_or(""),
+        model
     );
     if let Some((k, t, v)) = &*STATS_CACHE.lock().unwrap() {
         if t.elapsed() < Duration::from_millis(2500) && k == &key {
@@ -538,7 +549,7 @@ pub fn get_stats(
             return Ok(v);
         }
     }
-    let out = get_stats_impl(dir, service, primary, range, start, end)?;
+    let out = get_stats_impl(dir, service, primary, range, start, end, model)?;
     *STATS_CACHE.lock().unwrap() = Some((key, Instant::now(), out.clone()));
     Ok(out)
 }
@@ -550,6 +561,7 @@ fn get_stats_impl(
     range: &str,
     start: Option<&str>,
     end: Option<&str>,
+    model: &str,
 ) -> Result<Value, String> {
     let pricing = load_pricing(dir);
     let aliases = load_account_aliases(dir);
@@ -591,14 +603,31 @@ fn get_stats_impl(
         need.insert(d);
     }
 
-    // 逐日读取一次（按需），并按 service 过滤后缓存，供各聚合复用
+    // 逐日读取一次（按需），并按 service 过滤后缓存，供各聚合复用。
+    // 模型过滤在记录层统一施加：KPI / 性能 / 图表序列 / 按模型 / 按服务 /
+    // 同比等全部聚合都基于过滤后的记录，保证整页统计口径一致。
     let mut by_date: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    // 当前区间内出现过的模型全集（不受模型过滤影响），供前端下拉框使用
+    let mut models_in_range: BTreeSet<String> = BTreeSet::new();
     for d in &need {
         let ds = d.format("%Y-%m-%d").to_string();
-        let recs = read_records(dir, &ds, &pricing, &aliases, &no_cost_services)
+        let in_cur_range = d >= &cur.0 && d <= &cur.1;
+        let mut recs = Vec::new();
+        for r in read_records(dir, &ds, &pricing, &aliases, &no_cost_services)
             .into_iter()
             .filter(|r| matches_service(r, service, primary))
-            .collect();
+        {
+            if in_cur_range {
+                if let Some(m) = r.get("model").and_then(|v| v.as_str()) {
+                    if !m.is_empty() {
+                        models_in_range.insert(m.to_string());
+                    }
+                }
+            }
+            if matches_model(&r, model) {
+                recs.push(r);
+            }
+        }
         by_date.insert(ds, recs);
     }
     let today_records: Vec<Value> = by_date.get(&today_str).cloned().unwrap_or_default();
@@ -711,6 +740,9 @@ fn get_stats_impl(
             "days": month_days,
         },
         "range": rng,
+        "model": model,
+        // 区间内模型全集（未按模型过滤）：前端下拉框选项来源
+        "models": models_in_range.into_iter().collect::<Vec<_>>(),
         "rangeLabel": range_label,
         "prevLabel": prev_label,
         "rangeStart": cur.0.format("%Y-%m-%d").to_string(),
@@ -993,7 +1025,7 @@ mod tests {
         )
         .unwrap();
 
-        let out = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None).unwrap();
+        let out = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None, "").unwrap();
         assert_eq!(out["current"]["requests"], 3);
         assert_eq!(out["current"]["hitRate"], 0.2857142857142857);
         assert_eq!(out["today"]["requests"], 3);
@@ -1008,22 +1040,22 @@ mod tests {
         assert_eq!(out["prevAgg"]["requests"], 0);
 
         // 昨日：单日与“今日”一致按分钟展示（测试数据只有今天，昨日序列为空）
-        let y = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "yesterday", None, None).unwrap();
+        let y = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "yesterday", None, None, "").unwrap();
         assert_eq!(y["range"], "yesterday");
         assert_eq!(y["seriesKind"], "minute");
         assert_eq!(y["series"].as_array().unwrap().len(), 0);
         assert_eq!(y["rangeAgg"]["requests"], 0);
 
         // 本月：逐日序列
-        let m = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "month", None, None).unwrap();
+        let m = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "month", None, None, "").unwrap();
         assert_eq!(m["seriesKind"], "day");
         assert!(m["series"].as_array().unwrap().len() >= 1);
 
         // 上周 / 上月：同样为逐日序列，无数据时请求数为 0
-        let lw = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "lastweek", None, None).unwrap();
+        let lw = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "lastweek", None, None, "").unwrap();
         assert_eq!(lw["seriesKind"], "day");
         assert_eq!(lw["rangeAgg"]["requests"], 0);
-        let lm = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "lastmonth", None, None).unwrap();
+        let lm = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "lastmonth", None, None, "").unwrap();
         assert_eq!(lm["seriesKind"], "day");
         assert_eq!(lm["rangeAgg"]["requests"], 0);
 
@@ -1038,6 +1070,7 @@ mod tests {
             "custom",
             Some(&prev_ds),
             Some(&ds),
+            "",
         )
         .unwrap();
         assert_eq!(c["range"], "custom");
@@ -1052,6 +1085,7 @@ mod tests {
             "custom",
             Some(&ds),
             Some(&ds),
+            "",
         )
         .unwrap();
         // 自定义选中今天：与“今日”一致按分钟展示
@@ -1066,6 +1100,7 @@ mod tests {
             "custom",
             Some(&prev_ds),
             Some(&prev_ds),
+            "",
         )
         .unwrap();
         assert_eq!(c2["seriesKind"], "minute");
@@ -1079,6 +1114,80 @@ mod tests {
 
         let live = get_live(&dir.join("cache_stats"), "svc1", "svc1").unwrap();
         assert_eq!(live["records"].as_array().unwrap().len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_stats_model_filter_scopes_all_outputs() {
+        // 模型过滤在记录层生效：KPI / 当前小时 / 本月 / 图表序列 / 按模型 /
+        // 按服务 / 区间汇总等所有输出只统计所选模型；
+        // models 字段不受过滤影响，始终返回区间内模型全集（供下拉框使用）。
+        let dir = std::env::temp_dir().join(format!("o2a_stats_model_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("cache_stats")).unwrap();
+
+        let now = chrono::Local::now();
+        let date = now.format("%Y-%m-%d").to_string();
+        let hour = now.format("%H").to_string();
+        let rec = |model: &str, minute: &str| {
+            json!({
+                "timestamp": format!("{date}T{hour}:{minute}:00"),
+                "service": "svc1",
+                "model": model,
+                "input_tokens": 100,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 50,
+                "cost": 0.01
+            })
+        };
+        fs::write(
+            dir.join("cache_stats").join(format!("{date}.jsonl")),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::to_string(&rec("m1", "10")).unwrap(),
+                serde_json::to_string(&rec("m1", "11")).unwrap(),
+                serde_json::to_string(&rec("m2", "12")).unwrap()
+            ),
+        )
+        .unwrap();
+
+        // 不带模型过滤：全量口径
+        let all = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None, "").unwrap();
+        assert_eq!(all["today"]["requests"], 3);
+        assert_eq!(all["rangeAgg"]["requests"], 3);
+        assert_eq!(all["series"].as_array().unwrap().len(), 3);
+        assert_eq!(all["byModel"].as_array().unwrap().len(), 2);
+        assert_eq!(all["byService"][0]["requests"], 3);
+        assert_eq!(all["models"].as_array().unwrap().len(), 2);
+
+        // 过滤 m1：所有输出只剩 m1 的 2 条；models 全集仍含两个模型
+        let f = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None, "m1").unwrap();
+        assert_eq!(f["model"], "m1");
+        assert_eq!(f["current"]["requests"], 2);
+        assert_eq!(f["today"]["requests"], 2);
+        assert_eq!(f["month"]["requests"], 2);
+        assert_eq!(f["rangeAgg"]["requests"], 2);
+        assert_eq!(f["rangeAgg"]["input"], 200);
+        assert_eq!(f["rangeAgg"]["output"], 100);
+        assert_eq!(f["series"].as_array().unwrap().len(), 2);
+        assert_eq!(f["byModel"].as_array().unwrap().len(), 1);
+        assert_eq!(f["byModel"][0]["model"], "m1");
+        assert_eq!(f["byService"][0]["requests"], 2);
+        assert_eq!(f["models"].as_array().unwrap().len(), 2);
+
+        // 过滤 m2：只剩 1 条
+        let g = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None, "m2").unwrap();
+        assert_eq!(g["today"]["requests"], 1);
+        assert_eq!(g["rangeAgg"]["requests"], 1);
+        assert_eq!(g["models"].as_array().unwrap().len(), 2);
+
+        // 不存在的模型：全部归零但不报错
+        let n = get_stats(&dir.join("cache_stats"), "svc1", "svc1", "today", None, None, "nope").unwrap();
+        assert_eq!(n["today"]["requests"], 0);
+        assert_eq!(n["rangeAgg"]["requests"], 0);
+        assert_eq!(n["models"].as_array().unwrap().len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1136,18 +1245,18 @@ mod tests {
         .unwrap();
 
         // 按量服务：有费用、显示费用
-        let paid = get_stats(&dir.join("cache_stats"), "paid", "paid", "today", None, None).unwrap();
+        let paid = get_stats(&dir.join("cache_stats"), "paid", "paid", "today", None, None, "").unwrap();
         assert_eq!(paid["showCost"], true);
         assert_eq!(paid["today"]["cost"], 1.0); // 1M input × 1/百万
 
         // 订阅制服务：费用恒 0、隐藏费用
-        let sub = get_stats(&dir.join("cache_stats"), "sub", "sub", "today", None, None).unwrap();
+        let sub = get_stats(&dir.join("cache_stats"), "sub", "sub", "today", None, None, "").unwrap();
         assert_eq!(sub["showCost"], false);
         assert_eq!(sub["today"]["cost"], 0.0);
         assert_eq!(sub["today"]["cost"], 0.0);
 
         // 全部视图：存在按量服务 → 仍显示费用（订阅制贡献 0）
-        let all = get_stats(&dir.join("cache_stats"), "", "", "today", None, None).unwrap();
+        let all = get_stats(&dir.join("cache_stats"), "", "", "today", None, None, "").unwrap();
         assert_eq!(all["showCost"], true);
         assert_eq!(all["today"]["cost"], 1.0);
 
@@ -1170,7 +1279,7 @@ mod tests {
             ),
         )
         .unwrap();
-        let all_sub = get_stats(&dir.join("cache_stats"), "", "", "month", None, None).unwrap();
+        let all_sub = get_stats(&dir.join("cache_stats"), "", "", "month", None, None, "").unwrap();
         assert_eq!(all_sub["showCost"], false);
         assert_eq!(all_sub["today"]["cost"], 0.0);
 

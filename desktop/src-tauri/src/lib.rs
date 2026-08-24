@@ -590,6 +590,7 @@ async fn get_stats(
     range: Option<String>,
     start: Option<String>,
     end: Option<String>,
+    model: Option<String>,
 ) -> Result<serde_json::Value, String> {
     // 全量读 jsonl + 按月重算费用较重，异步执行 + stats.rs 内部 TTL 缓存
     tauri::async_runtime::spawn_blocking(move || {
@@ -602,6 +603,7 @@ async fn get_stats(
             r,
             start.as_deref(),
             end.as_deref(),
+            model.as_deref().unwrap_or(""),
         )
     })
     .await

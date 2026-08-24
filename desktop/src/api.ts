@@ -14,8 +14,8 @@ export const api = {
   toggleService: (name: string) => invoke<void>("toggle_service", { name }),
   startAll: () => invoke<void>("start_all"),
   stopAll: () => invoke<void>("stop_all"),
-  getStats: (service: string, range = "today", start?: string, end?: string) =>
-    invoke<any>("get_stats", { service, range, start, end }),
+  getStats: (service: string, range = "today", start?: string, end?: string, model?: string) =>
+    invoke<any>("get_stats", { service, range, start, end, model }),
   getDaily: (service: string, start: string, end: string) =>
     invoke<any>("get_daily", { service, start, end }),
   getLive: (service: string) => invoke<any>("get_live", { service }),
