@@ -1416,13 +1416,16 @@ const liveSpark = computed(() =>
   livePool.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
 const liveFeed = computed(() => {
-  // 严格按时间倒序（最新在前）：后端已倒序，这里再做一次防御性排序，
-  // 避免多服务交错或缓存顺序导致旧记录跑到新请求前面。
+  // 严格按完整时间戳倒序（最新在前）：时间戳是 0 填充的 ISO 字符串
+  // （YYYY-MM-DDTHH:mm:ss），字典序即时间序，跨天/跨引擎都正确；
+  // 不用 Date.parse，避免解析差异/NaN 时退化为原数组顺序导致旧记录排前。
   const sorted = [...livePool.value].sort((a, b) => {
-    const ta = Date.parse(String(a.timestamp || "").replace("T", " "));
-    const tb = Date.parse(String(b.timestamp || "").replace("T", " "));
-    if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
-    return 0;
+    const sa = String(a.timestamp || "");
+    const sb = String(b.timestamp || "");
+    if (sa === sb) return 0;
+    if (!sa) return 1;
+    if (!sb) return -1;
+    return sa > sb ? -1 : 1;
   });
   return sorted.slice(0, 30).map((r: any) => {
     const rate = Number(r.cache_hit_rate || 0);

@@ -232,22 +232,33 @@ const sparkRange = computed(() => {
   return [first, last];
 });
 
+// 严格按完整时间戳倒序（最新在前）：时间戳是 0 填充的 ISO 字符串
+// （YYYY-MM-DDTHH:mm:ss），字典序即时间序，跨天、跨引擎都正确；
+// 不用 Date.parse，避免解析差异/NaN 时退化为原数组顺序导致旧记录排前。
+function cmpTsDesc(a: string, b: string): number {
+  if (a === b) return 0;
+  if (!a) return 1;
+  if (!b) return -1;
+  return a > b ? -1 : 1;
+}
 const liveFeed = computed(() => {
-  // 严格按时间倒序（最新在前），防御多服务交错/缓存导致旧记录跑到前面
-  const sorted = [...(records.value || [])].sort((a: any, b: any) => {
-    const ta = Date.parse(String(a.timestamp || "").replace("T", " "));
-    const tb = Date.parse(String(b.timestamp || "").replace("T", " "));
-    if (!isNaN(ta) && !isNaN(tb)) return tb - ta;
-    return 0;
-  });
+  const today = new Date();
+  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const sorted = [...(records.value || [])].sort((a: any, b: any) =>
+    cmpTsDesc(String(a.timestamp || ""), String(b.timestamp || ""))
+  );
   return sorted
     .slice(0, 24)
     .map((r: any) => {
       const rate = Number(r.cache_hit_rate || 0);
       const isErr = !!r.error || r.status === "error";
+      const ts = String(r.timestamp || "");
+      // 非当天的记录带日期前缀，避免把昨天的"16:10"读成今天的时间
+      const isToday = ts.slice(0, 10) === todayStr;
+      const time = isToday ? ts.slice(11, 19) : `${ts.slice(5, 10)} ${ts.slice(11, 16)}`;
       return {
-        key: `${r.timestamp}_${r.service}_${r.output_tokens}_${r.error || ""}`,
-        time: String(r.timestamp || "").slice(11, 19),
+        key: `${ts}_${r.service}_${r.output_tokens}_${r.error || ""}`,
+        time,
         service: r.service || "",
         total:
           Number(r.input_tokens || 0) +

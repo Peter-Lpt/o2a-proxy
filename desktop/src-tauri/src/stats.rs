@@ -889,7 +889,9 @@ fn daily_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, Naive
 static LIVE_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
 
 pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
-    let key = format!("{}|{}|{}", dir.to_string_lossy(), service, primary);
+    // 缓存 key 带上日期：跨天时避免命中昨天日期的旧缓存（防御旧记录混入新列表）
+    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let key = format!("{}|{}|{}|{}", dir.to_string_lossy(), service, primary, today_str);
     if let Some((k, t, v)) = &*LIVE_CACHE.lock().unwrap() {
         if t.elapsed() < Duration::from_millis(1500) && k == &key {
             return Ok(v.clone());
@@ -905,12 +907,19 @@ fn get_live_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     let aliases = load_account_aliases(dir);
     let (_svc_total, no_cost_services) = load_services_pricing(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let records: Vec<Value> = read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services)
-        .into_iter()
-        .filter(|r| matches_service(r, service, &primary))
-        .rev()
-        .take(80)
-        .collect();
+    // 按完整时间戳降序取最近 80 条：时间戳是 0 填充 ISO 字符串，字典序即时间序，
+    // 不依赖 jsonl 行顺序（写进程时钟抖动/交错时依然严格按时间排序）
+    let mut records: Vec<Value> =
+        read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services)
+            .into_iter()
+            .filter(|r| matches_service(r, service, &primary))
+            .collect();
+    records.sort_by(|a, b| {
+        let ta = a["timestamp"].as_str().unwrap_or("");
+        let tb = b["timestamp"].as_str().unwrap_or("");
+        tb.cmp(ta)
+    });
+    records.truncate(80);
     Ok(json!({
         "records": records,
         "updatedAt": chrono::Local::now().to_rfc3339(),
