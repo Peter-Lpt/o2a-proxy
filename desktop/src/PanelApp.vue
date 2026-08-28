@@ -20,7 +20,7 @@
 
     <div class="svc-bar">
       <div class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel" @scroll="onTabsScroll">
-        <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selected = '__all__'">
+        <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selectAll">
           <span class="dot" :class="{ on: anyRunning, busy: anyBusy }"></span>全部
         </button>
         <button
@@ -28,7 +28,7 @@
           :key="s.comment"
           class="svc-tab"
           :class="{ active: selected === s.comment }"
-          @click="selected = s.comment"
+          @click="selectService(s)"
           :title="s.comment + ' · ' + (s.client || 'auto') + ' · :' + (s.listen_address ?? '?')"
         >
           <span class="dot" :class="{ on: runningMap[s.comment], busy: busyMap[s.comment] }"></span>{{ s.comment }}
@@ -303,7 +303,12 @@
                   <SelectBox v-model="activeSvc.thinking_mode" :options="thinkingOptions" placeholder="auto（默认）" :disabled="activeSvcRunning" />
                 </label>
                 <div class="proto-row"><span class="proto-lbl">入口协议</span><span class="proto-val">{{ entryProto }}</span></div>
-                <label>主模型 model <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" /></label>
+                <label>主模型 model
+                  <div class="field-row">
+                    <SelectBox v-model="activeSvc.model" :options="fetchedModels" allow-custom placeholder="选择或输入模型" :disabled="activeSvcRunning" style="flex:1" />
+                    <button type="button" class="icon-btn" :class="{ spinning: modelRefreshing }" title="刷新模型列表" @click="refreshModels(true)"><Icon name="refresh" :size="12" /></button>
+                  </div>
+                </label>
                 <label class="inline"><input v-model="activeSvc.override_model" type="checkbox" :disabled="activeSvcRunning" /><span>覆盖客户端模型 override_model <span class="fc-sub" style="font-weight:400">（关：透传客户端请求的模型名）</span></span></label>
                 <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
                 <div class="grid2">
@@ -421,6 +426,7 @@ const stats = reactive<any>({});
 const showCost = computed(() => stats.showCost !== false);
 const liveRecords = ref<any[]>([]);
 const selected = ref<string>(ALL);
+const selectedSvc = ref<any | null>(null);
 // 配置文件位置（UI 设置项）
 const cfgLoc = ref<any>(null);
 const cfgLocInput = ref("");
@@ -505,9 +511,25 @@ const statsError = ref("");
 const chartResetKey = ref(0);
 const tabEdgeL = ref(false);
 const tabEdgeR = ref(false);
-const fetchedModels = ref<string[]>([]);
+
 const modelHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
-const modelCache = new Map<string, string[]>();
+const modelRefreshing = ref(false);
+const MODEL_CACHE_TTL = 10 * 60 * 1000;
+interface ModelCacheEntry {
+  models: string[];
+  fetchedAt: number;
+  inflight?: Promise<string[] | null> | null;
+}
+const modelCache = new Map<string, ModelCacheEntry>();
+function cacheKey(baseUrl: string, apiKey: string): string {
+  return `${baseUrl}\n${apiKey}`;
+}
+function fmtModelTime(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 const clientOptions = [
   { value: "auto", label: "auto（自动识别协议）" },
   { value: "anthropic", label: "anthropic（Claude Code）" },
@@ -533,7 +555,9 @@ const editingAcc = ref<string | null>(null);
 const accHint = ref<{ text: string; err: boolean }>({ text: "", err: false });
 const accStats = reactive<Record<string, any>>({});
 const accStatsState = reactive<Record<string, "loading" | "ok" | "err">>({});
-let modelsSeq = 0;
+let modelFetchCount = 0;
+let warmSeq = 0;
+let testSeq = 0;
 let accTimer: any = null;
 
 // ---------- 确认弹层 ----------
@@ -658,20 +682,19 @@ async function testAccount() {
     setAccHint("填写 OpenAI 端点后可连通性测试", false);
     return;
   }
-  const seq = ++modelsSeq;
+  const seq = ++testSeq;
   setAccHint("正在测试连接…", false);
   try {
     const res = await api.fetchModels(baseUrl, apiKey);
-    if (seq !== modelsSeq) return;
+    if (seq !== testSeq) return;
     if (res.ok) {
-      modelCache.set(baseUrl, res.models);
-      fetchedModels.value = res.models;
+      modelCache.set(cacheKey(baseUrl, apiKey), { models: res.models, fetchedAt: Date.now() });
       setAccHint(`连接成功：${res.models.length} 个模型可用`, false);
     } else {
       setAccHint("连接失败：" + (res.error || ""), true);
     }
   } catch (e: any) {
-    if (seq !== modelsSeq) return;
+    if (seq !== testSeq) return;
     setAccHint("连接失败：" + e, true);
   }
 }
@@ -713,7 +736,37 @@ function setModelHint(text: string, err = false) {
   modelHint.value = { text, err };
 }
 
-async function fetchModels() {
+async function performFetchModels(baseUrl: string, apiKey: string): Promise<string[] | null> {
+  const key = cacheKey(baseUrl, apiKey);
+  const existing = modelCache.get(key);
+  if (existing?.inflight) return existing.inflight;
+  if (!apiKey) return existing?.models ?? null;
+  modelFetchCount++;
+  modelRefreshing.value = true;
+  const entry = existing || { models: [], fetchedAt: 0 };
+  const promise = (async () => {
+    try {
+      const res = await api.fetchModels(baseUrl, apiKey);
+      if (res.ok) {
+        modelCache.set(key, { models: res.models, fetchedAt: Date.now() });
+        return res.models;
+      }
+      return entry.models || null;
+    } catch (e: any) {
+      return entry.models || null;
+    } finally {
+      const cur = modelCache.get(key);
+      if (cur) cur.inflight = null;
+      modelFetchCount = Math.max(0, modelFetchCount - 1);
+      if (modelFetchCount === 0) modelRefreshing.value = false;
+    }
+  })();
+  entry.inflight = promise;
+  modelCache.set(key, entry);
+  return promise;
+}
+
+async function fetchModels(force = false) {
   if (selected.value === ALL) {
     setModelHint("选择具体服务后可拉取模型列表", false);
     return;
@@ -734,32 +787,57 @@ async function fetchModels() {
     setModelHint("该账号未配置 OpenAI 端点，无法拉取模型列表", false);
     return;
   }
-  // 同一地址已缓存：直接展示（即使该服务未填 Key 也能复用同提供商的模型列表）
-  if (modelCache.has(baseUrl)) {
-    fetchedModels.value = modelCache.get(baseUrl)!;
-    setModelHint(`已加载 ${fetchedModels.value.length} 个模型（${baseUrl}）`, false);
+  const key = cacheKey(baseUrl, apiKey);
+  const entry = modelCache.get(key);
+  const now = Date.now();
+  if (!force && entry && now - entry.fetchedAt < MODEL_CACHE_TTL) {
+    setModelHint(`已加载 ${entry.models.length} 个模型（更新于 ${fmtModelTime(entry.fetchedAt)}）`, false);
+    return;
+  }
+  if (!force && entry && entry.models.length) {
+    if (!apiKey) {
+      setModelHint(`模型可能已过期（上次成功 ${fmtModelTime(entry.fetchedAt)}）；该账号未填写 Key，无法刷新`, true);
+      return;
+    }
+    setModelHint(`模型可能已过期（上次成功 ${fmtModelTime(entry.fetchedAt)}），正在后台刷新…`, false);
+    void performFetchModels(baseUrl, apiKey).then((models) => {
+      const curSvc = activeSvc.value;
+      const curAcc = curSvc ? accountById(curSvc.account) : null;
+      const curKey = curAcc
+        ? cacheKey(String(curAcc.openai_url || "").trim(), String(curAcc.api_key || "").trim())
+        : "";
+      if (curKey !== key) return; // 用户已切换服务/账号，不污染当前提示
+      if (models !== null) {
+        setModelHint(`已加载 ${models.length} 个模型（更新于 ${fmtModelTime(Date.now())}）`, false);
+      } else if (modelCache.get(key)?.models?.length) {
+        setModelHint("后台刷新失败，已保留上次成功列表", true);
+      }
+    });
     return;
   }
   if (!apiKey) {
     setModelHint("该账号未填写 API Key，拉取模型列表需要 Key", false);
     return;
   }
-  const seq = ++modelsSeq;
   setModelHint("正在拉取模型列表…", false);
-  try {
-    const res = await api.fetchModels(baseUrl, apiKey);
-    if (seq !== modelsSeq) return; // 过期请求
-    if (res.ok) {
-      modelCache.set(baseUrl, res.models);
-      fetchedModels.value = res.models;
-      setModelHint(`已加载 ${res.models.length} 个模型`, false);
-    } else {
-      setModelHint("该账号拉取模型失败：" + (res.error || ""), true);
-    }
-  } catch (e: any) {
-    if (seq !== modelsSeq) return;
-    setModelHint("该账号拉取模型失败：" + e, true);
+  const models = await performFetchModels(baseUrl, apiKey);
+  const curSvc = activeSvc.value;
+  const curAcc = curSvc ? accountById(curSvc.account) : null;
+  const curKey = curAcc
+    ? cacheKey(String(curAcc.openai_url || "").trim(), String(curAcc.api_key || "").trim())
+    : "";
+  if (curKey !== key) return; // 等待期间用户切换了服务/账号，不污染当前提示
+  if (models !== null) {
+    setModelHint(`已加载 ${models.length} 个模型（更新于 ${fmtModelTime(Date.now())}）`, false);
+  } else if (modelCache.get(key)?.models?.length) {
+    setModelHint("刷新失败，已保留上次成功列表；可点击右侧刷新重试", true);
+  } else {
+    setModelHint("拉取模型失败", true);
   }
+}
+
+async function refreshModels(force = true) {
+  await fetchModels(force);
 }
 
 async function warmModels() {
@@ -768,11 +846,16 @@ async function warmModels() {
   );
   if (!first) return;
   const baseUrl = String(first.openai_url).trim();
-  if (modelCache.has(baseUrl)) return;
-  const seq = ++modelsSeq;
+  const apiKey = String(first.api_key).trim();
+  const entry = modelCache.get(cacheKey(baseUrl, apiKey));
+  if (entry && Date.now() - entry.fetchedAt < MODEL_CACHE_TTL) return;
+  if (entry?.inflight) return;
+  const seq = ++warmSeq;
   try {
-    const res = await api.fetchModels(baseUrl, String(first.api_key).trim());
-    if (seq === modelsSeq && res.ok) modelCache.set(baseUrl, res.models);
+    const res = await api.fetchModels(baseUrl, apiKey);
+    if (seq === warmSeq && res.ok) {
+      modelCache.set(cacheKey(baseUrl, apiKey), { models: res.models, fetchedAt: Date.now() });
+    }
   } catch (_) {}
 }
 
@@ -797,7 +880,9 @@ function quitApp() {
 }
 
 // 服务标签以配置为准（添加/删除立即生效），运行态从 status 映射
-const serviceList = computed(() => (cfg.services || []).filter((s: any) => s.comment));
+const serviceList = computed(() =>
+  (cfg.services || []).filter((s: any) => s.comment || s === selectedSvc.value)
+);
 const runningMap = computed<Record<string, boolean>>(() => {
   const m: Record<string, boolean> = {};
   (status.services || []).forEach((s: any) => {
@@ -831,9 +916,33 @@ const guide = computed(() => {
 const activeSvcRunning = computed(
   () => !!activeSvc.value && !!runningMap.value[activeSvc.value.comment]
 );
-const activeSvc = computed(
-  () => serviceList.value.find((s: any) => s.comment === selected.value) || serviceList.value[0]
-);
+const activeSvc = computed(() => {
+  if (selected.value === ALL) return null;
+  const cur = selectedSvc.value;
+  if (cur && (cfg.services || []).includes(cur)) return cur;
+  const byName = serviceList.value.find((s: any) => s.comment === selected.value) || null;
+  if (byName) selectedSvc.value = byName;
+  return byName;
+});
+const fetchedModels = computed<string[]>(() => {
+  const s = activeSvc.value;
+  if (!s) return [];
+  const acc = accountById(s.account);
+  if (!acc) return [];
+  const baseUrl = String(acc.openai_url || "").trim();
+  const apiKey = String(acc.api_key || "").trim();
+  if (!baseUrl) return [];
+  const e = modelCache.get(cacheKey(baseUrl, apiKey));
+  return e?.models || [];
+});
+function selectService(s: any) {
+  selectedSvc.value = s;
+  selected.value = s.comment;
+}
+function selectAll() {
+  selectedSvc.value = null;
+  selected.value = ALL;
+}
 const activeSvcAccount = computed(() => accountById(activeSvc.value?.account));
 const runningCount = computed(() => Object.values(runningMap.value).filter(Boolean).length);
 const stoppedCount = computed(() => Math.max(0, serviceList.value.length - runningCount.value));
@@ -935,10 +1044,30 @@ const offMeta = computed(() => {
 });
 async function loadConfig() {
   try {
+    const prev = selectedSvc.value;
+    const prevName = prev?.comment || (selected.value === ALL ? null : selected.value);
+    const prevPort = prev?.listen_address;
     const c = await api.getConfig();
     Object.keys(cfg).forEach((k) => delete (cfg as any)[k]);
     Object.assign(cfg, c || {});
     migrateAccounts(cfg);
+    // 配置重载后重新关联选中服务：优先按名称，其次按端口（适配改名的保存场景）；
+    // 找不到则回到“全部”，而不是静默跳到第一个服务。
+    if (prevName) {
+      const next =
+        (cfg.services || []).find((s: any) => s.comment === prevName) ||
+        (prevPort ? (cfg.services || []).find((s: any) => String(s.listen_address) === String(prevPort)) : null) ||
+        null;
+      if (next) {
+        selectedSvc.value = next;
+        selected.value = String(next.comment || selected.value);
+      } else {
+        selectedSvc.value = null;
+        selected.value = ALL;
+      }
+    } else {
+      selectedSvc.value = null;
+    }
   } catch (e: any) {
     showToast("读取配置失败: " + e, "error");
   }
@@ -1041,6 +1170,7 @@ function addService() {
     max_tokens: 4096,
   };
   cfg.services.push(svc);
+  selectedSvc.value = svc;
   selected.value = svc.comment;
   page.value = "config";
   showToast("已添加服务，绑定账号后保存", "success");
@@ -1059,6 +1189,7 @@ function removeSvc() {
     () => {
       if (running) api.stopService(name).catch(() => {});
       cfg.services = cfg.services.filter((x: any) => x.comment !== name);
+      selectedSvc.value = null;
       selected.value = ALL;
       showToast("已删除服务，点击保存生效", "success");
     },
@@ -1156,6 +1287,21 @@ function normalizeConfig() {
   }
 }
 
+function computeRemovedServices(oldList: any[], newList: any[]): string[] {
+  const newNames = new Set(newList.map((x: any) => x.comment));
+  // 无 id 的最小版区分“改名”和“删除”：旧名消失但端口被新服务占用视为改名，不停止进程；
+  // 真正删除的服务仍会 stopService，避免残留进程占用端口。
+  return oldList
+    .filter((x: any) => {
+      if (newNames.has(x.name)) return false;
+      const renamed = newList.some(
+        (s: any) => s.comment !== x.name && String(s.listen_address) === String(x.port)
+      );
+      return !renamed;
+    })
+    .map((x: any) => x.name);
+}
+
 async function saveConfig() {
   const err = validateConfig();
   if (err) {
@@ -1164,9 +1310,7 @@ async function saveConfig() {
   }
   normalizeConfig();
   try {
-    const oldNames = (status.services || []).map((x: any) => x.name);
-    const newNames = (cfg.services || []).map((x: any) => x.comment);
-    const removed = oldNames.filter((n: any) => !newNames.includes(n));
+    const removed = computeRemovedServices(status.services || [], cfg.services || []);
     await api.saveConfig(cfg);
     await loadConfig();
     await loadStatus();
@@ -1553,7 +1697,17 @@ function onQuickRange(key: string) {
   onCalQuick(key);
 }
 
-watch(selected, () => {
+watch(selected, (v) => {
+  if (v === ALL) {
+    selectedSvc.value = null;
+  } else if (
+    !selectedSvc.value ||
+    !(cfg.services || []).includes(selectedSvc.value) ||
+    selectedSvc.value.comment !== v
+  ) {
+    selectedSvc.value =
+      (cfg.services || []).find((s: any) => s.comment === v) || selectedSvc.value;
+  }
   modelFilter.value = "";
   loadStats();
   loadLive();
