@@ -867,6 +867,187 @@
       "expected_total": 0.3,
       "context_tokens": 500000,
       "note": "v2 upto:null 无上限档命中"
+    },
+    {
+      "name": "fq-partial-remaining",
+      "pricing": {
+        "fq": {
+          "models": {
+            "fq-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "free_quota": 1000000
+            }
+          }
+        }
+      },
+      "model": "fq-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.2810810810810811,
+      "cumulative": 800000,
+      "note": "月免费额度 1M，已用 800000 → 冲抵"
+    },
+    {
+      "name": "fq-exhausted",
+      "pricing": {
+        "fq": {
+          "models": {
+            "fq-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "free_quota": 1000000
+            }
+          }
+        }
+      },
+      "model": "fq-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.0,
+      "cumulative": 1000000,
+      "note": "月免费额度 1M，已用 1000000 → 冲抵"
+    },
+    {
+      "name": "fq-unused-full",
+      "pricing": {
+        "fq": {
+          "models": {
+            "fq-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "free_quota": 1000000
+            }
+          }
+        }
+      },
+      "model": "fq-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.52,
+      "cumulative": 0,
+      "note": "月免费额度 1M，已用 0 → 冲抵"
+    },
+    {
+      "name": "cum-tier-first",
+      "pricing": {
+        "ct": {
+          "models": {
+            "cum-model": {
+              "components": {
+                "input": 3.0,
+                "output": 6.0,
+                "cache_read": 0.6,
+                "cache_write": 3.0
+              },
+              "modifiers": [
+                {
+                  "type": "cumulative_tier",
+                  "period": "month",
+                  "by": "tokens",
+                  "tiers": [
+                    {
+                      "upto": 1000000,
+                      "override": {
+                        "input": 1.5,
+                        "output": 3.0
+                      }
+                    },
+                    {
+                      "upto": null
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "cum-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.48,
+      "cumulative": 800000,
+      "note": "月累计 800K <= 1M → 第一档折扣价"
+    },
+    {
+      "name": "cum-tier-second",
+      "pricing": {
+        "ct": {
+          "models": {
+            "cum-model": {
+              "components": {
+                "input": 3.0,
+                "output": 6.0,
+                "cache_read": 0.6,
+                "cache_write": 3.0
+              },
+              "modifiers": [
+                {
+                  "type": "cumulative_tier",
+                  "period": "month",
+                  "by": "tokens",
+                  "tiers": [
+                    {
+                      "upto": 1000000,
+                      "override": {
+                        "input": 1.5,
+                        "output": 3.0
+                      }
+                    },
+                    {
+                      "upto": null
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "cum-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.78,
+      "cumulative": 1200000,
+      "note": "月累计 1.2M 超出第一档 → 第二档（无覆盖，基础价）"
     }
   ]
 }

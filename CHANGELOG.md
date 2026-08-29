@@ -3,6 +3,65 @@
 本项目版本格式遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。桌面客户端版本同时记录于
 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`desktop/src-tauri/tauri.conf.json`（三处保持一致）。
 
+## [0.3.0] - 2026-08-28
+
+综合优化方案（《综合优化方案.md》）阶段 0-5 落地：安全鉴权、服务身份 id 化、
+模型白名单、定价引擎 v2、订阅额度、配置热加载与统计/面板体验重构。
+
+### 安全（P0）
+
+- **引擎接入层鉴权**：`services[].auth_token`（服务级，顶层 `auth_token` 全局兜底）非空时，
+  所有路径校验 `Authorization: Bearer` / `x-api-key`，`/health` 恒放行探活；未配置凭证的
+  服务启动时打安全警告。401 错误体同时兼容 Anthropic / OpenAI 客户端解析。
+
+### 架构（服务身份 id 化）
+
+- **services[].id**（`svc-<8hex>` 随机，终生不变）：缺失时惰性生成写回（自动备份）。
+  `--service`、桌面端启停、children 表、统计记录（新增 `service_id` 字段，`service`
+  显示名保持原样）、summary 目录（id 优先 + 旧名双查）、前端选中态/标签栏/运行态/
+  删除判定全链路换 id——**改名不再误停服务、历史统计不丢、改名瞬间不回绑**。
+- 新字段：`order` / `enabled`（停用不装载、不参与 start_all）/ `autostart`（App 启动自动拉起）。
+- 一次性迁移脚本 `scripts/migrate_service_ids.py`（`--dry-run` + 备份 + summary 改名 +
+  可选 JSONL `service_id` 回填）。
+
+### 新能力
+
+- **服务级模型白名单**：`models`（对外可见白名单，留空不限制）、`models_map`（对外名→上游名
+  别名，统计记对外名）、`model_policy`（clamp 强转主模型 / reject 400 列出可用 / passthrough
+  透传）；`/v1/models` 返回白名单全集（default/required 标记）。
+- **pricing 字段升级（§2.3）**：除 `""` / `"none"` 外支持对象 `{"mode": "token"|"subscription"|"free"}`。
+- **配置热加载**：`POST /_reload`（带接入凭证）或 SIGHUP 触发；按 id diff——新增启动、删除停机、
+  host/port 变化换绑重启，其余字段（模型/白名单/凭证等）**原地生效**；重载期间请求 503 + Retry-After；
+  先起新后停旧，失败回滚不留半加载；桌面端保存配置自动触发热加载。
+- **订阅额度**：`o2a/quota/` 适配器注册表（local / local-rolling-5h / manual / openrouter，
+  失败降级 local 并标 stale，1.5s 超时永不阻塞主流程）+ 引擎 `GET /quota?account=<id>`；
+  桌面端 `QuotaCard`（多窗口进度条，>80% 琥珀 / >90% 红）。
+
+### 定价引擎 v2
+
+- `o2a/pricing/`（Python）与 `desktop/src-tauri/src/pricing.rs`（Rust）同构模块：v1 兼容映射、
+  覆盖链（服务级 > 账号级 > 模型级）、modifier 管道；**共享 golden fixtures**（pytest 与
+  cargo test 跑同一份 `pricing/golden/cases.json`），双实现零漂移。
+- 新生效的定价维度（pricing.json 存量字段此前未读取）：`discount`（限时折扣，qwen3.7-max 费用减半）、
+  `output_thinking`（思考输出单价）、多档 `tiers[].range`（上下文阶梯，300K+ 请求按高档计价）、
+  `free_quota`（月度免费额度冲抵）。新增 modifier：schedule（峰谷/周末）、cumulative_tier（累计阶梯）。
+
+### 桌面端
+
+- 服务列表视图（>6 服务自动启用）：搜索 / 状态筛选 / 排序 / 批量启停删除 / 行内操作 / 今日用量。
+- 服务管理增强：克隆（自动空闲端口）、`listen_host` UI、端口冲突保存前报错、外部端口占用预检、
+  脏状态（切页确认 + 保存按钮高亮）、删除撤销（Toast 动作，5s 内存回滚）。
+- 改名体验：comment 草稿提交 + 行内校验（空名/重名/非法字符红字不写回）、「保存并重启」单服务按钮。
+- 统计/面板：单一心跳轮询（自适应降频 5s→15s）、区间下拉修复（预设与自定义分离、取值集统一可记忆）、
+  Toast 动作/手动关闭、SelectBox 搜索（非 custom 模式、键盘流）、Ctrl+K 服务跳转、Esc 关面板。
+- Rust 统计缓存单槽 → 多槽（cap 32），悬浮窗与"全部"视图不再互相顶掉。
+- addService 默认值修复（模型留空必填 +「新服务-N」）、migrateAccounts id 查重。
+
+### 兼容性
+
+- 存量 config.json / pricing.json **零迁移可用**（id 惰性补齐、pricing 双格式、定价 v1 映射零行为变更）。
+- 桌面端启停与统计接口同时接受 id 与 comment（老脚本一个版本周期内兼容）。
+
 ## [未发布]
 
 ### 修复（桌面端 · 悬浮窗）

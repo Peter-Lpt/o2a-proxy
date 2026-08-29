@@ -35,6 +35,7 @@ def _run(case):
         account_keys=case.get("account_keys") or [],
         timestamp=case.get("timestamp"),
         context_tokens=case.get("context_tokens"),
+        cumulative_tokens=case.get("cumulative"),
     )
     return result["total"]
 

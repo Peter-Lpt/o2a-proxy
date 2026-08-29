@@ -108,6 +108,46 @@ def test_enabled_string_false_rejected(tmp_path):
     assert load_config()[0].enabled is False
 
 
+# ---------- §2.3 pricing 字段升级 ----------
+
+def test_pricing_string_none_maps_to_subscription(tmp_path):
+    p = write_cfg(tmp_path, {**BASE_CFG, "services": [svc_min(1, pricing="none")]})
+    s = load_config()[0]
+    assert s.pricing_mode == "subscription"
+    assert s.pricing == "none"  # 兼容别名原样保留
+
+
+def test_pricing_object_subscription(tmp_path):
+    obj = {"mode": "subscription", "plan": "max-5h"}
+    p = write_cfg(tmp_path, {**BASE_CFG, "services": [svc_min(1, pricing=obj)]})
+    s = load_config()[0]
+    assert s.pricing_mode == "subscription"
+    assert s.pricing_extra == {"plan": "max-5h"}
+    # 对象形式原样保留写回（保存不丢字段）
+    cfg = json.loads(open(p, encoding="utf-8").read())
+    assert cfg["services"][0]["pricing"] == obj
+
+
+def test_pricing_object_free(tmp_path):
+    p = write_cfg(tmp_path, {**BASE_CFG, "services": [
+        svc_min(1, pricing={"mode": "free"})]})
+    assert load_config()[0].pricing_mode == "free"
+
+
+def test_pricing_object_invalid_mode_falls_back(tmp_path):
+    p = write_cfg(tmp_path, {**BASE_CFG, "services": [
+        svc_min(1, pricing={"mode": "bogus"})]})
+    s = load_config()[0]
+    assert s.pricing_mode == "token"
+
+
+def test_pricing_default_is_token(tmp_path):
+    p = write_cfg(tmp_path, {**BASE_CFG, "services": [svc_min(1)]})
+    s = load_config()[0]
+    assert s.pricing_mode == "token"
+    assert s.pricing == ""
+
+
 # ---------- summary 双查 + service_id 记录 ----------
 
 def test_summary_read_falls_back_to_name_dir(tmp_path):

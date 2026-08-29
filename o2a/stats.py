@@ -3,6 +3,7 @@
 从原 proxy.py 拆出，逻辑逐字保留。
 """
 
+import glob
 import json
 import os
 import threading
@@ -37,6 +38,7 @@ class CacheStats:
         self._lock = threading.Lock()
         self._last_hour = None
         self._pricing = None
+        self._month_cum_cache = None  # (dir, month, sig) → 本账号当月累计 tokens
         os.makedirs(self._summary_root(), exist_ok=True)
         self._cleanup_old_files()
 
@@ -107,13 +109,14 @@ class CacheStats:
         return self._pricing
 
     def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens,
-                   account=None, timestamp=None):
+                   account=None, timestamp=None, cumulative_tokens=None):
         """计算单次请求的费用（CNY）。
 
         account 为账号 id（也可识别 name）；有账号级定价
         （pricing.json["accounts"][账号 id/name]）时优先，否则回退全局按模型名查找。
         timestamp 为记录本地时间（schedule 判定用）；
-        context_tokens（输入侧 prompt 总量）供 context_tier 阶梯判定（§7-④）。
+        context_tokens（输入侧 prompt 总量）供 context_tier 阶梯判定（§7-④）；
+        cumulative_tokens（本月已消耗 tokens，早于本记录）供 free_quota 冲抵（§7-⑤）。
         §7：解析与求值委托 o2a/pricing 包（v1 兼容映射在包内 loader，
         行为与旧实现逐字节一致，由 golden fixtures 固化）。
         """
@@ -131,8 +134,55 @@ class CacheStats:
             pricing, model, input_tokens, cache_read, cache_write, output_tokens,
             account_keys=keys, timestamp=timestamp,
             context_tokens=input_tokens + cache_read + cache_write,
+            cumulative_tokens=cumulative_tokens,
         )
         return result["total"]
+
+    def _month_cumulative_tokens(self, before_ts: str):
+        """本月已消耗 tokens（早于 before_ts 的记录，§7-⑤ free_quota 冲抵用）。
+
+        按 (目录, 月份, 文件签名) 缓存，文件追加后自动失效；签名只做 stat()，
+        不重复读盘。统计口径与 Rust 读取端一致：input+cache_read+cache_write+output，
+        ts 严格早于 before_ts（同为当秒不计，双端一致）。"""
+        now = before_ts[:10] if isinstance(before_ts, str) and len(before_ts) >= 10 else ""
+        month = now[:7] or datetime.now().strftime("%Y-%m")
+        pattern = os.path.join(self.stats_dir, f"{month}-*.jsonl")
+        files = sorted(glob.glob(pattern))
+        sig = []
+        for f in files:
+            try:
+                st = os.stat(f)
+                sig.append((f, st.st_mtime_ns, st.st_size))
+            except OSError:
+                continue
+        key = (self.stats_dir, month, tuple(sig))
+        if self._month_cum_cache and self._month_cum_cache.get("key") == key:
+            return self._month_cum_cache["value"]
+        total = 0
+        for f in files:
+            try:
+                with open(f, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            continue
+                        rts = str(rec.get("timestamp", ""))
+                        if rts >= before_ts:  # 字典序 = 时间序（严格早于才计入）
+                            continue
+                        if rec.get("account") != self.account:
+                            continue  # free_quota 按账号口径冲抵
+                        total += (rec.get("input_tokens") or 0) \
+                            + (rec.get("cache_read_tokens") or 0) \
+                            + (rec.get("cache_write_tokens") or 0) \
+                            + (rec.get("output_tokens") or 0)
+            except OSError:
+                continue
+        self._month_cum_cache = {"key": key, "value": total}
+        return total
 
     def _get_today_file(self):
         """返回当天的 JSONL 文件路径（本地时间）。"""
@@ -169,7 +219,8 @@ class CacheStats:
         ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         cost = 0.0 if self.no_cost else self._calc_cost(
             upstream_model or model, input_tokens, cache_read, cache_write,
-            output_tokens, account=self.account, timestamp=ts
+            output_tokens, account=self.account, timestamp=ts,
+            cumulative_tokens=self._month_cumulative_tokens(ts),
         )
         record = {
             "timestamp": ts,

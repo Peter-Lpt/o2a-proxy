@@ -66,7 +66,7 @@ from .stats import (
     is_cache_stats_enabled,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "API_KEY",

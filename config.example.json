@@ -48,11 +48,13 @@
       "thinking_mode": "effort"
     },
     {
+      "id": "svc-7f3a9c21",
       "comment": "Claude Code 直连（Anthropic 透传）",
       "account": "acc-2",
       "api": "anthropic-messages",
       "model": "claude-4",
-      "listen_address": "11012"
+      "listen_address": "11012",
+      "pricing": {"mode": "subscription"}
     }
   ]
 }

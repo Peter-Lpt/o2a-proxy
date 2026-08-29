@@ -108,6 +108,14 @@ fn v1_modifiers(entry: &Value) -> Vec<Value> {
             modifiers.push(serde_json::json!({"type": "discount", "factor": d, "note": note}));
         }
     }
+    // §7.6-②/⑤：v1 free_quota（模型级数字，按月 tokens 额度）接入，冲抵最后一步
+    if let Some(fq) = entry.get("free_quota").and_then(|v| v.as_f64()) {
+        if fq > 0.0 {
+            modifiers.push(serde_json::json!(
+                {"type": "free_quota", "period": "month", "unit": "tokens", "amount": fq}
+            ));
+        }
+    }
     modifiers
 }
 
@@ -343,6 +351,67 @@ pub fn evaluate(
                     }
                 }
             }
+            "free_quota" => {
+                // §7.6-⑤：剩余额度冲抵 —— ratio = min(1, max(0, amount-cum)/req_tokens)
+                // applied to 全部分量；cumulative 未知时不生效（与 Python 一致）
+                let used = ctx
+                    .and_then(|c| c.get("cumulative"))
+                    .and_then(|c| c.get("tokens"))
+                    .and_then(|v| v.as_f64());
+                if let Some(used) = used {
+                    let amount = m.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let req = (input + read + write + output) as f64;
+                    if amount > 0.0 && req > 0.0 {
+                        let remaining = (amount - used).max(0.0);
+                        let ratio = (remaining / req).min(1.0);
+                        input_p *= ratio;
+                        output_p *= ratio;
+                        cache_read_p *= ratio;
+                        cache_write_p *= ratio;
+                        request_p *= ratio;
+                    }
+                }
+            }
+            "cumulative_tier" => {
+                // §7.4 阶梯之二：按周期累计用量分档（ctx.cumulative.tokens）
+                let value = ctx
+                    .and_then(|c| c.get("cumulative"))
+                    .and_then(|c| c.get("tokens"))
+                    .and_then(|v| v.as_f64());
+                if let Some(value) = value {
+                    if let Some(tiers) = m.get("tiers").and_then(|w| w.as_array()) {
+                        for t in tiers {
+                            let upto = t.get("upto").and_then(|v| v.as_f64());
+                            if let Some(u) = upto {
+                                if value > u {
+                                    continue;
+                                }
+                            }
+                            if let Some(ov) = t.get("override").and_then(|v| v.as_object()) {
+                                for (k, v) in ov {
+                                    if let Some(f) = v.as_f64() {
+                                        match k.as_str() {
+                                            "input" => input_p = f,
+                                            "output" => output_p = f,
+                                            "cache_read" => cache_read_p = f,
+                                            "cache_write" => cache_write_p = f,
+                                            "request" => request_p = f,
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            } else if let Some(f) = t.get("factor").and_then(|v| v.as_f64()) {
+                                input_p *= f;
+                                output_p *= f;
+                                cache_read_p *= f;
+                                cache_write_p *= f;
+                                request_p *= f;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -443,13 +512,24 @@ mod tests {
                 .unwrap_or_default();
             let ts = case.get("timestamp").and_then(|v| v.as_str());
             let ct = case.get("context_tokens").and_then(|v| v.as_i64());
-            let ctx = match (ts, ct) {
-                (Some(ts), Some(ct)) => Some(
+            let cum = case.get("cumulative").and_then(|v| v.as_f64());
+            let ctx = match (ts, ct, cum) {
+                (ts_opt, ct_opt, Some(c)) => {
+                    let mut ctx_obj = serde_json::json!({"cumulative": {"tokens": c}});
+                    if let Some(t) = ts_opt {
+                        ctx_obj["timestamp"] = serde_json::json!(t);
+                    }
+                    if let Some(n) = ct_opt {
+                        ctx_obj["meta"] = serde_json::json!({"context_tokens": n});
+                    }
+                    Some(ctx_obj)
+                }
+                (Some(ts), Some(ct), None) => Some(
                     serde_json::json!({"timestamp": ts, "meta": {"context_tokens": ct}}),
                 ),
-                (Some(ts), None) => Some(serde_json::json!({"timestamp": ts})),
-                (None, Some(ct)) => Some(serde_json::json!({"meta": {"context_tokens": ct}})),
-                (None, None) => None,
+                (Some(ts), None, None) => Some(serde_json::json!({"timestamp": ts})),
+                (None, Some(ct), None) => Some(serde_json::json!({"meta": {"context_tokens": ct}})),
+                (None, None, None) => None,
             };
             let total = resolve_cost(
                 &pricing,

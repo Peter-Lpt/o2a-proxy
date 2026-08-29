@@ -1,6 +1,6 @@
 [package]
 name = "o2a-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "o2a-proxy desktop client (Tauri 2 + Vue 3)"
 authors = ["you"]
 edition = "2021"

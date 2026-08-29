@@ -156,6 +156,11 @@ def _entry_to_v2(entry: dict) -> dict:
     if isinstance(discount, (int, float)) and discount != 1:
         modifiers.append({"type": "discount", "factor": float(discount),
                           "note": entry.get("discount_note") or f"discount:{discount:g}"})
+    # §7.6-②/⑤：v1 free_quota（模型级数字，按月 tokens 额度）接入，冲抵在最后一步
+    fq = entry.get("free_quota")
+    if isinstance(fq, (int, float)) and fq > 0:
+        modifiers.append({"type": "free_quota", "period": "month", "unit": "tokens",
+                          "amount": float(fq)})
     return {"billing": "token", "components": comps, "modifiers": modifiers}
 
 

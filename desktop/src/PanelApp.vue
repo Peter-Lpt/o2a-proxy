@@ -48,7 +48,7 @@
 
     <!-- §5.2A 服务列表视图：服务 >6 自动启用，或手动切换 -->
     <div v-if="useListView" class="card slv-card">
-      <ServiceListView :services="listRows" @open="openServiceFromList" @toggle="toggleSvc"
+      <ServiceListView ref="listViewRef" :services="listRows" @open="openServiceFromList" @toggle="toggleSvc"
                        @clone="cloneById" @remove="removeById" @batch-start="batchStart"
                        @batch-stop="batchStop" @batch-remove="batchRemove" @usage="loadListUsage" />
     </div>
@@ -1480,8 +1480,13 @@ async function loadStats() {
   if (quotaVisible.value) loadQuota();
 }
 
-// ---------- §8.5 订阅额度展示（pricing=none 的服务：费用卡位置展示额度卡） ----------
-const quotaVisible = computed(() => selected.value !== ALL && activeSvc.value?.pricing === "none");
+// ---------- §8.5 订阅额度展示（订阅制服务：费用卡位置展示额度卡；§2.3 对象形式兼容） ----------
+const quotaVisible = computed(() => {
+  if (selected.value === ALL) return false;
+  const p: any = activeSvc.value?.pricing;
+  if (p === "none") return true;
+  return !!p && typeof p === "object" && p.mode === "subscription";
+});
 const quotaSnapshot = ref<any>(null);
 async function loadQuota() {
   const acc = activeSvc.value?.account;
@@ -2279,6 +2284,19 @@ function onVisibilityChange() {
   onPanelVisible(!document.hidden);
 }
 
+// ---------- §10.4 键盘流：Ctrl+K 服务搜索跳转；Esc 关面板 ----------
+const listViewRef = ref<InstanceType<typeof ServiceListView> | null>(null);
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    if (!listMode.value) toggleListView();
+    nextTick(() => listViewRef.value?.focusSearch());
+  } else if (e.key === "Escape") {
+    if (confirmBox.value || toastAction.value) return; // 弹层优先自行处理
+    api.hidePanel().catch(() => {});
+  }
+}
+
 onMounted(async () => {
   await Promise.all([loadConfig(), loadStatus(), loadConfigLocation()]);
   loadStats();
@@ -2289,6 +2307,7 @@ onMounted(async () => {
     (f) => (unlistenPanel = f)
   );
   document.addEventListener("visibilitychange", onVisibilityChange);
+  document.addEventListener("keydown", onGlobalKeydown);
   // 主题：跨窗口同步（Tauri event）+ 系统深浅跟随
   listen<string>("o2a-theme", (e) => {
     if (e.payload !== theme.value) {
@@ -2304,6 +2323,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenPanel?.();
   document.removeEventListener("visibilitychange", onVisibilityChange);
+  document.removeEventListener("keydown", onGlobalKeydown);
   if (heartbeat) clearInterval(heartbeat);
 });
 </script>

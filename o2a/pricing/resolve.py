@@ -45,7 +45,7 @@ def _ensure_v2(entry: dict) -> dict:
 def resolve_cost(raw_pricing: dict, model: str, input_tokens=0, cache_read=0,
                  cache_write=0, output_tokens=0, reasoning_tokens=0, requests=0,
                  account_keys=None, service_id: str = None, timestamp: str = None,
-                 context_tokens: int = None) -> dict:
+                 context_tokens: int = None, cumulative_tokens: int = None) -> dict:
     """resolve + evaluate 一步到位；未命中定价时 total=0（旧行为）。"""
     entry = resolve_entry(raw_pricing, model, account_keys=account_keys, service_id=service_id)
     if entry is None:
@@ -53,8 +53,13 @@ def resolve_cost(raw_pricing: dict, model: str, input_tokens=0, cache_read=0,
     ctx = {}
     if timestamp:
         ctx["timestamp"] = timestamp
-    if context_tokens is not None:
-        ctx["meta"] = {"context_tokens": context_tokens}
+    if context_tokens is not None or cumulative_tokens is not None:
+        meta = {}
+        if context_tokens is not None:
+            meta["context_tokens"] = context_tokens
+        ctx["meta"] = meta
+    if cumulative_tokens is not None:
+        ctx["cumulative"] = {"tokens": cumulative_tokens}
     return evaluate_entry(entry, input_tokens, cache_read, cache_write,
                           output_tokens, reasoning_tokens, requests,
                           ctx=ctx or None)

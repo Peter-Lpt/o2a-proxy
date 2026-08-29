@@ -183,6 +183,7 @@ fn recalc_cost(
     aliases: &BTreeMap<String, String>,
     no_cost: bool,
     ts: &str,
+    cum: f64,
 ) -> f64 {
     if no_cost {
         return 0.0;
@@ -198,13 +199,15 @@ fn recalc_cost(
         }
     }
     // 历史正确性（§7.3）：schedule 判定用记录自身的 timestamp，改价不改写历史口径；
-    // context_tokens = 输入侧 prompt 总量（input+read+write，双端口径一致，§7-④）
+    // context_tokens = 输入侧 prompt 总量（input+read+write，双端口径一致，§7-④）；
+    // cumulative = 本账号当月早于本记录的 tokens（free_quota 冲抵，§7-⑤）
     let ctx = if ts.is_empty() {
         None
     } else {
         Some(serde_json::json!({
             "timestamp": ts,
-            "meta": {"context_tokens": input + read + write}
+            "meta": {"context_tokens": input + read + write},
+            "cumulative": {"tokens": cum}
         }))
     };
     crate::pricing::resolve_cost(pricing, model, input, read, write, output, &keys, "", ctx.as_ref())
@@ -223,11 +226,16 @@ fn load_services_pricing(stats_dir: &Path) -> (usize, BTreeSet<String>) {
         if let Some(services) = cfg.get("services").and_then(|s| s.as_array()) {
             for svc in services {
                 total += 1;
-                let no_cost_svc = svc
-                    .get("pricing")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == "none")
-                    .unwrap_or(false);
+                // §2.3：pricing 支持字符串 "none" 与对象 {"mode": "subscription"|"free"}
+                let no_cost_svc = match svc.get("pricing") {
+                    Some(Value::String(s)) => s == "none",
+                    Some(Value::Object(o)) => o
+                        .get("mode")
+                        .and_then(|v| v.as_str())
+                        .map(|m| m == "subscription" || m == "free")
+                        .unwrap_or(false),
+                    _ => false,
+                };
                 if no_cost_svc {
                     if let Some(name) = svc.get("comment").and_then(|v| v.as_str()) {
                         no_cost.insert(name.to_string());
@@ -272,15 +280,78 @@ fn show_cost(total: usize, no_cost: &BTreeSet<String>, service: &str) -> bool {
     }
 }
 
+/// §7-⑤ free_quota 月累计（按账号口径）：
+/// account → (ts 升序, prefix[i] = 前 i 条 tokens 之和)。
+/// 查询 before(account, ts) = ts 严格早于该记录的当月 tokens 总量，
+/// 与 Python 写入端 _month_cumulative_tokens 同口径（同秒不计、字典序比较）。
+pub struct MonthCum {
+    month: String,
+    entries: std::collections::HashMap<String, (Vec<String>, Vec<f64>)>,
+}
+
+impl MonthCum {
+    pub fn entries_before(&self, account: &str, ts: &str) -> f64 {
+        match self.entries.get(account) {
+            Some((tss, pref)) => {
+                let idx = tss.partition_point(|t| t.as_str() < ts);
+                pref.get(idx).copied().unwrap_or(0.0)
+            }
+            None => 0.0,
+        }
+    }
+}
+
+/// 从当月 jsonl 构建 MonthCum（文件名升序 + 行序读取，稳定排序后前缀和）。
+fn build_month_cum(dir: &Path, month_prefix: &str) -> MonthCum {
+    let mut per_acc: std::collections::HashMap<String, Vec<(String, f64)>> = Default::default();
+    for entry in std::fs::read_dir(dir).into_iter().flatten() {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !(name.starts_with(&format!("{month_prefix}-")) && name.ends_with(".jsonl")) {
+            continue;
+        }
+        let Ok(s) = std::fs::read_to_string(entry.path()) else { continue };
+        for line in s.lines() {
+            let Ok(rec) = serde_json::from_str::<Value>(line.trim()) else { continue };
+            let ts = rec.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if ts.is_empty() {
+                continue;
+            }
+            let acc = rec.get("account").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let tokens = (rec.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
+                + rec.get("cache_read_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
+                + rec.get("cache_write_tokens").and_then(|v| v.as_i64()).unwrap_or(0)
+                + rec.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0))
+                as f64;
+            per_acc.entry(acc).or_default().push((ts, tokens));
+        }
+    }
+    let mut entries = std::collections::HashMap::new();
+    for (acc, mut list) in per_acc {
+        list.sort_by(|a, b| a.0.cmp(&b.0)); // 稳定排序：同秒保持文件行序
+        let mut tss = Vec::with_capacity(list.len());
+        let mut pref = Vec::with_capacity(list.len() + 1);
+        pref.push(0.0);
+        for (ts, tokens) in &list {
+            tss.push(ts.clone());
+            pref.push(pref.last().unwrap_or(&0.0) + tokens);
+        }
+        entries.insert(acc, (tss, pref));
+    }
+    MonthCum { month: month_prefix.to_string(), entries }
+}
+
 /// 读取某天原始记录，并统一按当前定价重算 cost 字段。
 /// 记录层归一化：带 service_id 的记录把 service 改写为当前显示名（id → comment），
 /// 使 matches_service / no_cost / by_service 全部按当前名匹配，改名后历史统计不丢。
+/// month_cum：当月累计（free_quota 冲抵），仅当该日期属于所给月份时使用。
 fn read_records(
     stats_dir: &Path,
     date_str: &str,
     pricing: &Value,
     aliases: &BTreeMap<String, String>,
     no_cost_services: &BTreeSet<String>,
+    month_cum: Option<&MonthCum>,
 ) -> Vec<Value> {
     let p = stats_dir.join(format!("{date_str}.jsonl"));
     let Ok(s) = std::fs::read_to_string(&p) else {
@@ -313,9 +384,13 @@ fn read_records(
                 .as_str()
                 .map(|s| no_cost_services.contains(s))
                 .unwrap_or(false);
+            let cum = month_cum
+                .filter(|m| date_str.len() >= 7 && &date_str[..7] == &m.month)
+                .map(|m| m.entries_before(&account, &ts))
+                .unwrap_or(0.0);
             rec["cost"] = json!(recalc_cost(
                 &price_model, input, read, write, output, pricing, &account, aliases, no_cost,
-                &ts,
+                &ts, cum,
             ));
             rec
         })
@@ -643,16 +718,26 @@ fn get_stats_impl(
     // 逐日读取一次（按需），并按 service 过滤后缓存，供各聚合复用。
     // 模型过滤在记录层统一施加：KPI / 性能 / 图表序列 / 按模型 / 按服务 /
     // 同比等全部聚合都基于过滤后的记录，保证整页统计口径一致。
+    // §7-⑤：当月累计（free_quota 冲抵），仅当前月日期使用
+    let month_cum = build_month_cum(dir, &month_prefix);
     let mut by_date: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     // 当前区间内出现过的模型全集（不受模型过滤影响），供前端下拉框使用
     let mut models_in_range: BTreeSet<String> = BTreeSet::new();
     for d in &need {
         let ds = d.format("%Y-%m-%d").to_string();
         let in_cur_range = d >= &cur.0 && d <= &cur.1;
+        let in_month = ds.starts_with(&month_prefix);
         let mut recs = Vec::new();
-        for r in read_records(dir, &ds, &pricing, &aliases, &no_cost_services)
-            .into_iter()
-            .filter(|r| matches_service(r, service, primary))
+        for r in read_records(
+            dir,
+            &ds,
+            &pricing,
+            &aliases,
+            &no_cost_services,
+            if in_month { Some(&month_cum) } else { None },
+        )
+        .into_iter()
+        .filter(|r| matches_service(r, service, primary))
         {
             if in_cur_range {
                 if let Some(m) = r.get("model").and_then(|v| v.as_str()) {
@@ -948,10 +1033,11 @@ fn get_live_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     let aliases = load_account_aliases(dir);
     let (_svc_total, no_cost_services) = load_services_pricing(dir);
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let month_cum = build_month_cum(dir, &today_str[..7]);
     // 按完整时间戳降序取最近 80 条：时间戳是 0 填充 ISO 字符串，字典序即时间序，
     // 不依赖 jsonl 行顺序（写进程时钟抖动/交错时依然严格按时间排序）
     let mut records: Vec<Value> =
-        read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services)
+        read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services, Some(&month_cum))
             .into_iter()
             .filter(|r| matches_service(r, service, &primary))
             .collect();
@@ -990,10 +1076,15 @@ pub fn get_daily(
     let s = NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap_or_else(|_| chrono::Local::now().date_naive());
     let e = NaiveDate::parse_from_str(end, "%Y-%m-%d").unwrap_or(s);
     let (s, e) = if s <= e { (s, e) } else { (e, s) };
+    // 按月懒构建累计（自定义区间可能跨月）
+    let mut cum_by_month: std::collections::HashMap<String, MonthCum> = Default::default();
     let mut out: Vec<Value> = Vec::new();
     for d in date_range(s, e) {
         let ds = d.format("%Y-%m-%d").to_string();
-        let recs = read_records(dir, &ds, &pricing, &aliases, &no_cost_services);
+        let month_cum = cum_by_month
+            .entry(ds[..7].to_string())
+            .or_insert_with(|| build_month_cum(dir, &ds[..7]));
+        let recs = read_records(dir, &ds, &pricing, &aliases, &no_cost_services, Some(month_cum));
         let mut req = 0usize;
         let mut cost = 0.0f64;
         for r in recs.iter().filter(|r| matches_service(r, service, primary)) {

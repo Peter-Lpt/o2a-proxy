@@ -124,9 +124,13 @@ class Service:
         self.api = (api or "").strip()
         self.upstream_api = (upstream_api or "openai-completions").strip()
         self.thinking_mode = (thinking_mode or "auto").strip() or "auto"
-        # 计价模式："" = 按 pricing.json 计价；"none" = 订阅制（token plan / code plan 等），
-        # 按 token 计价无意义，统计记录与面板不显示价格
-        self.pricing = (pricing or "").strip()
+        # 计价模式（§2.3）："" = 按 pricing.json 计价；"none" = 订阅制兼容别名；
+        # 对象形式 {"mode": "token"|"subscription"|"free", ...}
+        if isinstance(pricing, dict):
+            self.pricing = pricing
+        else:
+            self.pricing = str(pricing or "").strip()
+        self.pricing_mode, self.pricing_extra = normalize_pricing_value(self.pricing)
         # 客户端凭证（接入层鉴权）：非空时校验请求头 Authorization: Bearer <token> / x-api-key；
         # 为空时不校验（保持历史行为），引擎启动时会打警告
         self.auth_token = (auth_token or "").strip()
@@ -213,6 +217,32 @@ _THINKING_MODES = ("auto", "passthrough", "effort", "enable_thinking", "none")
 
 # 服务级模型策略（§6 模型白名单）：白名单外的请求如何处理
 MODEL_POLICIES = ("clamp", "reject", "passthrough")
+
+# §2.3 pricing 字段升级："" | "none" | {"mode": "token"|"subscription"|"free", ...}
+PRICING_MODES = ("token", "subscription", "free")
+
+
+def normalize_pricing_value(raw):
+    """归一化 services[].pricing → ("token"|"subscription"|"free", 附加 dict|None)。
+
+    - ""（缺省）→ token：按 pricing.json 计价（历史行为）
+    - "none" → subscription 的兼容别名（历史行为，语义与现状逐字节一致）
+    - dict → mode 必填合法；可附 plan / quota_source 等（衔接 §7.2/§8）
+    非法值回退 token 并警告。"""
+    if isinstance(raw, dict):
+        mode = raw.get("mode", "token")
+        if mode not in PRICING_MODES:
+            logger.warning(f"[config] pricing.mode '{mode}' 非法，回退 token")
+            return ("token", None)
+        extra = {k: v for k, v in raw.items() if k != "mode"}
+        return (mode, extra or None)
+    s = str(raw or "").strip()
+    if s == "none":
+        return ("subscription", None)
+    if s == "":
+        return ("token", None)
+    logger.warning(f"[config] pricing '{s}' 非法，回退 token（仅支持 none / 对象形式）")
+    return ("token", None)
 
 
 def load_auth():
@@ -386,8 +416,11 @@ def load_config():
                 if client not in ("anthropic", "openai", "auto"):
                     client = "auto"
                 pricing = svc.get("pricing", "")
-                if pricing not in ("", "none"):
-                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 pricing '{pricing}' 非法，忽略（仅支持 none）")
+                if isinstance(pricing, dict):
+                    # §2.3 对象形式：归一化校验（非法 mode 回退 token），原样保留写回
+                    normalize_pricing_value(pricing)
+                elif pricing not in ("", "none"):
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 pricing '{pricing}' 非法，忽略（仅支持 none / 对象形式）")
                     pricing = ""
                 auth_token = str(svc.get("auth_token", "") or "").strip()
                 if not auth_token:

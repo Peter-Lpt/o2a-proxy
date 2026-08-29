@@ -1,7 +1,7 @@
 <template>
   <div class="slv">
     <div class="slv-toolbar">
-      <input v-model="query" type="text" class="slv-search" placeholder="搜索：名称 / 账号 / 端口 / 模型" spellcheck="false" />
+      <input ref="searchInput" v-model="query" type="text" class="slv-search" placeholder="搜索：名称 / 账号 / 端口 / 模型" spellcheck="false" />
       <SelectBox v-model="statusFilter" :options="statusOptions" size="sm" style="width: 96px" />
       <SelectBox v-model="sortKey" :options="sortOptions" size="sm" style="width: 104px" />
       <button class="icon-btn" :title="sortDir === 'asc' ? '升序' : '降序'" @click="flipSort">
@@ -51,6 +51,11 @@ import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import SelectBox from "./SelectBox.vue";
 
+// §10.4 键盘流：Ctrl+K 跳转服务时由父组件调用聚焦搜索
+defineExpose({
+  focusSearch: () => searchInput.value?.focus(),
+});
+
 export interface ServiceRow {
   id: string;
   comment: string;
@@ -76,6 +81,7 @@ const emit = defineEmits<{
 }>();
 
 const query = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
 const statusFilter = ref<"all" | "running" | "stopped">("all");
 const sortKey = ref<"name" | "port" | "status">("name");
 const sortDir = ref<"asc" | "desc">("asc");

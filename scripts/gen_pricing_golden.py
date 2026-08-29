@@ -208,6 +208,61 @@ def main():
                            + usage["cache_read"] * 0.2 + usage["cache_write"] * 1.0) / 1_000_000
     c["note"] = "v2 upto:null 无上限档命中"
     cases.append(c)
+
+    # §7.6-⑤ free_quota（v1 模型级字段，月度 tokens 额度冲抵）。
+    # 基础 comps: input 2.0 / output 4.0 / cache_read 0.4 / cache_write 2.0；
+    # req_tokens = input+cache_read+cache_write+output = 370K；ratio = remaining/req
+    # 期望按 evaluate 的分量顺序逐项 ×ratio 求和（与双端实现位一致）。
+    pricing_fq = {
+        "fq": {"models": {"fq-model": {
+            "tiers": [{"input": 2.0, "output": 4.0}],
+            "free_quota": 1_000_000}}},
+    }
+    req_tokens = usage["input"] + usage["cache_read"] + usage["cache_write"] + usage["output"]
+
+    def fq_expected(cumulative):
+        remaining = max(0.0, 1_000_000 - cumulative)
+        r = min(1.0, remaining / req_tokens)
+        # 精确复刻双端求值顺序：单价先乘 ratio，再逐项 t×p/1e6 后按序求和
+        return (usage["input"] * (2.0 * r) / 1_000_000
+                + usage["output"] * (4.0 * r) / 1_000_000
+                + usage["cache_read"] * (0.4 * r) / 1_000_000
+                + usage["cache_write"] * (2.0 * r) / 1_000_000
+                + 0 * 0.0)
+
+    for name, cum in [
+        ("fq-partial-remaining", 800_000),
+        ("fq-exhausted", 1_000_000),
+        ("fq-unused-full", 0),
+    ]:
+        c = case(name, pricing_fq, "fq-model", usage)
+        c["cumulative"] = cum
+        c["expected_total"] = fq_expected(cum)
+        c["note"] = f"月免费额度 1M，已用 {cum} → 冲抵"
+        cases.append(c)
+
+    # §7.4 cumulative_tier：月累计 tokens 阶梯（800K 已用 → 命中第一档 <=1M 的降档价）。
+    pricing_cum = {
+        "ct": {"models": {"cum-model": {
+            "components": {"input": 3.0, "output": 6.0, "cache_read": 0.6, "cache_write": 3.0},
+            "modifiers": [{"type": "cumulative_tier", "period": "month", "by": "tokens",
+                           "tiers": [{"upto": 1_000_000,
+                                      "override": {"input": 1.5, "output": 3.0}},
+                                     {"upto": None}]}]}}},
+    }
+    c = case("cum-tier-first", pricing_cum, "cum-model", usage)
+    c["cumulative"] = 800_000
+    c["expected_total"] = (usage["input"] * 1.5 + usage["output"] * 3.0
+                           + usage["cache_read"] * 0.6 + usage["cache_write"] * 3.0) / 1_000_000
+    c["note"] = "月累计 800K <= 1M → 第一档折扣价"
+    cases.append(c)
+    c = case("cum-tier-second", pricing_cum, "cum-model", usage)
+    c["cumulative"] = 1_200_000
+    # 第二档 upto:null 无 override → 保持基础单价
+    c["expected_total"] = (usage["input"] * 3.0 + usage["output"] * 6.0
+                           + usage["cache_read"] * 0.6 + usage["cache_write"] * 3.0) / 1_000_000
+    c["note"] = "月累计 1.2M 超出第一档 → 第二档（无覆盖，基础价）"
+    cases.append(c)
     out = {
         "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（§7.5）。"
                    "期望值由重构前旧算法计算，固化零行为变更。由 scripts/gen_pricing_golden.py 生成。",

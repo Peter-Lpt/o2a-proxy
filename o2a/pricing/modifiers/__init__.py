@@ -8,8 +8,10 @@ modifier 签名（Py/Rs 同构）：
 """
 
 from .context_tier import apply as apply_context_tier
+from .cumulative_tier import apply as apply_cumulative_tier
 from .discount import apply as apply_discount
 from .batch import apply as apply_batch
+from .free_quota import apply as apply_free_quota
 from .schedule import apply as apply_schedule
 
 # type → apply(components, ctx) -> (components, applied: list[str])
@@ -18,7 +20,9 @@ _REGISTRY = {
     "batch": apply_batch,
     "schedule": apply_schedule,
     "context_tier": apply_context_tier,
-    # cumulative_tier / free_quota / overage：阶段3 后续接入
+    "free_quota": apply_free_quota,
+    "cumulative_tier": apply_cumulative_tier,
+    # overage / subscription：随 §2.3 pricing 对象配置升级接入
 }
 
 

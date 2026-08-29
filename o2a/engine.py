@@ -198,8 +198,8 @@ async def record_stats(service: Service, model: str, usage: dict,
 
 
 def _stats_for(service: Service):
-    """返回该服务的统计实例；pricing=none（订阅制）时不记录价格。"""
-    return get_stats(service.name, service.account.id, no_cost=service.pricing == "none",
+    """返回该服务的统计实例；非 token 计价（订阅制/免费，§2.3）时不记录价格。"""
+    return get_stats(service.name, service.account.id, no_cost=service.pricing_mode != "token",
                      service_id=service.id)
 
 
