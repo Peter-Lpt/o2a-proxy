@@ -34,6 +34,13 @@
   --chart-bar: rgba(79, 140, 255, 0.5);
   --chart-line: #34d399;
   --chart-line-glow: rgba(52, 211, 153, 0.22);
+  /* §10.5 design tokens：新组件优先使用；旧样式渐进迁移 */
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px;
+  --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 14px;
+  --fs-xs: 10px; --fs-sm: 11px; --fs-md: 12px; --fs-lg: 13.5px;
+  --focus-ring: 0 0 0 3px rgba(79, 140, 255, 0.25);
+  --state-ok: var(--green); --state-warn: var(--amber);
+  --state-err: var(--red); --state-run: var(--blue);
   /* 折线图序列配色：输入(灰) / 缓存读(蓝) / 输出(琥珀) / 命中率(绿)，
      输出用琥珀色与缓存/命中率的绿色系区分开，避免同色难辨 */
   --chart-input: #9aa3b2;
@@ -608,6 +615,12 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
 .field-err { color: var(--red); font-size: 10.5px; line-height: 1.5; margin: 2px 0 0 1px; }
 /* 有未保存改动时保存按钮高亮（§5.2D 脏状态） */
 .btn.attn { border-color: var(--amber); color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
+/* §10.2-7 骨架屏（统计加载占位） */
+.skel .skel-line { display: block; height: 9px; width: 55%; border-radius: 5px; background: linear-gradient(90deg, var(--border-soft) 25%, var(--border) 50%, var(--border-soft) 75%); background-size: 200% 100%; animation: skel 1.2s ease infinite; }
+.skel .skel-line.short { width: 35%; }
+.skel .skel-bar { display: block; height: 15px; width: 75%; margin: 5px 0; border-radius: 5px; background: linear-gradient(90deg, var(--border-soft) 25%, var(--border) 50%, var(--border-soft) 75%); background-size: 200% 100%; animation: skel 1.2s ease infinite; }
+.skel .skel-bar.wide { height: 90px; width: 100%; }
+@keyframes skel { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 .form-actions { display: flex; gap: 8px; margin-top: 12px; }
 .hint { font-size: 10.5px; color: var(--muted-2); margin-top: 12px; line-height: 1.6; }
 .cfg-lock {
