@@ -167,9 +167,10 @@ fn load_account_aliases(stats_dir: &Path) -> BTreeMap<String, String> {
     out
 }
 
-/// 参考 proxy.py CacheStats._calc_cost：按当前 pricing.json 重算单次请求费用。
+/// 参考 o2a/pricing（Python 同构模块）：按当前 pricing.json 重算单次请求费用。
 /// 历史记录写入时可能缺少 cost 或定价表后补，读取时统一重算，保证口径一致。
-/// 账号级定价（pricing.json["accounts"]，键可为账号 id 或 name）优先，全局兜底。
+/// §7：解析与求值委托 pricing 模块（v1 兼容映射在模块内，行为不变，
+/// 与 Python 双端跑同一份 golden fixtures）。
 /// no_cost（订阅制，如 opencode token/code plan）时直接返回 0，不按 token 计价。
 fn recalc_cost(
     model: &str,
@@ -181,74 +182,32 @@ fn recalc_cost(
     account: &str,
     aliases: &BTreeMap<String, String>,
     no_cost: bool,
+    ts: &str,
 ) -> f64 {
     if no_cost {
         return 0.0;
     }
-    let Some(pricing_obj) = pricing.as_object() else {
-        return 0.0;
-    };
-    let mut price = None;
-    // 1. 账号级：pricing.json["accounts"]，键可为账号 id 或 name
+    // 账号键序：id 优先，name 兜底（v1 accounts 段语义）
+    let mut keys: Vec<String> = Vec::new();
     if !account.is_empty() {
-        if let Some(acc_map) = pricing_obj.get("accounts").and_then(|v| v.as_object()) {
-            let mut keys: Vec<String> = vec![account.to_string()];
-            if let Some(name) = aliases.get(account) {
-                if !name.is_empty() {
-                    keys.push(name.clone());
-                }
-            }
-            for k in keys {
-                if let Some(models) = acc_map
-                    .get(&k)
-                    .and_then(|v| v.get("models"))
-                    .and_then(|v| v.as_object())
-                {
-                    if let Some(m) = models.get(model) {
-                        price = Some(m);
-                        break;
-                    }
-                }
+        keys.push(account.to_string());
+        if let Some(name) = aliases.get(account) {
+            if !name.is_empty() {
+                keys.push(name.clone());
             }
         }
     }
-    // 2. 全局按模型名兜底
-    if price.is_none() {
-        for (pname, pdata) in pricing_obj {
-            if pname.starts_with('_') || pname == "accounts" {
-                continue;
-            }
-            if let Some(models) = pdata.get("models").and_then(|m| m.as_object()) {
-                if let Some(m) = models.get(model) {
-                    price = Some(m);
-                    break;
-                }
-            }
-        }
-    }
-    let Some(price) = price else { return 0.0 };
-    let Some(tier) = price
-        .get("tiers")
-        .and_then(|t| t.as_array())
-        .and_then(|a| a.first())
-    else {
-        return 0.0;
-    };
-    let input_price = tier.get("input").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let output_price = tier.get("output").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let input_cost = input as f64 * input_price / 1_000_000.0;
-    let output_cost = output as f64 * output_price / 1_000_000.0;
-    let cache_read_cost = if let Some(c) = tier.get("cache_hit").and_then(|v| v.as_f64()) {
-        read as f64 * c / 1_000_000.0
+    // 历史正确性（§7.3）：schedule 判定用记录自身的 timestamp，改价不改写历史口径；
+    // context_tokens = 输入侧 prompt 总量（input+read+write，双端口径一致，§7-④）
+    let ctx = if ts.is_empty() {
+        None
     } else {
-        read as f64 * input_price * 0.2 / 1_000_000.0
+        Some(serde_json::json!({
+            "timestamp": ts,
+            "meta": {"context_tokens": input + read + write}
+        }))
     };
-    let cache_write_cost = if let Some(c) = tier.get("cache_miss").and_then(|v| v.as_f64()) {
-        write as f64 * c / 1_000_000.0
-    } else {
-        write as f64 * input_price / 1_000_000.0
-    };
-    input_cost + output_cost + cache_read_cost + cache_write_cost
+    crate::pricing::resolve_cost(pricing, model, input, read, write, output, &keys, "", ctx.as_ref())
 }
 
 /// 读取 config.json 的服务列表，返回（服务总数, 订阅制 pricing=none 服务名集合）。
@@ -349,12 +308,14 @@ fn read_records(
             let write = rec["cache_write_tokens"].as_i64().unwrap_or(0);
             let output = rec["output_tokens"].as_i64().unwrap_or(0);
             let account = rec["account"].as_str().unwrap_or("").to_string();
+            let ts = rec["timestamp"].as_str().unwrap_or("").to_string();
             let no_cost = rec["service"]
                 .as_str()
                 .map(|s| no_cost_services.contains(s))
                 .unwrap_or(false);
             rec["cost"] = json!(recalc_cost(
-                &price_model, input, read, write, output, pricing, &account, aliases, no_cost
+                &price_model, input, read, write, output, pricing, &account, aliases, no_cost,
+                &ts,
             ));
             rec
         })

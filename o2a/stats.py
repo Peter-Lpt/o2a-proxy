@@ -15,6 +15,7 @@ except ImportError:
 
 from .base import HAS_FCNTL, PROJECT_ROOT, logger
 from .config import load_config
+from .pricing import resolve_cost
 
 
 class CacheStats:
@@ -105,65 +106,33 @@ class CacheStats:
             self._pricing = {}
         return self._pricing
 
-    def _account_pricing(self, account, model):
-        """在 pricing.json["accounts"] 中按账号 id/name 匹配模型价格，未命中返回 None。
-
-        键可为账号 id 或 name（auth.json 同样支持两种键）。"""
-        accounts_pricing = self._load_pricing().get("accounts")
-        if not isinstance(accounts_pricing, dict) or not account:
-            return None
-        direct = accounts_pricing.get(account)
-        if isinstance(direct, dict):
-            m = (direct.get("models") or {}).get(model)
-            if m is not None:
-                return m
-        # 通过 config.json 的账号列表把 id 映射到 name 再匹配
-        for svc in load_config():
-            acc = svc.account
-            if acc.id == account and acc.name in accounts_pricing:
-                m = (accounts_pricing[acc.name].get("models") or {}).get(model)
-                if m is not None:
-                    return m
-        return None
-
-    def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens, account=None):
+    def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens,
+                   account=None, timestamp=None):
         """计算单次请求的费用（CNY）。
 
         account 为账号 id（也可识别 name）；有账号级定价
         （pricing.json["accounts"][账号 id/name]）时优先，否则回退全局按模型名查找。
+        timestamp 为记录本地时间（schedule 判定用）；
+        context_tokens（输入侧 prompt 总量）供 context_tier 阶梯判定（§7-④）。
+        §7：解析与求值委托 o2a/pricing 包（v1 兼容映射在包内 loader，
+        行为与旧实现逐字节一致，由 golden fixtures 固化）。
         """
         pricing = self._load_pricing()
         if not pricing:
             return 0.0
-        # 查找模型定价：账号级优先，全局兜底
-        price = self._account_pricing(account, model)
-        if price is None:
-            for provider in pricing:
-                if provider.startswith("_") or provider == "accounts":
-                    continue
-                models = pricing[provider].get("models", {})
-                if model in models:
-                    price = models[model]
+        # 账号键序：id 优先，name 兜底（v1 accounts 段语义）
+        keys = [account] if account else []
+        if account:
+            for svc in load_config():
+                if svc.account.id == account and svc.account.name:
+                    keys.append(svc.account.name)
                     break
-        if not price:
-            return 0.0
-        # 使用第一档价格（单次请求无法判断 tier）
-        tier = price["tiers"][0] if price.get("tiers") else None
-        if not tier:
-            return 0.0
-        input_cost = input_tokens * tier.get("input", 0) / 1_000_000
-        output_cost = output_tokens * tier.get("output", 0) / 1_000_000
-        # 缓存读：优先用 cache_hit 价格，否则按 input * 0.2
-        if "cache_hit" in tier:
-            cache_read_cost = cache_read * tier["cache_hit"] / 1_000_000
-        else:
-            cache_read_cost = cache_read * tier.get("input", 0) * 0.2 / 1_000_000
-        # 缓存写：优先用 cache_miss 价格，否则按 input * 1.0
-        if "cache_miss" in tier:
-            cache_write_cost = cache_write * tier["cache_miss"] / 1_000_000
-        else:
-            cache_write_cost = cache_write * tier.get("input", 0) / 1_000_000
-        return input_cost + output_cost + cache_read_cost + cache_write_cost
+        result = resolve_cost(
+            pricing, model, input_tokens, cache_read, cache_write, output_tokens,
+            account_keys=keys, timestamp=timestamp,
+            context_tokens=input_tokens + cache_read + cache_write,
+        )
+        return result["total"]
 
     def _get_today_file(self):
         """返回当天的 JSONL 文件路径（本地时间）。"""
@@ -197,12 +166,13 @@ class CacheStats:
         cache_hit_rate, cache_coverage = self._compute_rates(
             input_tokens, cache_read, cache_write
         )
+        ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         cost = 0.0 if self.no_cost else self._calc_cost(
             upstream_model or model, input_tokens, cache_read, cache_write,
-            output_tokens, account=self.account
+            output_tokens, account=self.account, timestamp=ts
         )
         record = {
-            "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+            "timestamp": ts,
             "service": self.service,
             "account": self.account,
             "model": model,

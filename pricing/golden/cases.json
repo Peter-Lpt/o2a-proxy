@@ -1,0 +1,872 @@
+{
+  "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（§7.5）。期望值由重构前旧算法计算，固化零行为变更。由 scripts/gen_pricing_golden.py 生成。",
+  "cases": [
+    {
+      "name": "flat-explicit-cache",
+      "pricing": {
+        "deepseek": {
+          "models": {
+            "deepseek-v4-flash": {
+              "tiers": [
+                {
+                  "input": 1.0,
+                  "output": 4.0,
+                  "cache_hit": 0.2,
+                  "cache_miss": 1.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "deepseek-v4-flash",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.36000000000000004
+    },
+    {
+      "name": "cache-fallback-ratios",
+      "pricing": {
+        "qwen": {
+          "models": {
+            "qwen3-max": {
+              "tiers": [
+                {
+                  "input": 3.0,
+                  "output": 12.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "qwen3-max",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 1.08
+    },
+    {
+      "name": "empty-tiers-cost-zero",
+      "pricing": {
+        "x": {
+          "models": {
+            "no-tiers": {
+              "tiers": []
+            }
+          }
+        }
+      },
+      "model": "no-tiers",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.0
+    },
+    {
+      "name": "missing-model-cost-zero",
+      "pricing": {
+        "deepseek": {
+          "models": {
+            "deepseek-v4-flash": {
+              "tiers": [
+                {
+                  "input": 1.0,
+                  "output": 4.0,
+                  "cache_hit": 0.2,
+                  "cache_miss": 1.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "unknown-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.0
+    },
+    {
+      "name": "empty-usage-cost-zero",
+      "pricing": {
+        "deepseek": {
+          "models": {
+            "deepseek-v4-flash": {
+              "tiers": [
+                {
+                  "input": 1.0,
+                  "output": 4.0,
+                  "cache_hit": 0.2,
+                  "cache_miss": 1.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "deepseek-v4-flash",
+      "account_keys": [],
+      "usage": {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 0.0
+    },
+    {
+      "name": "account-by-id",
+      "pricing": {
+        "aliyun": {
+          "models": {
+            "qwen-plus": {
+              "tiers": [
+                {
+                  "input": 0.8,
+                  "output": 2.0
+                }
+              ]
+            }
+          }
+        },
+        "accounts": {
+          "acc-3": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 1.0,
+                    "output": 4.0,
+                    "cache_hit": 0.2
+                  }
+                ]
+              }
+            }
+          },
+          "某中转站": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 0.5,
+                    "output": 1.5
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "model": "qwen-plus",
+      "account_keys": [
+        "acc-3"
+      ],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.36000000000000004
+    },
+    {
+      "name": "account-by-name",
+      "pricing": {
+        "aliyun": {
+          "models": {
+            "qwen-plus": {
+              "tiers": [
+                {
+                  "input": 0.8,
+                  "output": 2.0
+                }
+              ]
+            }
+          }
+        },
+        "accounts": {
+          "acc-3": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 1.0,
+                    "output": 4.0,
+                    "cache_hit": 0.2
+                  }
+                ]
+              }
+            }
+          },
+          "某中转站": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 0.5,
+                    "output": 1.5
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "model": "qwen-plus",
+      "account_keys": [
+        "acc-9",
+        "某中转站"
+      ],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.155
+    },
+    {
+      "name": "account-fallback-global",
+      "pricing": {
+        "aliyun": {
+          "models": {
+            "qwen-plus": {
+              "tiers": [
+                {
+                  "input": 0.8,
+                  "output": 2.0
+                }
+              ]
+            }
+          }
+        },
+        "accounts": {
+          "acc-3": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 1.0,
+                    "output": 4.0,
+                    "cache_hit": 0.2
+                  }
+                ]
+              }
+            }
+          },
+          "某中转站": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 0.5,
+                    "output": 1.5
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "model": "qwen-plus",
+      "account_keys": [
+        "acc-404"
+      ],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.22799999999999998
+    },
+    {
+      "name": "no-account-global",
+      "pricing": {
+        "aliyun": {
+          "models": {
+            "qwen-plus": {
+              "tiers": [
+                {
+                  "input": 0.8,
+                  "output": 2.0
+                }
+              ]
+            }
+          }
+        },
+        "accounts": {
+          "acc-3": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 1.0,
+                    "output": 4.0,
+                    "cache_hit": 0.2
+                  }
+                ]
+              }
+            }
+          },
+          "某中转站": {
+            "models": {
+              "qwen-plus": {
+                "tiers": [
+                  {
+                    "input": 0.5,
+                    "output": 1.5
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "model": "qwen-plus",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.22799999999999998
+    },
+    {
+      "name": "v1-discount-halves-cost",
+      "pricing": {
+        "dashscope": {
+          "models": {
+            "qwen3.7-max": {
+              "tiers": [
+                {
+                  "range": "0-1M",
+                  "input": 12,
+                  "output": 36,
+                  "output_thinking": 36
+                }
+              ],
+              "discount": 0.5,
+              "discount_note": "限时 5 折",
+              "batch": true,
+              "free_quota": 1000000
+            }
+          }
+        }
+      },
+      "model": "qwen3.7-max",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 1.8599999999999999,
+      "note": "§7.6-② 行为变更：discount 0.5 生效，费用减半（旧算法不读取 discount）"
+    },
+    {
+      "name": "sched-wed-2159-peak",
+      "pricing": {
+        "pv": {
+          "models": {
+            "peak-valley-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "modifiers": [
+                {
+                  "type": "schedule",
+                  "windows": [
+                    {
+                      "days": [
+                        "sat",
+                        "sun"
+                      ],
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "周末价"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "22:00",
+                      "to": "08:00",
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "错峰"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "08:00",
+                      "to": "22:00",
+                      "override": {
+                        "input": 4.0,
+                        "output": 16.0
+                      },
+                      "note": "高峰"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "peak-valley-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 1.32,
+      "timestamp": "2026-01-07T21:59:00",
+      "note": "22:00 前一分钟仍在高峰窗口"
+    },
+    {
+      "name": "sched-wed-2201-valley",
+      "pricing": {
+        "pv": {
+          "models": {
+            "peak-valley-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "modifiers": [
+                {
+                  "type": "schedule",
+                  "windows": [
+                    {
+                      "days": [
+                        "sat",
+                        "sun"
+                      ],
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "周末价"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "22:00",
+                      "to": "08:00",
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "错峰"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "08:00",
+                      "to": "22:00",
+                      "override": {
+                        "input": 4.0,
+                        "output": 16.0
+                      },
+                      "note": "高峰"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "peak-valley-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.32,
+      "timestamp": "2026-01-07T22:01:00",
+      "note": "22:00 后一分钟走谷价（跨天区间）"
+    },
+    {
+      "name": "sched-wed-1200-peak",
+      "pricing": {
+        "pv": {
+          "models": {
+            "peak-valley-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "modifiers": [
+                {
+                  "type": "schedule",
+                  "windows": [
+                    {
+                      "days": [
+                        "sat",
+                        "sun"
+                      ],
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "周末价"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "22:00",
+                      "to": "08:00",
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "错峰"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "08:00",
+                      "to": "22:00",
+                      "override": {
+                        "input": 4.0,
+                        "output": 16.0
+                      },
+                      "note": "高峰"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "peak-valley-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 1.32,
+      "timestamp": "2026-01-07T12:00:00",
+      "note": "工作日日间走高峰"
+    },
+    {
+      "name": "sched-sat-1200-weekend",
+      "pricing": {
+        "pv": {
+          "models": {
+            "peak-valley-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "modifiers": [
+                {
+                  "type": "schedule",
+                  "windows": [
+                    {
+                      "days": [
+                        "sat",
+                        "sun"
+                      ],
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "周末价"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "22:00",
+                      "to": "08:00",
+                      "override": {
+                        "input": 1.0,
+                        "output": 2.0
+                      },
+                      "note": "错峰"
+                    },
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "08:00",
+                      "to": "22:00",
+                      "override": {
+                        "input": 4.0,
+                        "output": 16.0
+                      },
+                      "note": "高峰"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "peak-valley-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.32,
+      "timestamp": "2026-01-03T12:00:00",
+      "note": "周六全天走周末价"
+    },
+    {
+      "name": "sched-sun-fallback",
+      "pricing": {
+        "pv2": {
+          "models": {
+            "fv-model": {
+              "tiers": [
+                {
+                  "input": 2.0,
+                  "output": 4.0
+                }
+              ],
+              "modifiers": [
+                {
+                  "type": "schedule",
+                  "windows": [
+                    {
+                      "days": [
+                        "mon",
+                        "tue",
+                        "wed",
+                        "thu",
+                        "fri"
+                      ],
+                      "from": "08:00",
+                      "to": "22:00",
+                      "override": {
+                        "input": 4.0,
+                        "output": 16.0
+                      }
+                    }
+                  ],
+                  "fallback": {
+                    "input": 1.5,
+                    "output": 4.5
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "fv-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.495,
+      "timestamp": "2026-01-04T12:00:00",
+      "note": "周日不命中窗口 → fallback 单价"
+    },
+    {
+      "name": "ctx-tier-second-tier",
+      "pricing": {
+        "t": {
+          "models": {
+            "long-context-model": {
+              "tiers": [
+                {
+                  "range": "0-256K",
+                  "input": 1.0,
+                  "output": 4.0
+                },
+                {
+                  "range": "256K-1M",
+                  "input": 2.0,
+                  "output": 8.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "long-context-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.66,
+      "context_tokens": 320000,
+      "note": "context_tokens=320000 → 第二档单价（§7.6-④ 300K 验收）"
+    },
+    {
+      "name": "ctx-tier-first-tier",
+      "pricing": {
+        "t": {
+          "models": {
+            "long-context-model": {
+              "tiers": [
+                {
+                  "range": "0-256K",
+                  "input": 1.0,
+                  "output": 4.0
+                },
+                {
+                  "range": "256K-1M",
+                  "input": 2.0,
+                  "output": 8.0
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "long-context-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 0.3,
+      "context_tokens": 100000,
+      "note": "第一档内请求价格与旧单档行为一致（兼容）"
+    },
+    {
+      "name": "ctx-tier-upto-null",
+      "pricing": {
+        "t2": {
+          "models": {
+            "upto-model": {
+              "components": {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.2,
+                "cache_write": 1.0
+              },
+              "modifiers": [
+                {
+                  "type": "context_tier",
+                  "by": "context_tokens",
+                  "tiers": [
+                    {
+                      "upto": 262144,
+                      "override": {
+                        "input": 0.5,
+                        "output": 1.0
+                      }
+                    },
+                    {
+                      "upto": null,
+                      "override": {
+                        "input": 1.2,
+                        "output": 2.4
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "model": "upto-model",
+      "account_keys": [],
+      "usage": {
+        "input": 100000,
+        "output": 50000,
+        "cache_read": 200000,
+        "cache_write": 20000
+      },
+      "expected_total": 0.3,
+      "context_tokens": 500000,
+      "note": "v2 upto:null 无上限档命中"
+    }
+  ]
+}

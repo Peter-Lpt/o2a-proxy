@@ -1,3 +1,4 @@
+mod pricing;
 mod proxy;
 mod stats;
 
