@@ -462,6 +462,66 @@ fn is_port_open(host: String, port: u16) -> bool {
     crate::port_open(&host, port)
 }
 
+/// §10.4 托盘逐服务启停：按当前配置重建托盘菜单（含每服务 启动/停止 项）。
+/// 在 get_status 轮询与 save_config 后调用 —— 面板打开期间保持菜单与运行态同步。
+fn rebuild_tray_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{MenuItem, PredefinedMenuItem, Submenu};
+    let state = app.state::<AppState>();
+    let cfg = read_config_value(&state).unwrap_or(serde_json::json!({}));
+    let services = cfg
+        .get("services")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let top_token = String::new();
+
+    let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;
+    let float_i = MenuItem::with_id(app, "float", "悬浮看板", true, None::<&str>)?;
+    let start_all_i = MenuItem::with_id(app, "start_all", "启动全部代理", true, None::<&str>)?;
+    let stop_all_i = MenuItem::with_id(app, "stop_all", "停止全部代理", true, None::<&str>)?;
+    let proxy_sub = Submenu::with_id(app, "proxy", "代理", true)?;
+    proxy_sub.append(&start_all_i)?;
+    proxy_sub.append(&stop_all_i)?;
+    proxy_sub.append(&PredefinedMenuItem::separator(app)?)?;
+    for s in &services {
+        let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let sid = s.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let name = s
+            .get("comment")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
+        if sid.is_empty() {
+            continue;
+        }
+        let running = {
+            let mut children = state.children.lock().unwrap();
+            children
+                .get_mut(&sid)
+                .map(|c| c.try_wait().ok().flatten().is_none())
+                .unwrap_or(false)
+        };
+        let label = if running {
+            format!("● 停止 {}", if name.is_empty() { &sid } else { &name })
+        } else {
+            format!("○ 启动 {}", if name.is_empty() { &sid } else { &name })
+        };
+        let id = format!("svc:toggle:{sid}");
+        let item = MenuItem::with_id(app, id.as_str(), label.as_str(), true, None::<&str>)?;
+        proxy_sub.append(&item)?;
+    }
+    let open_cfg_i = MenuItem::with_id(app, "open_cfg", "打开 config.json", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = tauri::menu::Menu::with_items(app, &[&panel_i, &float_i, &proxy_sub, &open_cfg_i, &quit_i])?;
+    if let Some(tray) = app.tray_by_id("main") {
+        tray.set_menu(Some(menu))?;
+    }
+    Ok(())
+}
+
 /// §9 热重载触发：对每个监听中的服务端口 POST /_reload（带接入凭证）。
 /// 引擎收到后按 id diff 重载（原地生效/换端口重启）；失败保持旧配置。
 fn reload_engine_impl(state: &AppState) -> Result<serde_json::Value, String> {
@@ -536,12 +596,17 @@ async fn reload_engine(app: tauri::AppHandle) -> Result<serde_json::Value, Strin
 async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     // 异步命令跑在 Tauri 线程池；内部含端口探测（200ms/服务超时），
     // 用 spawn_blocking 挪到阻塞线程池，避免占住异步运行时线程。
-    tauri::async_runtime::spawn_blocking(move || {
+    let app_for_tray = app.clone();
+    let out = tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         get_status_impl(&state)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    let out = out?;
+    // §10.4：轮询后同步托盘逐服务菜单（运行态变化时托盘文案随之更新）
+    let _ = rebuild_tray_menu(&app_for_tray);
+    Ok(out)
 }
 
 fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
@@ -1460,6 +1525,29 @@ pub fn run() {
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let _ = stop_all(app).await;
+                        });
+                    }
+                    id if id.starts_with("svc:toggle:") => {
+                        // §10.4 托盘逐服务启停：id 形如 svc:toggle:<服务id>
+                        let sid = id.trim_start_matches("svc:toggle:").to_string();
+                        let app = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let state = app.state::<AppState>();
+                            let running = {
+                                let mut children = state.children.lock().unwrap();
+                                children
+                                    .get_mut(&sid)
+                                    .map(|c| c.try_wait().ok().flatten().is_none())
+                                    .unwrap_or(false)
+                            };
+                            let res = if running {
+                                crate::proxy::stop_service(&state, &sid)
+                            } else {
+                                crate::proxy::start_service(&state, &sid)
+                            };
+                            if let Err(e) = res {
+                                eprintln!("托盘启停服务失败 {sid}: {e}");
+                            }
                         });
                     }
                     "open_cfg" => {
