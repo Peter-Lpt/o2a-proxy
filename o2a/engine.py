@@ -1356,6 +1356,20 @@ async def handle_request(request: web.Request):
     service = request.app["service"]
     if not _check_auth(request, service):
         return auth_error_response()
+    # §9.2 热重载触发：POST /_reload（需接入凭证；引擎收到后异步重载）
+    if request.method == "POST" and request.path == "/_reload":
+        trigger = request.app.get("_trigger_reload")
+        if trigger is None:
+            return json_response({"error": "reload not supported"})
+        trigger()
+        return json_response({"status": "reloading"})
+    # §9.3 重载期间请求明确 503 + Retry-After（/health 保持探活）
+    if _reloading_flag() and request.path not in _AUTH_EXEMPT_PATHS:
+        resp = json_response({"error": {"type": "api_error",
+                                        "message": "service is reloading, retry shortly"}},
+                             status=503)
+        resp.headers["Retry-After"] = "2"
+        return resp
     if request.method == "GET":
         return await handle_get(request, service)
 
@@ -1643,18 +1657,13 @@ async def serve(service_filter: str = None) -> int:
     )
     session = aiohttp.ClientSession(connector=connector)
 
-    runners = []
+    # §9.2 热加载：runners 按 id 索引；重载期间新请求返回 503 + Retry-After
+    state = {"session": session, "runners": {}, "filter": service_filter}
+    runners = state["runners"]
     try:
         for svc in enabled:
-            app = web.Application(client_max_size=MAX_BODY_SIZE)
-            app["service"] = svc
-            app["session"] = session
-            app.router.add_route("*", "/{tail:.*}", handle_request)
-            runner = web.AppRunner(app, access_log=None)
-            await runner.setup()
-            site = web.TCPSite(runner, svc.host, svc.port)
-            await site.start()
-            runners.append(runner)
+            runner = await _start_service_app(state, svc)
+            runners[svc.id] = runner
             logger.info(f"代理启动: http://{svc.host}:{svc.port} mode={svc.mode} "
                         f"target={svc.target_url} model={svc.model}")
             if not svc.auth_token:
@@ -1662,6 +1671,16 @@ async def serve(service_filter: str = None) -> int:
                 # 都可直接使用该端口
                 logger.warning(f"[安全] 服务 {svc.name} 未配置 auth_token（services[].auth_token 与顶层均未配置），"
                                f"端口 {svc.port} 无接入鉴权（可在 config.json 中设置）")
+
+        # SIGHUP 热重载（POSIX；Windows 无此信号，走 /_reload）
+        try:
+            import signal
+            if hasattr(signal, "SIGHUP"):
+                loop = asyncio.get_running_loop()
+                loop.add_signal_handler(
+                    signal.SIGHUP, lambda: asyncio.ensure_future(_do_reload(state)))
+        except Exception as e:
+            logger.debug(f"[reload] SIGHUP 注册失败（不影响运行）: {e}")
 
         logger.info("asyncio 代理就绪，Ctrl+C 停止")
         # 守护：父进程（桌面应用）退出后自动关闭，防止孤儿进程占用端口
@@ -1673,9 +1692,114 @@ async def serve(service_filter: str = None) -> int:
         logger.info("收到中断信号，关闭代理")
     finally:
         await session.close()
-        for r in runners:
+        for r in runners.values():
             await r.cleanup()
     return 0
+
+
+def _reloading_flag():
+    """进程级重载中标记（503 语义判定用）。"""
+    return globals().get("_O2A_RELOADING", False)
+
+
+async def _start_service_app(state, svc: Service) -> web.AppRunner:
+    """构建并启动单个服务的监听（serve 初始化与热重载共用）。"""
+    session = state["session"]
+    app = web.Application(client_max_size=MAX_BODY_SIZE)
+    app["service"] = svc
+    app["session"] = session
+    app["_trigger_reload"] = lambda: asyncio.ensure_future(_do_reload(state))
+    app.router.add_route("*", "/{tail:.*}", handle_request)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, svc.host, svc.port)
+    await site.start()
+    return runner
+
+
+def diff_services(old: dict, new: dict):
+    """按 id diff（§9.2）：返回 (start_ids, stop_ids, swap_ids)。
+
+    - start：新增，或 host/port 变化（需换端口绑定 → 先起新后停旧）
+    - stop：被删除，或 host/port 变化的旧实例
+    - swap：id 保留且绑定未变 → 原地替换 app["service"] 即刻生效（model/max_tokens/
+      auth_token/白名单等全部无需重启）"""
+    start_ids, stop_ids, swap_ids = [], [], []
+    for sid, old_svc in old.items():
+        new_svc = new.get(sid)
+        if new_svc is None:
+            stop_ids.append(sid)
+        elif (new_svc.host, new_svc.port) != (old_svc.host, old_svc.port):
+            start_ids.append(sid)
+            stop_ids.append(sid)
+        else:
+            swap_ids.append(sid)
+    for sid in new:
+        if sid not in old:
+            start_ids.append(sid)
+    return start_ids, stop_ids, swap_ids
+
+
+async def _do_reload(state):
+    """重载入口：并发去重 + 失败回滚（§9.3 绝不留半加载状态）。"""
+    if globals().get("_O2A_RELOADING"):
+        return
+    globals()["_O2A_RELOADING"] = True
+    try:
+        await _reload_services(state)
+    except Exception as e:
+        logger.error(f"[reload] 失败，保持旧配置继续运行: {e}")
+    finally:
+        globals()["_O2A_RELOADING"] = False
+
+
+async def _reload_services(state):
+    session = state["session"]
+    runners: dict = state["runners"]
+    old_services = {sid: r.app["service"] for sid, r in runners.items()}
+
+    services = load_config()
+    services = [s for s in services if s.enabled and s.account.valid]
+    filt = state.get("filter")
+    if filt:
+        services = [s for s in services
+                    if s.id == filt or s.name == filt or str(s.port) == filt]
+    new_services = {s.id: s for s in services}
+
+    start_ids, stop_ids, swap_ids = diff_services(old_services, new_services)
+    logger.info(f"[reload] diff: start={start_ids} stop={stop_ids} swap={swap_ids}")
+
+    started = []
+    try:
+        # 先起新（新端口绑定），任一失败 → 清掉本次启动的、抛错回滚（旧 runner 未动）
+        for sid in start_ids:
+            svc = new_services[sid]
+            runner = await _start_service_app(state, svc)
+            started.append((sid, runner))
+    except Exception as e:
+        for sid, runner in started:
+            try:
+                await runner.cleanup()
+            except Exception:
+                pass
+        raise RuntimeError(f"启动新配置失败: {e}") from e
+
+    # 提交：停旧（删除/换端口）→ 换新映射 → 原地替换 service 对象
+    for sid in stop_ids:
+        runner = runners.pop(sid, None)
+        if runner is not None:
+            try:
+                await runner.cleanup()
+            except Exception as e:
+                logger.warning(f"[reload] 停止旧实例失败 {sid}: {e}")
+    for sid, runner in started:
+        runners[sid] = runner
+    for sid in swap_ids:
+        runner = runners.get(sid)
+        if runner is not None:
+            runner.app["service"] = new_services[sid]
+    logger.info("[reload] 完成："
+                f"运行 {len(runners)} 个服务")
 
 
 def main():

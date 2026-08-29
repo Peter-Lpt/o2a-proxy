@@ -462,6 +462,76 @@ fn is_port_open(host: String, port: u16) -> bool {
     crate::port_open(&host, port)
 }
 
+/// §9 热重载触发：对每个监听中的服务端口 POST /_reload（带接入凭证）。
+/// 引擎收到后按 id diff 重载（原地生效/换端口重启）；失败保持旧配置。
+fn reload_engine_impl(state: &AppState) -> Result<serde_json::Value, String> {
+    let cfg = read_config_value(state)?;
+    let top_token = cfg
+        .get("auth_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let services = cfg.get("services").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    let mut reloaded = 0usize;
+    let mut skipped = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+    for s in &services {
+        let host = s.get("listen_host").and_then(|v| v.as_str()).unwrap_or("127.0.0.1").to_string();
+        let port = s
+            .get("listen_address")
+            .and_then(|v| v.as_u64().map(|n| n as u16))
+            .or_else(|| {
+                s.get("listen_address")
+                    .and_then(|v| v.as_str())
+                    .and_then(|x| x.parse().ok())
+            })
+            .unwrap_or(0);
+        if port == 0 || !crate::port_open(&host, port) {
+            continue; // 未运行的服务无需重载
+        }
+        let name = s.get("comment").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        let mut token = s
+            .get("auth_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if token.is_empty() {
+            token = top_token.clone();
+        }
+        let url = format!("http://{host}:{port}/_reload");
+        let mut req = ureq::post(&url).timeout(Duration::from_secs(3));
+        if !token.is_empty() {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
+        match req.call() {
+            Ok(resp) if resp.status() == 200 => reloaded += 1,
+            Ok(resp) => {
+                let label = if name.is_empty() {
+                    format!(":{port}")
+                } else {
+                    name.clone()
+                };
+                errors.push(format!("{}: HTTP {}", label, resp.status()));
+            }
+            Err(e) => {
+                skipped += 1;
+                errors.push(format!(":{} {e}", port));
+            }
+        }
+    }
+    Ok(serde_json::json!({"reloaded": reloaded, "skipped": skipped, "errors": errors}))
+}
+
+#[tauri::command]
+async fn reload_engine(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        reload_engine_impl(&state)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     // 异步命令跑在 Tauri 线程池；内部含端口探测（200ms/服务超时），
@@ -1300,6 +1370,7 @@ pub fn run() {
             get_status,
             is_port_open,
             get_quota,
+            reload_engine,
             start_service,
             stop_service,
             toggle_service,

@@ -1705,9 +1705,20 @@ async function saveConfig() {
     for (const n of removed) {
       await api.stopService(n).catch(() => {});
     }
-    // 引擎启动时一次性读取配置（不热加载）：运行中保存只对下次启动生效
+    // §9 热加载：优先触发热重载（原地生效，无需重启）；失败则回退"重启生效"提示
     if (anyRunning.value) {
-      showToast("配置已写入 config.json，运行中的服务重启后生效", "info");
+      try {
+        const res: any = await api.reloadEngine();
+        const errs: string[] = res?.errors || [];
+        if (res?.reloaded) {
+          showToast(`配置已写入并热加载（${res.reloaded} 个服务生效）`, "success");
+        } else {
+          showToast("配置已写入 config.json，运行中的服务重启后生效", "info");
+        }
+        if (errs.length) showToast("部分服务热重载失败：" + errs.join("；"), "error");
+      } catch {
+        showToast("配置已写入 config.json，运行中的服务重启后生效", "info");
+      }
     } else {
       showToast("配置已保存", "success");
     }
