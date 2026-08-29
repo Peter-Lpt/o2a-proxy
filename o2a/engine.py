@@ -1308,8 +1308,49 @@ async def handle_direct_stream(request: web.Request, service: Service,
 # 入口分发
 # ---------------------------------------------------------------------------
 
+# 无需凭证的探活路径（/health 保持无鉴权，供桌面端 / 脚本探活）
+_AUTH_EXEMPT_PATHS = ("/health",)
+
+
+def _extract_client_token(request: web.Request) -> str:
+    """从请求头提取客户端凭证：Authorization: Bearer <token> 优先，其次 x-api-key。"""
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return (request.headers.get("x-api-key", "") or "").strip()
+
+
+def _check_auth(request: web.Request, service: Service) -> bool:
+    """接入层鉴权：服务配置了 auth_token 时校验客户端凭证；未配置放行（历史行为）。
+
+    /health 恒放行；其余路径（含 /stats /status /models 及代理请求）均需凭证匹配。
+    """
+    if not service.auth_token:
+        return True
+    if request.path in _AUTH_EXEMPT_PATHS:
+        return True
+    supplied = _extract_client_token(request)
+    return bool(supplied) and supplied == service.auth_token
+
+
+def auth_error_response() -> web.Response:
+    """401 凭证错误。错误体同时兼容 Anthropic / OpenAI 两类客户端解析（error.message）。"""
+    return json_response(
+        {
+            "type": "error",
+            "error": {
+                "type": "authentication_error",
+                "message": "invalid or missing credentials: set Authorization: Bearer <auth_token> or x-api-key header",
+            },
+        },
+        status=401,
+    )
+
+
 async def handle_request(request: web.Request):
     service = request.app["service"]
+    if not _check_auth(request, service):
+        return auth_error_response()
     if request.method == "GET":
         return await handle_get(request, service)
 
@@ -1500,6 +1541,11 @@ async def serve(service_filter: str = None) -> int:
             runners.append(runner)
             logger.info(f"代理启动: http://{svc.host}:{svc.port} mode={svc.mode} "
                         f"target={svc.target_url} model={svc.model}")
+            if not svc.auth_token:
+                # 安全提示：未配置接入凭证时，本机任意进程（listen_host=0.0.0.0 时局域网亦然）
+                # 都可直接使用该端口
+                logger.warning(f"[安全] 服务 {svc.name} 未配置 auth_token（services[].auth_token 与顶层均未配置），"
+                               f"端口 {svc.port} 无接入鉴权（可在 config.json 中设置）")
 
         logger.info("asyncio 代理就绪，Ctrl+C 停止")
         # 守护：父进程（桌面应用）退出后自动关闭，防止孤儿进程占用端口

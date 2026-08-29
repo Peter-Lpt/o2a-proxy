@@ -91,7 +91,7 @@ class Service:
 
     def __init__(self, name, account, client, host, port, model, override_model=True,
                  max_tokens=4096, proxy="", api="", upstream_api="", thinking_mode="auto",
-                 pricing=""):
+                 pricing="", auth_token=""):
         self.name = name
         self.account = account
         self.client = client
@@ -107,6 +107,9 @@ class Service:
         # 计价模式："" = 按 pricing.json 计价；"none" = 订阅制（token plan / code plan 等），
         # 按 token 计价无意义，统计记录与面板不显示价格
         self.pricing = (pricing or "").strip()
+        # 客户端凭证（接入层鉴权）：非空时校验请求头 Authorization: Bearer <token> / x-api-key；
+        # 为空时不校验（保持历史行为），引擎启动时会打警告
+        self.auth_token = (auth_token or "").strip()
         self._mode_override = None  # auto 服务每次请求识别后临时指定
 
     @property
@@ -152,7 +155,7 @@ class Service:
         """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
         s = Service(self.name, self.account, self.client, self.host, self.port,
                     self.model, self.override_model, self.max_tokens, self.proxy, self.api,
-                    self.upstream_api, self.thinking_mode, self.pricing)
+                    self.upstream_api, self.thinking_mode, self.pricing, self.auth_token)
         s._mode_override = mode
         return s
 
@@ -213,6 +216,7 @@ def load_config():
     - 新结构：accounts[]（账号）+ services[].account（引用 id）+ client
     - 旧结构：services[] 内嵌 openai_base_url/openai_api_key —— 自动迁移为账号
     - 密钥分离：auth.json 按账号 id/name 提供 api_key，优先于 config.json 内嵌
+    - 接入鉴权：services[].auth_token 覆盖顶层 auth_token（全局兜底）
     """
     config_path = _config_file_path()
     auth = load_auth()
@@ -289,6 +293,11 @@ def load_config():
                 if pricing not in ("", "none"):
                     logger.warning(f"[config] 服务 {svc.get('comment')} 的 pricing '{pricing}' 非法，忽略（仅支持 none）")
                     pricing = ""
+                auth_token = str(svc.get("auth_token", "") or "").strip()
+                if not auth_token:
+                    # 服务级未配置 → 回退 config.json 顶层 auth_token（全局兜底，
+                    # 与桌面端「全局设置 → 认证令牌」UI 字段对应）
+                    auth_token = str(config.get("auth_token", "") or "").strip()
                 services.append(Service(
                     name=svc.get("comment") or svc.get("model") or mode,
                     account=acc,
@@ -303,6 +312,7 @@ def load_config():
                     upstream_api=upstream_api,
                     thinking_mode=thinking_mode,
                     pricing=pricing,
+                    auth_token=auth_token,
                 ))
     if not services and API_KEY:
         # 回退：环境变量配置（单服务）

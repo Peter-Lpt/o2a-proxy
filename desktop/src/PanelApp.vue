@@ -237,7 +237,9 @@
           <template v-if="selected === ALL">
             <div class="card form-card">
               <div class="fc-h">全局配置 <span class="fc-sub">作用于所有服务</span></div>
-              <label>认证令牌 auth_token <input v-model="cfg.auth_token" type="text" :disabled="anyRunning" /></label>
+              <label>认证令牌 auth_token <span class="fc-sub" style="font-weight:400">（全局兜底，服务级可覆盖；需重启生效）</span>
+                <input v-model="cfg.auth_token" type="text" placeholder="留空 = 不校验（本机任意进程可用）" :disabled="anyRunning" />
+              </label>
               <label class="inline"><input v-model="cfg.cache_stats_enabled" type="checkbox" :disabled="anyRunning" /><span>启用缓存统计</span></label>
               <div class="grid2">
                 <label>保留天数 <input v-model.number="cfg.cache_stats_retention_days" type="number" min="1" max="365" :disabled="anyRunning" /></label>
@@ -311,6 +313,9 @@
                 </label>
                 <label class="inline"><input v-model="activeSvc.override_model" type="checkbox" :disabled="activeSvcRunning" /><span>覆盖客户端模型 override_model <span class="fc-sub" style="font-weight:400">（关：透传客户端请求的模型名）</span></span></label>
                 <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
+                <label>接入凭证 auth_token <span class="fc-sub" style="font-weight:400">（非空时客户端需带 Authorization: Bearer / x-api-key，需重启生效）</span>
+                  <input v-model="activeSvc.auth_token" type="text" placeholder="留空 = 不校验（本机任意进程可用）" :disabled="activeSvcRunning" />
+                </label>
                 <div class="grid2">
                   <label>max_tokens <input v-model="activeSvc.max_tokens" type="number" min="1" :disabled="activeSvcRunning" /></label>
                   <label class="inline"><input v-model="activeSvc.context_1m" type="checkbox" :disabled="activeSvcRunning" /><span>1M 上下文</span></label>
@@ -1200,6 +1205,7 @@ function removeSvc() {
 function validateConfig(): string | null {
   const svcs = cfg.services || [];
   const seen = new Set<string>();
+  const hostPort = new Map<string, string>(); // host:port → 首个占用服务名（端口冲突检测）
   for (const s of svcs) {
     const comment = String(s.comment || "").trim();
     if (!comment) return "服务备注 comment 不能为空";
@@ -1210,6 +1216,13 @@ function validateConfig(): string | null {
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return `服务 ${comment} 的监听端口无效（需为 1-65535 整数）`;
     }
+    const host = String(s.listen_host || "127.0.0.1").trim() || "127.0.0.1";
+    const key = `${host}:${port}`;
+    const firstOwner = hostPort.get(key);
+    if (firstOwner) {
+      return `端口冲突：服务「${firstOwner}」与「${comment}」同时监听 ${key}（第二个绑定时会启动失败），请修改其一的端口`;
+    }
+    hostPort.set(key, comment);
     if (s.max_tokens !== undefined && s.max_tokens !== null && s.max_tokens !== "") {
       const mt = Number(s.max_tokens);
       if (!Number.isInteger(mt) || mt < 1) return `服务 ${comment} 的 max_tokens 无效`;
@@ -1270,6 +1283,8 @@ function normalizeConfig() {
     if (!s.api) delete s.api;
     if (!s.upstream_api || s.upstream_api === "openai-completions") delete s.upstream_api;
     if (!s.thinking_mode || s.thinking_mode === "auto") delete s.thinking_mode;
+    s.auth_token = String(s.auth_token || "").trim();
+    if (!s.auth_token) delete s.auth_token;
     delete s.openai_base_url;
     delete s.openai_api_key;
     delete s.anthropic_base_url;

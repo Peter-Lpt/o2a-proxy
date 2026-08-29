@@ -1,6 +1,7 @@
 {
   "auth_token": "qs-cc",
   "cache_stats_enabled": true,
+  "_readme_auth_token": "顶层 auth_token 为全局兜底；services[].auth_token 优先。非空时客户端须带 Authorization: Bearer <token> 或 x-api-key 请求头，/health 恒放行。留空 = 不校验",
   "cache_stats_dir": "data/cache_stats",
   "cache_stats_retention_days": 30,
   "stream_timeout": 600,
