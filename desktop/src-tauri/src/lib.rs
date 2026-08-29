@@ -691,6 +691,121 @@ fn models_url(base: &str) -> Option<String> {
     Some(format!("{u}/models"))
 }
 
+// ---------------------------------------------------------------------------
+// §8.4-4 端隔离：额度只存在引擎一份实现，桌面端仅转发 + 缓存（不重写适配逻辑）。
+// 引擎侧自带 60s TTL；桌面端再加一层多槽缓存（key = account），避免多窗口
+// 交替轮询互相顶掉（对齐 §10.1 多槽缓存方向）。
+// ---------------------------------------------------------------------------
+static QUOTA_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>> =
+    std::sync::Mutex::new(None);
+const QUOTA_CACHE_TTL_SECS: u64 = 60;
+const QUOTA_CACHE_MAX: usize = 32;
+
+fn quota_cache_get(key: &str) -> Option<serde_json::Value> {
+    let guard = QUOTA_CACHE.lock().unwrap();
+    let map = guard.as_ref()?;
+    let (ts, value) = map.get(key)?;
+    if ts.elapsed() < Duration::from_secs(QUOTA_CACHE_TTL_SECS) {
+        return Some(value.clone());
+    }
+    None
+}
+
+fn quota_cache_stale(key: &str) -> Option<serde_json::Value> {
+    let guard = QUOTA_CACHE.lock().unwrap();
+    let map = guard.as_ref()?;
+    let (_, value) = map.get(key)?;
+    let mut v = value.clone();
+    v["stale"] = serde_json::json!(true);
+    Some(v)
+}
+
+fn quota_cache_set(key: &str, value: serde_json::Value) {
+    let mut guard = QUOTA_CACHE.lock().unwrap();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+    if map.len() >= QUOTA_CACHE_MAX && !map.contains_key(key) {
+        // 淘汰最旧条目
+        if let Some(oldest) = map
+            .iter()
+            .min_by_key(|(_, (t, _))| *t)
+            .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(key.to_string(), (std::time::Instant::now(), value));
+}
+
+/// 取某账号的额度快照：找该账号绑定的运行中服务的端口 → 引擎 GET /quota。
+/// 无运行中的引擎 → 返回错误（前端隐藏额度卡，不影响其他渲染）。
+fn get_quota_impl(state: &AppState, account: &str) -> Result<serde_json::Value, String> {
+    if account.is_empty() {
+        return Err("账号未指定".into());
+    }
+    if let Some(v) = quota_cache_get(account) {
+        return Ok(v);
+    }
+    let cfg = read_config_value(state)?;
+    let services = cfg.get("services").and_then(|s| s.as_array()).cloned().unwrap_or_default();
+    // 目标账号绑定的服务优先，其次任意运行中的服务（引擎进程可查任意账号）
+    let mut candidates: Vec<(String, u16)> = Vec::new();
+    for s in &services {
+        let acc = s.get("account").and_then(|v| v.as_str()).unwrap_or("");
+        let sid = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let bound = acc == account || sid == account;
+        let host = s.get("listen_host").and_then(|v| v.as_str()).unwrap_or("127.0.0.1").to_string();
+        let port = s
+            .get("listen_address")
+            .and_then(|v| v.as_u64().map(|n| n as u16))
+            .or_else(|| {
+                s.get("listen_address")
+                    .and_then(|v| v.as_str())
+                    .and_then(|x| x.parse().ok())
+            })
+            .unwrap_or(0);
+        if port == 0 {
+            continue;
+        }
+        if bound {
+            candidates.insert(0, (host, port));
+        } else {
+            candidates.push((host, port));
+        }
+    }
+    for (host, port) in candidates {
+        if !crate::port_open(&host, port) {
+            continue;
+        }
+        let url = format!("http://{host}:{port}/quota?account={account}");
+        let req = ureq::get(&url).timeout(Duration::from_secs(2));
+        if let Ok(resp) = req.call() {
+            if let Ok(s) = resp.into_string() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                    if v.get("error").is_none() {
+                        quota_cache_set(account, v.clone());
+                        return Ok(v);
+                    }
+                }
+            }
+        }
+    }
+    // 全部失败：返回过期缓存并标 stale（§8.3 降级展示），否则报错
+    if let Some(v) = quota_cache_stale(account) {
+        return Ok(v);
+    }
+    Err("额度不可用（引擎未运行或端口不可达）".into())
+}
+
+#[tauri::command]
+async fn get_quota(app: tauri::AppHandle, account: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        get_quota_impl(&state, &account)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn fetch_models_impl(base_url: &str, api_key: &str) -> Result<serde_json::Value, String> {
     let Some(url) = models_url(base_url) else {
         return Ok(serde_json::json!({"ok": false, "error": "API 地址为空"}));
@@ -1184,6 +1299,7 @@ pub fn run() {
             save_config,
             get_status,
             is_port_open,
+            get_quota,
             start_service,
             stop_service,
             toggle_service,

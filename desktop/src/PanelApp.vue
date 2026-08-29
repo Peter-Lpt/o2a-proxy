@@ -119,6 +119,9 @@
           </div>
         </div>
 
+        <!-- §8.5 订阅制服务的额度卡（pricing=none 时费用卡隐藏，这里展示额度） -->
+        <QuotaCard v-if="quotaVisible && quotaSnapshot" :snapshot="quotaSnapshot" />
+
         <!-- 性能条：耗时 / 首字 / 速度（近一段时间） -->
         <div class="perf-row">
           <div class="perf-chip" :title="'平均单次耗时（含流式总时长）'">
@@ -454,6 +457,7 @@ import ConfirmDialog from "./components/ConfirmDialog.vue";
 import Icon from "./components/Icon.vue";
 import LineChart from "./components/LineChart.vue";
 import MultiSelect from "./components/MultiSelect.vue";
+import QuotaCard from "./components/QuotaCard.vue";
 import SelectBox from "./components/SelectBox.vue";
 import ServiceListView, { type ServiceRow } from "./components/ServiceListView.vue";
 import Spark from "./components/Spark.vue";
@@ -1405,6 +1409,21 @@ async function loadStats() {
     statsError.value = "统计读取失败：" + (e || "未知错误") + "。请确认 config.json 已启用 cache_stats_enabled 且统计目录存在";
   } finally {
     statsLoading.value = false;
+  }
+  if (quotaVisible.value) loadQuota();
+}
+
+// ---------- §8.5 订阅额度展示（pricing=none 的服务：费用卡位置展示额度卡） ----------
+const quotaVisible = computed(() => selected.value !== ALL && activeSvc.value?.pricing === "none");
+const quotaSnapshot = ref<any>(null);
+async function loadQuota() {
+  const acc = activeSvc.value?.account;
+  if (!acc) return;
+  try {
+    quotaSnapshot.value = await api.getQuota(acc);
+  } catch {
+    // 引擎未运行 / 端口不可达：隐藏额度卡，不影响统计页其余渲染（§8.4-3）
+    quotaSnapshot.value = null;
   }
 }
 

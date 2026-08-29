@@ -1453,6 +1453,35 @@ async def handle_request(request: web.Request):
     return await handle_claude_non_stream(request, service, openai_request, req_start)
 
 
+# ---------------------------------------------------------------------------
+# 额度快照（§8）：/quota 端点的引擎侧实现（TTL 60s 缓存，适配器失败自动降级）
+# ---------------------------------------------------------------------------
+
+_quota_cache = None
+
+
+def _quota_snapshot(account_id: str):
+    """组装 QuotaContext 并取某账号的额度快照（放线程池执行，不阻塞事件循环）。"""
+    global _quota_cache
+    from .quota import QuotaContext, get_snapshot
+    from .quota.base import TTLCache
+
+    services = load_config()
+    acc = next((s.account for s in services if s.account.id == account_id), None)
+    if acc is None:
+        return {"error": f"account not found: {account_id}"}
+    stats_dir = os.environ.get("CACHE_STATS_DIR", "data/cache_stats")
+    ctx = QuotaContext(stats_dir=stats_dir, account=acc)
+    if _quota_cache is None:
+        _quota_cache = TTLCache(60)
+    try:
+        snapshot = get_snapshot(acc, ctx, ttl_cache=_quota_cache)
+    except Exception as e:  # 双保险：注册表内部已降级，这里兜住意外
+        logger.warning(f"[quota] snapshot failed for {account_id}: {e}")
+        snapshot = None
+    return snapshot
+
+
 def _model_entry(service: Service) -> dict:
     """当前端口服务可请求模型的标准条目（OpenAI /v1/models 结构）。
 
@@ -1554,6 +1583,13 @@ async def handle_get(request: web.Request, service: Service):
             summary = await asyncio.to_thread(
                 lambda: get_stats(service.name, service_id=service.id).get_summary(period))
         return json_response(summary)
+    if path == "/quota":
+        # §8.4-4 端隔离：额度只存在引擎这一份实现，Rust 端仅转发与缓存。
+        # 失败降级与 stale 标记在 quota.registry 内完成，绝不阻塞主流程。
+        if not is_cache_stats_enabled():
+            return json_response({"error": "cache stats is disabled"})
+        account_id = request.query.get("account") or service.account.id
+        return json_response(await asyncio.to_thread(_quota_snapshot, account_id))
     if path == "/health":
         return json_response({"status": "ok"})
     if path == "/status":
@@ -1567,7 +1603,8 @@ async def handle_get(request: web.Request, service: Service):
         "client": service.client,
         "account": service.account.name,
         "target": service.target_url,
-        "endpoints": ["/stats?period=hour|day|all", "/stats?account=<账号id>&period=day", "/health", "/status"],
+        "endpoints": ["/stats?period=hour|day|all", "/stats?account=<账号id>&period=day",
+                      "/quota?account=<账号id>", "/health", "/status"],
     })
 
 

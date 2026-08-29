@@ -35,13 +35,20 @@ class Account:
     可被 services[].api 覆盖；空表示未声明（回退 client/auto 识别）。
     """
 
-    def __init__(self, id, name, api_key, openai_url="", anthropic_url="", api=""):
+    def __init__(self, id, name, api_key, openai_url="", anthropic_url="", api="",
+                 quota_source="auto", quota=None):
         self.id = id
         self.name = name
         self.api_key = api_key or ""
         self.openai_url = _normalize_openai_url(openai_url)
         self.anthropic_url = (anthropic_url or "").strip()
         self.api = (api or "").strip()
+        # §8 额度来源：auto（按端点域名嗅探，嗅探不到 → local）| openrouter |
+        # anthropic | codex | zen | local | manual | none
+        self.quota_source = (quota_source or "auto").strip()
+        # manual 适配器的手填额度（冷启动兜底）：{"limit": 200, "unit": "requests",
+        # "period": "month"}；unit: requests | tokens | usd；period: day | week | month
+        self.quota = quota if isinstance(quota, dict) else None
 
     @property
     def kind(self):
@@ -338,6 +345,8 @@ def load_config():
                     openai_url=a.get("openai_url", ""),
                     anthropic_url=a.get("anthropic_url", ""),
                     api=a.get("api", ""),
+                    quota_source=a.get("quota_source", "auto"),
+                    quota=a.get("quota"),
                 )
                 accounts[acc.id] = acc
 

@@ -10,6 +10,7 @@ export const api = {
   saveConfig: (cfg: any) => invoke<void>("save_config", { cfg }),
   getStatus: () => invoke<any>("get_status"),
   isPortOpen: (host: string, port: number) => invoke<boolean>("is_port_open", { host, port }),
+  getQuota: (account: string) => invoke<any>("get_quota", { account }),
   startService: (name: string) => invoke<void>("start_service", { name }),
   stopService: (name: string) => invoke<void>("stop_service", { name }),
   toggleService: (name: string) => invoke<void>("toggle_service", { name }),
