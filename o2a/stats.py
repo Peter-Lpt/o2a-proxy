@@ -18,13 +18,19 @@ from .config import load_config
 
 
 class CacheStats:
-    """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。"""
+    """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。
+
+    服务身份 id 化（优化方案 §2.2）：service_id 非空时 summary 目录用 <id>，
+    读取时若 id 目录缺失回退 <旧名> 目录（历史数据双查）；JSONL 记录新增
+    service_id 字段，service（显示名）字段保持原样不回改。
+    """
 
     def __init__(self, stats_dir="data/cache_stats", retention_days=30, service=None, account=None,
-                 no_cost=False):
+                 no_cost=False, service_id=None):
         self.stats_dir = stats_dir
         self.retention_days = retention_days
         self.service = service or ""
+        self.service_id = service_id or ""
         self.account = account or ""
         self.no_cost = no_cost
         self._lock = threading.Lock()
@@ -34,11 +40,32 @@ class CacheStats:
         self._cleanup_old_files()
 
     def _summary_root(self):
-        """summary 根目录；按服务分目录时返回其子目录。"""
+        """summary 写入目录：优先按服务 id，无 id 时按服务名（历史行为）。"""
         root = os.path.join(self.stats_dir, "summary")
+        if self.service_id:
+            return os.path.join(root, self.service_id)
         if self.service:
             return os.path.join(root, self.service)
         return root
+
+    def _summary_read_dirs(self):
+        """summary 读取目录列表：id 目录优先，名字目录兜底（历史数据双查）。"""
+        root = os.path.join(self.stats_dir, "summary")
+        dirs = []
+        if self.service_id:
+            dirs.append(os.path.join(root, self.service_id))
+        if self.service:
+            dirs.append(os.path.join(root, self.service))
+        if not dirs:
+            dirs.append(root)
+        # 去重保序
+        seen = set()
+        out = []
+        for d in dirs:
+            if d not in seen:
+                seen.add(d)
+                out.append(d)
+        return out
 
     def _cleanup_old_files(self):
         """启动时清理超过保留天数的文件（含按服务分目录的 summary）。"""
@@ -153,13 +180,15 @@ class CacheStats:
         cache_coverage = cache_read / denom_cov if denom_cov > 0 else 0.0
         return cache_hit_rate, cache_coverage
 
-    def _build_record(self, model, usage, error=None, meta=None):
+    def _build_record(self, model, usage, error=None, meta=None, upstream_model=None):
         """构建一条统计记录。
 
         usage 为空时仍可记录一次错误调用（error 非空）。meta 可携带：
         - duration_ms: 总耗时（毫秒）
         - first_token_ms: 首 token 耗时（毫秒，流式请求）
         - output_tokens_per_sec: 输出 token 速度（tok/s）
+
+        §6 别名：model 为对外名（展示用），upstream_model 为实际上游名（计价用）。
         """
         input_tokens = usage.get("input_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
@@ -169,7 +198,8 @@ class CacheStats:
             input_tokens, cache_read, cache_write
         )
         cost = 0.0 if self.no_cost else self._calc_cost(
-            model, input_tokens, cache_read, cache_write, output_tokens, account=self.account
+            upstream_model or model, input_tokens, cache_read, cache_write,
+            output_tokens, account=self.account
         )
         record = {
             "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
@@ -185,6 +215,10 @@ class CacheStats:
             "cache_coverage": round(cache_coverage, 4),
             "cost": round(cost, 6),
         }
+        if self.service_id:
+            record["service_id"] = self.service_id  # 稳定身份；service 显示名保持原样
+        if upstream_model and upstream_model != model:
+            record["upstream_model"] = upstream_model  # 计价用上游名（双端一致）
         if error:
             record["error"] = error
         if meta:
@@ -205,14 +239,17 @@ class CacheStats:
             f"out={record['output_tokens']:,}"
         )
 
-    def record(self, model, usage, error=None, meta=None):
+    def record(self, model, usage, error=None, meta=None, upstream_model=None):
         """记录一次请求的缓存统计（成功或失败）。
 
         error 非空时记录为一次失败调用；usage 可为空字典。meta 见 _build_record。
+        upstream_model 为实际上游模型名（§6 别名映射时用于计价），记录的 model
+        保持对外名。
         """
         if not usage and not error:
             return
-        record = self._build_record(model, usage or {}, error=error, meta=meta)
+        record = self._build_record(model, usage or {}, error=error, meta=meta,
+                                    upstream_model=upstream_model)
 
         with self._lock:
             # 写入 JSONL（文件锁防多进程，仅 Unix 支持）
@@ -295,12 +332,19 @@ class CacheStats:
         """打印上一小时的汇总日志。"""
         date_str = hour_str[:10]
         hour = hour_str[11:13] if len(hour_str) >= 13 else hour_str[-2:]
-        summary_path = os.path.join(self._summary_root(), f"{date_str}.json")
-        if not os.path.exists(summary_path):
+        summary = None
+        for d in self._summary_read_dirs():
+            p = os.path.join(d, f"{date_str}.json")
+            if os.path.exists(p):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        summary = json.load(f)
+                    break
+                except (json.JSONDecodeError, OSError):
+                    pass
+        if not summary:
             return
         try:
-            with open(summary_path, "r") as f:
-                summary = json.load(f)
             h = summary.get("hours", {}).get(hour)
             if h and h["requests"] > 0:
                 avg_hit = h["_hit_rate_sum"] / h["requests"] * 100
@@ -328,14 +372,19 @@ class CacheStats:
                 return {"error": f"unknown period: {period}"}
 
     def _load_day_summary(self, date_str):
-        """加载某天的 summary JSON，清理内部字段。"""
-        summary_path = os.path.join(self._summary_root(), f"{date_str}.json")
-        if not os.path.exists(summary_path):
-            return None
-        try:
-            with open(summary_path, "r") as f:
-                summary = json.load(f)
-        except (json.JSONDecodeError, OSError):
+        """加载某天的 summary JSON（id 目录优先，名字目录兜底），清理内部字段。"""
+        summary = None
+        for d in self._summary_read_dirs():
+            summary_path = os.path.join(d, f"{date_str}.json")
+            if not os.path.exists(summary_path):
+                continue
+            try:
+                with open(summary_path, encoding="utf-8") as f:
+                    summary = json.load(f)
+                break
+            except (json.JSONDecodeError, OSError):
+                continue
+        if summary is None:
             return None
 
         # 清理内部字段，计算 avg
@@ -401,8 +450,15 @@ class CacheStats:
         return {"period": "day", **day_data}
 
     def _get_all_summary(self):
-        """返回所有天的汇总。"""
-        summary_dir = self._summary_root()
+        """返回所有天的汇总（id 目录与名字目录的日期并集，id 目录优先）。"""
+        dates = []  # 保序去重
+        for d in self._summary_read_dirs():
+            if not os.path.isdir(d):
+                continue
+            for filename in sorted(os.listdir(d)):
+                if filename.endswith(".json") and filename[:-5] not in dates:
+                    dates.append(filename[:-5])
+        dates.sort()
         days = []
         total = {
             "requests": 0,
@@ -412,10 +468,7 @@ class CacheStats:
             "total_output_tokens": 0,
             "total_cost": 0.0,
         }
-        for filename in sorted(os.listdir(summary_dir)):
-            if not filename.endswith(".json"):
-                continue
-            date_str = filename[:-5]
+        for date_str in dates:
             day_data = self._load_day_summary(date_str)
             if day_data:
                 days.append(day_data)
@@ -444,16 +497,17 @@ _stats = {}
 _stats_lock = threading.Lock()
 
 
-def get_stats(service=None, account=None, no_cost=False):
-    """获取 CacheStats 实例（线程安全的懒初始化，按服务区分）。"""
-    key = service or "default"
+def get_stats(service=None, account=None, no_cost=False, service_id=None):
+    """获取 CacheStats 实例（线程安全的懒初始化，按服务 id / 名字区分）。"""
+    key = service_id or service or "default"
     if key not in _stats:
         with _stats_lock:
             if key not in _stats:  # 双重检查
                 stats_dir = os.environ.get("CACHE_STATS_DIR", "data/cache_stats")
                 retention = int(os.environ.get("CACHE_STATS_RETENTION_DAYS", "30"))
                 _stats[key] = CacheStats(stats_dir=stats_dir, retention_days=retention,
-                                         service=service, account=account, no_cost=no_cost)
+                                         service=service, account=account, no_cost=no_cost,
+                                         service_id=service_id)
     return _stats[key]
 
 
@@ -475,7 +529,7 @@ def get_account_summary(account_id, period="day"):
         }
         days = []
         for svc in matched:
-            s = get_stats(svc.name, svc.account.id).get_summary("all")
+            s = get_stats(svc.name, svc.account.id, service_id=svc.id).get_summary("all")
             for d in s.get("days", []):
                 for k, v in d.get("daily_total", {}).items():
                     if k in total:
@@ -489,7 +543,7 @@ def get_account_summary(account_id, period="day"):
     }
     hours = {}
     for svc in matched:
-        s = get_stats(svc.name, svc.account.id).get_summary(period)
+        s = get_stats(svc.name, svc.account.id, service_id=svc.id).get_summary(period)
         daily = s.get("daily_total") if period == "day" else s
         if not daily:
             continue

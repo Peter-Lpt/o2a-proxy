@@ -280,6 +280,28 @@ fn load_services_pricing(stats_dir: &Path) -> (usize, BTreeSet<String>) {
     (total, no_cost)
 }
 
+/// 服务 id → 当前显示名映射（§2 服务身份 id 化）。
+/// 带 service_id 的历史记录在读取层归一化为当前名，改名后统计不丢。
+fn load_service_id_names(stats_dir: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let p = stats_dir
+        .parent()
+        .map(|d| d.join("config.json"))
+        .unwrap_or_else(|| Path::new("config.json").to_path_buf());
+    if let Some(cfg) = read_json(&p) {
+        if let Some(services) = cfg.get("services").and_then(|s| s.as_array()) {
+            for svc in services {
+                let sid = svc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = svc.get("comment").and_then(|v| v.as_str()).unwrap_or("");
+                if !sid.is_empty() && !name.is_empty() {
+                    out.insert(sid.to_string(), name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// 当前所选服务集合是否展示费用：
 /// - 具体服务：非订阅制才展示；
 /// - 全部视图：无服务定义时默认展示，否则只要存在任一按量服务就展示。
@@ -292,6 +314,8 @@ fn show_cost(total: usize, no_cost: &BTreeSet<String>, service: &str) -> bool {
 }
 
 /// 读取某天原始记录，并统一按当前定价重算 cost 字段。
+/// 记录层归一化：带 service_id 的记录把 service 改写为当前显示名（id → comment），
+/// 使 matches_service / no_cost / by_service 全部按当前名匹配，改名后历史统计不丢。
 fn read_records(
     stats_dir: &Path,
     date_str: &str,
@@ -303,10 +327,23 @@ fn read_records(
     let Ok(s) = std::fs::read_to_string(&p) else {
         return Vec::new();
     };
+    let id_names = load_service_id_names(stats_dir);
     s.lines()
         .filter_map(|l| serde_json::from_str(l.trim()).ok())
         .map(|mut rec: Value| {
+            if let Some(sid) = rec.get("service_id").and_then(|v| v.as_str()) {
+                if let Some(name) = id_names.get(sid) {
+                    rec["service"] = json!(name);
+                }
+            }
+            // §6 别名：计价用上游名（记录层携带 upstream_model），展示用对外名
             let model = rec["model"].as_str().unwrap_or("").to_string();
+            let price_model = rec
+                .get("upstream_model")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&model)
+                .to_string();
             let input = rec["input_tokens"].as_i64().unwrap_or(0);
             let read = rec["cache_read_tokens"].as_i64().unwrap_or(0);
             let write = rec["cache_write_tokens"].as_i64().unwrap_or(0);
@@ -317,7 +354,7 @@ fn read_records(
                 .map(|s| no_cost_services.contains(s))
                 .unwrap_or(false);
             rec["cost"] = json!(recalc_cost(
-                &model, input, read, write, output, pricing, &account, aliases, no_cost
+                &price_model, input, read, write, output, pricing, &account, aliases, no_cost
             ));
             rec
         })
@@ -1291,6 +1328,54 @@ mod tests {
         let all_sub = get_stats(&dir.join("cache_stats"), "", "", "month", None, None, "").unwrap();
         assert_eq!(all_sub["showCost"], false);
         assert_eq!(all_sub["today"]["cost"], 0.0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn service_id_record_matches_after_rename() {
+        // §2 id 化：带 service_id 的记录在读取层归一化为当前名 ——
+        // 服务改名后（旧记录 service=old-name，config 里 comment=new-name），
+        // 按当前名过滤仍能命中历史记录，byService 显示当前名。
+        let dir = std::env::temp_dir().join(format!("o2a_svc_id_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("cache_stats")).unwrap();
+
+        let now = chrono::Local::now();
+        let date = now.format("%Y-%m-%d").to_string();
+        let hour = now.format("%H").to_string();
+        fs::write(
+            dir.join("cache_stats").join(format!("{date}.jsonl")),
+            serde_json::to_string(&json!({
+                "timestamp": format!("{date}T{hour}:10:00"),
+                "service": "old-name",
+                "service_id": "svc-abcdef01",
+                "model": "m1",
+                "input_tokens": 1000,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 0,
+                "cost": 0.001
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("config.json"),
+            json!({
+                "services": [{"id": "svc-abcdef01", "comment": "new-name", "mode": "claude", "model": "m1"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let out = get_stats(&dir.join("cache_stats"), "new-name", "new-name", "today", None, None, "").unwrap();
+        assert_eq!(out["today"]["requests"], 1, "改名后历史记录应按 service_id 命中");
+        assert_eq!(out["byService"][0]["service"], "new-name", "byService 应显示当前名");
+
+        // 不相关服务过滤不到
+        let other = get_stats(&dir.join("cache_stats"), "zzz", "zzz", "today", None, None, "").unwrap();
+        assert_eq!(other["today"]["requests"], 0);
 
         let _ = fs::remove_dir_all(&dir);
     }

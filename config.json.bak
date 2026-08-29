@@ -1,0 +1,94 @@
+{
+  "accounts": [
+    {
+      "anthropic_url": "",
+      "id": "acc-1",
+      "name": "aliyun",
+      "openai_url": "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    },
+    {
+      "anthropic_url": "",
+      "id": "acc-2",
+      "name": "oc-zen",
+      "openai_url": "https://opencode.ai/zen/v1/chat/completions"
+    },
+    {
+      "anthropic_url": "",
+      "id": "acc-3",
+      "name": "ds",
+      "openai_url": "https://api.deepseek.com"
+    },
+    {
+      "anthropic_url": "",
+      "id": "acc-4",
+      "name": "oc-go",
+      "openai_url": "https://opencode.ai/zen/go/v1"
+    },
+    {
+      "anthropic_url": "",
+      "id": "acc-5",
+      "name": "openrouter",
+      "openai_url": "https://openrouter.ai/api/v1"
+    }
+  ],
+  "auth_token": "qs-cc",
+  "cache_stats_enabled": true,
+  "cache_stats_retention_days": 30,
+  "services": [
+    {
+      "account": "acc-1",
+      "api": "openai-completions",
+      "client": "auto",
+      "comment": "aliyun",
+      "context_1m": true,
+      "listen_address": 11014,
+      "max_tokens": 120000,
+      "mode": "claude",
+      "model": "qwen3.8-flash",
+      "override_model": false
+    },
+    {
+      "account": "acc-3",
+      "api": "openai-completions",
+      "client": "auto",
+      "comment": "ds",
+      "context_1m": true,
+      "listen_address": 11012,
+      "model": "deepseek-v4-flash",
+      "override_model": true
+    },
+    {
+      "account": "acc-3",
+      "api": "openai-responses",
+      "client": "auto",
+      "comment": "codex-ds",
+      "context_1m": true,
+      "listen_address": 11013,
+      "model": "deepseek-v4-flash",
+      "upstream_api": "openai-responses"
+    },
+    {
+      "account": "acc-4",
+      "api": "openai-completions",
+      "client": "openai",
+      "comment": "oc-go",
+      "context_1m": true,
+      "listen_address": 11011,
+      "max_tokens": 4096,
+      "model": "glm-5.3-flash",
+      "override_model": false,
+      "pricing": "none"
+    },
+    {
+      "account": "acc-5",
+      "api": "openai-completions",
+      "client": "auto",
+      "comment": "or",
+      "context_1m": true,
+      "listen_address": 11015,
+      "max_tokens": 4096,
+      "model": "stealth/ox-alpha",
+      "override_model": true
+    }
+  ]
+}

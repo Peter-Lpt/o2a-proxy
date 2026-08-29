@@ -21,6 +21,7 @@
   ],
   "services": [
     {
+      "id": "svc-7f3a9c21",
       "comment": "pi / OpenAI 兼容客户端（Chat Completions 整包透传）",
       "account": "acc-1",
       "api": "openai-completions",

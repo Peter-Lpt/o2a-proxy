@@ -5,6 +5,7 @@
 
 import json
 import os
+import secrets
 
 from .base import (
     API_KEY,
@@ -69,8 +70,18 @@ class Account:
         }
 
 
+def new_service_id() -> str:
+    """生成稳定服务 id：svc-<8 位十六进制随机>。
+
+    随机而非递增：多份配置合并 / 导入时无需全局协调（优化方案 §2.2）。"""
+    return "svc-" + secrets.token_hex(4)
+
+
 class Service:
     """单个服务（接入点）：独立端口 + 引用账号 + 客户端类型 + 入口协议。
+
+    id：稳定身份（svc-<8hex>），生成后终生不变；comment 仅为显示名，可随意改。
+    order / enabled / autostart：显式排序 / 停用（保留配置不装载）/ 自启标记。
 
     api（入口协议，显式声明，对齐 pi 的 provider.api）：
     - "anthropic-messages"：Anthropic Messages（Claude Code）
@@ -91,7 +102,9 @@ class Service:
 
     def __init__(self, name, account, client, host, port, model, override_model=True,
                  max_tokens=4096, proxy="", api="", upstream_api="", thinking_mode="auto",
-                 pricing="", auth_token=""):
+                 pricing="", auth_token="", id="", order=0, enabled=True, autostart=False,
+                 models=None, models_map=None, model_policy="clamp"):
+        self.id = id or new_service_id()
         self.name = name
         self.account = account
         self.client = client
@@ -110,6 +123,16 @@ class Service:
         # 客户端凭证（接入层鉴权）：非空时校验请求头 Authorization: Bearer <token> / x-api-key；
         # 为空时不校验（保持历史行为），引擎启动时会打警告
         self.auth_token = (auth_token or "").strip()
+        self.order = int(order) if order is not None else 0
+        self.enabled = enabled is not False and enabled != "false"
+        self.autostart = autostart is True or autostart == "true"
+        # §6 服务级模型白名单与别名映射：
+        # models：可见模型白名单（对外名）；空 = 不限制（历史行为，逐字节兼容）
+        # models_map：{对外名: 上游名} 别名映射；命中后按上游名转发，统计仍记对外名
+        # model_policy：白名单外请求处理 —— clamp 强转主模型（默认）/ reject 400 / passthrough 透传
+        self.models = [str(m) for m in (models or []) if str(m).strip()]
+        self.models_map = {str(k): str(v) for k, v in (models_map or {}).items() if str(v).strip()}
+        self.model_policy = model_policy if model_policy in MODEL_POLICIES else "clamp"
         self._mode_override = None  # auto 服务每次请求识别后临时指定
 
     @property
@@ -155,9 +178,20 @@ class Service:
         """返回模式确定的 Service 拷贝（auto 服务每个请求用），不共享状态。"""
         s = Service(self.name, self.account, self.client, self.host, self.port,
                     self.model, self.override_model, self.max_tokens, self.proxy, self.api,
-                    self.upstream_api, self.thinking_mode, self.pricing, self.auth_token)
+                    self.upstream_api, self.thinking_mode, self.pricing, self.auth_token,
+                    models=self.models, models_map=self.models_map,
+                    model_policy=self.model_policy)
+        s.id = self.id
+        s.order = self.order
+        s.enabled = self.enabled
+        s.autostart = self.autostart
         s._mode_override = mode
         return s
+
+    @property
+    def reverse_models_map(self):
+        """{上游名: 对外名}（统计按对外名记录用）。"""
+        return {v: k for k, v in self.models_map.items() if v}
 
 
 _OPENAI_API_VALUES = ("", "anthropic-messages", "openai-completions", "openai-responses")
@@ -169,6 +203,9 @@ _UPSTREAM_API_VALUES = ("openai-completions", "openai-responses")
 # - enable_thinking：映射为布尔开关（DashScope/Qwen 兼容模式）
 # - none：不透传（保持默认模型行为）
 _THINKING_MODES = ("auto", "passthrough", "effort", "enable_thinking", "none")
+
+# 服务级模型策略（§6 模型白名单）：白名单外的请求如何处理
+MODEL_POLICIES = ("clamp", "reject", "passthrough")
 
 
 def load_auth():
@@ -209,6 +246,54 @@ def _resolve_api_key(auth, acc_id, acc_name, embedded):
     return embedded
 
 
+def _ensure_service_ids(config_path, config):
+    """惰性写回：为缺失 id 的服务生成稳定 id 并写回 config.json（优化方案 §2.2）。
+
+    仅在解析成功且确有缺失时写一次；格式化采用 2 空格缩进 + ensure_ascii=False。
+    写回前备份为 config.json.bak（同目录，覆盖旧备份）。
+    """
+    services = config.get("services")
+    if not isinstance(services, list):
+        return
+    seen = set()
+    missing = False
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        sid = str(svc.get("id") or "").strip()
+        if not sid:
+            missing = True
+        elif sid in seen:
+            missing = True  # 重复 id：保留首个，后续重新生成
+        else:
+            seen.add(sid)
+    if not missing:
+        return
+    assigned = set()
+    for svc in services:
+        if not isinstance(svc, dict):
+            continue
+        sid = str(svc.get("id") or "").strip()
+        if not sid or sid in assigned:
+            sid = new_service_id()
+            while sid in assigned:
+                sid = new_service_id()
+            svc["id"] = sid
+        assigned.add(sid)
+    backup = config_path + ".bak"
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, encoding="utf-8") as f:
+                raw = f.read()
+            with open(backup, "w", encoding="utf-8") as f:
+                f.write(raw)  # 备份原始内容
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        logger.info("[config] 已为缺失 id 的服务生成稳定 id 并写回 config.json（备份: %s）", backup)
+    except OSError as e:
+        logger.warning("[config] 服务 id 写回失败（不影响本次运行）: %s", e)
+
+
 def load_config():
     """从 config.json 读取账号与服务列表；文件不存在时回退到环境变量（单服务）。
 
@@ -228,6 +313,8 @@ def load_config():
         except (OSError, ValueError):
             config = {}
         if config:
+            # 惰性写回：为缺失 id 的服务生成稳定 id（§2 服务身份 id 化）
+            _ensure_service_ids(config_path, config)
             # 全局缓存统计设置（供 get_stats / is_cache_stats_enabled 读取）
             os.environ.setdefault("CACHE_STATS_ENABLED",
                                   str(config.get("cache_stats_enabled", True)).lower())
@@ -298,7 +385,18 @@ def load_config():
                     # 服务级未配置 → 回退 config.json 顶层 auth_token（全局兜底，
                     # 与桌面端「全局设置 → 认证令牌」UI 字段对应）
                     auth_token = str(config.get("auth_token", "") or "").strip()
+                model_policy = svc.get("model_policy", "clamp")
+                if model_policy not in MODEL_POLICIES:
+                    logger.warning(f"[config] 服务 {svc.get('comment')} 的 model_policy '{model_policy}' 非法，回退 clamp")
+                    model_policy = "clamp"
                 services.append(Service(
+                    id=str(svc.get("id") or "").strip(),
+                    order=svc.get("order", i),
+                    enabled=svc.get("enabled", True),
+                    autostart=svc.get("autostart", False),
+                    models=svc.get("models") or [],
+                    models_map=svc.get("models_map") or {},
+                    model_policy=model_policy,
                     name=svc.get("comment") or svc.get("model") or mode,
                     account=acc,
                     client=client,

@@ -39,10 +39,16 @@ fn find_service<'a>(services: &'a [serde_json::Value], name: &str) -> Option<&'a
         if mode != "claude" && mode != "codex" && mode != "direct" && mode != "auto" {
             return false;
         }
+        // 同时接受 id（§2 服务身份 id 化）与 comment（老配置/老脚本兼容），端口亦可用
+        let sid = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let comment = s.get("comment").and_then(|c| c.as_str()).unwrap_or("");
         let port = s.get("listen_address").and_then(|p| p.as_str()).unwrap_or("");
-        comment == name || port == name
+        sid == name || comment == name || port == name
     })
+}
+
+fn is_service_enabled(svc: &serde_json::Value) -> bool {
+    svc.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
 fn is_alive(child: &mut std::process::Child) -> bool {
@@ -120,8 +126,12 @@ fn service_host_port(svc: &serde_json::Value) -> (String, u16) {
 
 pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     let services = config_services(state);
-    if find_service(&services, name).is_none() {
-        return Err(format!("未找到服务: {name}"));
+    let svc = match find_service(&services, name) {
+        Some(s) => s,
+        None => return Err(format!("未找到服务: {name}")),
+    };
+    if !is_service_enabled(svc) {
+        return Err(format!("服务已停用（enabled=false），请先在面板启用: {name}"));
     }
     let mut children = state.children.lock().unwrap();
     if let Some(child) = children.get_mut(name) {
@@ -254,9 +264,47 @@ pub fn start_all(state: &AppState) -> Result<(), String> {
     let services = config_services(state);
     let mut last_err = None;
     for s in &services {
+        // enabled=false：停用态不参与 start_all（优化方案 §2.1）
+        if !is_service_enabled(s) {
+            continue;
+        }
+        // 以 id 作为启停 key（稳定身份）；老配置无 id 时回退 comment
         let name = s
-            .get("comment")
-            .and_then(|c| c.as_str())
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .or_else(|| s.get("comment").and_then(|c| c.as_str()))
+            .unwrap_or("")
+            .to_string();
+        if !name.is_empty() {
+            if let Err(e) = start_service(state, &name) {
+                last_err = Some(e);
+            }
+        }
+    }
+    match last_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
+/// 启动 autostart=true 且 enabled 的服务（App 启动时自动拉起，§5.2C 生命周期）。
+pub fn start_autostart(state: &AppState) -> Result<(), String> {
+    let services = config_services(state);
+    let mut last_err = None;
+    for s in &services {
+        let auto = s
+            .get("autostart")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !auto || !is_service_enabled(s) {
+            continue;
+        }
+        let name = s
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .or_else(|| s.get("comment").and_then(|c| c.as_str()))
             .unwrap_or("")
             .to_string();
         if !name.is_empty() {

@@ -604,6 +604,10 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .model-hint { font-size: 10.5px; color: var(--muted-2); margin-top: 2px; line-height: 1.5; }
 .model-hint.err { color: var(--red); }
+/* 行内校验错误（表单字段下方红字，§10.2-3 行内校验） */
+.field-err { color: var(--red); font-size: 10.5px; line-height: 1.5; margin: 2px 0 0 1px; }
+/* 有未保存改动时保存按钮高亮（§5.2D 脏状态） */
+.btn.attn { border-color: var(--amber); color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
 .form-actions { display: flex; gap: 8px; margin-top: 12px; }
 .hint { font-size: 10.5px; color: var(--muted-2); margin-top: 12px; line-height: 1.6; }
 .cfg-lock {

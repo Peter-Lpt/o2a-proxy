@@ -25,20 +25,32 @@
         </button>
         <button
           v-for="s in serviceList"
-          :key="s.comment"
+          :key="s.id || s.comment"
           class="svc-tab"
-          :class="{ active: selected === s.comment }"
+          :class="{ active: selected === (s.id || s.comment) }"
           @click="selectService(s)"
           :title="s.comment + ' · ' + (s.client || 'auto') + ' · :' + (s.listen_address ?? '?')"
         >
-          <span class="dot" :class="{ on: runningMap[s.comment], busy: busyMap[s.comment] }"></span>{{ s.comment }}
-          <span class="power" @click.stop="toggleSvc(s.comment)" :title="runningMap[s.comment] ? '停止' : '启动'">
-            <Icon :name="runningMap[s.comment] ? 'stop' : 'play'" :size="10" />
+          <span class="dot" :class="{ on: runningMap[s.id], busy: busyMap[s.id] }"></span>{{ s.comment }}
+          <span class="power" @click.stop="toggleSvc(s.id)" :title="runningMap[s.id] ? '停止' : '启动'">
+            <Icon :name="runningMap[s.id] ? 'stop' : 'play'" :size="10" />
           </span>
         </button>
       </div>
       <span v-if="tabEdgeL" class="tab-edge left" aria-hidden="true"></span>
       <span v-if="tabEdgeR" class="tab-edge right" aria-hidden="true"></span>
+      <button class="icon-btn" :class="{ active: useListView }" style="flex:none"
+              :title="useListView ? '切换为标签栏' : '切换为服务列表（搜索/排序/批量）'"
+              @click="toggleListView">
+        <Icon :name="useListView ? 'panel' : 'chevron-down'" :size="12" />
+      </button>
+    </div>
+
+    <!-- §5.2A 服务列表视图：服务 >6 自动启用，或手动切换 -->
+    <div v-if="useListView" class="card slv-card">
+      <ServiceListView :services="listRows" @open="openServiceFromList" @toggle="toggleSvc"
+                       @clone="cloneById" @remove="removeById" @batch-start="batchStart"
+                       @batch-stop="batchStop" @batch-remove="batchRemove" @usage="loadListUsage" />
     </div>
 
     <div v-if="!anyRunning" class="bar off-bar">
@@ -53,9 +65,9 @@
     </div>
 
     <nav class="tabs">
-      <button class="tab" :class="{ active: page === 'stats' }" @click="page = 'stats'">统计</button>
-      <button class="tab" :class="{ active: page === 'config' }" @click="page = 'config'">配置</button>
-      <button class="tab" :class="{ active: page === 'accounts' }" @click="page = 'accounts'">账号</button>
+      <button class="tab" :class="{ active: page === 'stats' }" @click="goPage('stats')">统计</button>
+      <button class="tab" :class="{ active: page === 'config' }" @click="goPage('config')">配置</button>
+      <button class="tab" :class="{ active: page === 'accounts' }" @click="goPage('accounts')">账号</button>
     </nav>
 
     <main>
@@ -230,7 +242,7 @@
       <section v-show="page === 'config'" class="panel" :class="{ active: page === 'config' }">
         <div v-if="activeSvcRunning" class="cfg-lock">
           <span class="cfg-lock-msg"><Icon name="lock" :size="13" /> 服务「{{ activeSvc.comment }}」运行中，该服务配置已锁定</span>
-          <button class="btn btn-sm" @click="api.stopService(activeSvc.comment)">停止该代理以编辑</button>
+          <button class="btn btn-sm" @click="api.stopService(activeSvc.id || activeSvc.comment)">停止该代理以编辑</button>
         </div>
         <form @submit.prevent="saveConfig">
           <!-- 全部视图：全局配置 + 概览 -->
@@ -288,7 +300,11 @@
                   <span class="acc-mini-ep an">{{ activeSvcAccount.anthropic_url || "无 Anthropic 端点" }}</span>
                   <button type="button" class="link-btn" @click="goAccounts">管理账号 →</button>
                 </div>
-                <label>备注 comment <input v-model="activeSvc.comment" type="text" :disabled="activeSvcRunning" /></label>
+                <label>备注 comment
+                  <input v-model="draftComment" type="text" :disabled="activeSvcRunning"
+                         @change="commitComment" @blur="commitComment" />
+                </label>
+                <div v-if="commentErr" class="field-err">{{ commentErr }}</div>
                 <label>账号 account
                   <SelectBox v-model="activeSvc.account" :options="accountOptions" :disabled="activeSvcRunning" />
                 </label>
@@ -312,7 +328,20 @@
                   </div>
                 </label>
                 <label class="inline"><input v-model="activeSvc.override_model" type="checkbox" :disabled="activeSvcRunning" /><span>覆盖客户端模型 override_model <span class="fc-sub" style="font-weight:400">（关：透传客户端请求的模型名）</span></span></label>
-                <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
+                <label>可见模型 models <span class="fc-sub" style="font-weight:400">（对外白名单，留空不限制；需重启生效）</span>
+                  <MultiSelect v-model="activeSvcModels" :options="fetchedModels" :locked="activeSvc?.model || ''" :disabled="activeSvcRunning" />
+                </label>
+                <label>白名单外请求 model_policy
+                  <SelectBox v-model="activeSvc.model_policy" :options="policyOptions" :disabled="activeSvcRunning" />
+                </label>
+                <label>别名映射 models_map <span class="fc-sub" style="font-weight:400">（每行一条：对外名=上游名，统计记对外名）</span>
+                  <textarea v-model="modelsMapDraft" rows="2" spellcheck="false" :disabled="activeSvcRunning"
+                            placeholder="claude-sonnet-4=deepseek-v4-flash" @change="commitModelsMap"></textarea>
+                </label>
+                <div class="grid2">
+                  <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
+                  <label>监听地址 listen_host <input v-model="activeSvc.listen_host" type="text" placeholder="127.0.0.1" :disabled="activeSvcRunning" /></label>
+                </div>
                 <label>接入凭证 auth_token <span class="fc-sub" style="font-weight:400">（非空时客户端需带 Authorization: Bearer / x-api-key，需重启生效）</span>
                   <input v-model="activeSvc.auth_token" type="text" placeholder="留空 = 不校验（本机任意进程可用）" :disabled="activeSvcRunning" />
                 </label>
@@ -328,8 +357,13 @@
           </template>
 
           <div class="form-actions">
-            <button type="submit" class="btn btn-primary" :disabled="activeSvcRunning">保存配置</button>
-            <button v-if="selected !== ALL" type="button" class="btn btn-danger" @click="removeSvc" :disabled="activeSvcRunning || !activeSvc">删除此服务</button>
+            <button type="submit" class="btn btn-primary" :class="{ attn: dirty && !activeSvcRunning }" :disabled="activeSvcRunning">保存配置</button>
+            <button v-if="selected !== ALL && activeSvc" type="button" class="btn btn-primary"
+                    :disabled="!activeSvcRunning" title="停止 → 用新配置重新启动该服务"
+                    @click="saveAndRestart">保存并重启</button>
+            <button v-if="selected !== ALL && activeSvc" type="button" class="btn" @click="cloneService()"
+                    title="复制当前服务配置，自动分配下一个空闲端口">克隆</button>
+            <button v-if="selected !== ALL" type="button" class="btn btn-danger" @click="removeSvc()" :disabled="activeSvcRunning || !activeSvc">删除此服务</button>
             <button type="button" class="btn" @click="api.openConfigFile()">打开 config.json</button>
           </div>
         </form>
@@ -419,7 +453,9 @@ import CalendarHeat from "./components/CalendarHeat.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import Icon from "./components/Icon.vue";
 import LineChart from "./components/LineChart.vue";
+import MultiSelect from "./components/MultiSelect.vue";
 import SelectBox from "./components/SelectBox.vue";
+import ServiceListView, { type ServiceRow } from "./components/ServiceListView.vue";
 import Spark from "./components/Spark.vue";
 import { applyTheme, getTheme, toggleTheme, watchSystemTheme, type Theme } from "./theme";
 
@@ -639,7 +675,7 @@ function loadAccountStats() {
     }
     // 已有数据时静默刷新，避免每 10s 轮询闪烁
     if (!accStats[acc.id]) accStatsState[acc.id] = "loading";
-    Promise.all(svcs.map((s: any) => api.getStats(s.comment)))
+    Promise.all(svcs.map((s: any) => api.getStats(s.id || s.comment)))
       .then((res: any[]) => {
         let cost = 0, req = 0, mcost = 0, mreq = 0;
         res.forEach((r: any) => {
@@ -888,10 +924,12 @@ function quitApp() {
 const serviceList = computed(() =>
   (cfg.services || []).filter((s: any) => s.comment || s === selectedSvc.value)
 );
+// 运行态：以服务 id 为 key（§2 id 化；status.services 现带 id，旧状态按 name 兜底）
 const runningMap = computed<Record<string, boolean>>(() => {
   const m: Record<string, boolean> = {};
   (status.services || []).forEach((s: any) => {
-    m[s.name] = !!s.running;
+    if (s.id) m[s.id] = !!s.running;
+    else m[s.name] = !!s.running;
   });
   return m;
 });
@@ -899,7 +937,8 @@ const runningMap = computed<Record<string, boolean>>(() => {
 const busyMap = computed<Record<string, boolean>>(() => {
   const m: Record<string, boolean> = {};
   (status.services || []).forEach((s: any) => {
-    m[s.name] = !!s.task?.active;
+    if (s.id) m[s.id] = !!s.task?.active;
+    else m[s.name] = !!s.task?.active;
   });
   return m;
 });
@@ -919,13 +958,15 @@ const guide = computed(() => {
   return "";
 });
 const activeSvcRunning = computed(
-  () => !!activeSvc.value && !!runningMap.value[activeSvc.value.comment]
+  () => !!activeSvc.value && !!runningMap.value[activeSvc.value.id || activeSvc.value.comment]
 );
 const activeSvc = computed(() => {
   if (selected.value === ALL) return null;
   const cur = selectedSvc.value;
   if (cur && (cfg.services || []).includes(cur)) return cur;
-  const byName = serviceList.value.find((s: any) => s.comment === selected.value) || null;
+  // 身份查找：id 优先（稳定身份，改名瞬间列表身份不变），comment 兼容兜底
+  const byId = serviceList.value.find((s: any) => s.id === selected.value) || null;
+  const byName = byId || serviceList.value.find((s: any) => s.comment === selected.value) || null;
   if (byName) selectedSvc.value = byName;
   return byName;
 });
@@ -942,13 +983,228 @@ const fetchedModels = computed<string[]>(() => {
 });
 function selectService(s: any) {
   selectedSvc.value = s;
-  selected.value = s.comment;
+  selected.value = s.id || s.comment;
 }
 function selectAll() {
   selectedSvc.value = null;
   selected.value = ALL;
 }
 const activeSvcAccount = computed(() => accountById(activeSvc.value?.account));
+
+// ---------- §6 模型白名单 / 别名映射（服务级） ----------
+const policyOptions = [
+  { value: "clamp", label: "clamp（白名单外强转主模型，默认）" },
+  { value: "reject", label: "reject（返回 400 并列出可用模型）" },
+  { value: "passthrough", label: "passthrough（白名单仅展示，请求照旧）" },
+];
+const activeSvcModels = computed<string[]>({
+  get: () => (activeSvc.value?.models as string[]) || [],
+  set: (v) => {
+    const s = activeSvc.value;
+    if (!s) return;
+    s.models = Array.from(new Set(v)).filter(Boolean);
+  },
+});
+// models_map 编辑：textarea 每行「对外名=上游名」，change/失焦/保存时解析写回
+const modelsMapDraft = ref("");
+watch(activeSvc, (s) => {
+  modelsMapDraft.value = Object.entries(s?.models_map || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+});
+function parseModelsMap(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const idx = line.indexOf("=");
+    if (idx <= 0) continue;
+    const k = line.slice(0, idx).trim();
+    const v = line.slice(idx + 1).trim();
+    if (k && v) out[k] = v;
+  }
+  return out;
+}
+function commitModelsMap(): boolean {
+  const s = activeSvc.value;
+  if (!s) return true;
+  const map = parseModelsMap(modelsMapDraft.value);
+  if (Object.keys(map).length !== modelsMapDraft.value.split(/\r?\n/).filter((l) => l.trim()).length) {
+    showToast("别名映射存在无法解析的行（应为 对外名=上游名），已忽略无效行", "error");
+  }
+  s.models_map = map;
+  modelsMapDraft.value = Object.entries(map).map(([k, v]) => `${k}=${v}`).join("\n");
+  return true;
+}
+
+// ---------- §5.2D 脏状态 ----------
+// 配置快照深比较：有未保存改动时保存按钮高亮、切页有确认弹层
+let cfgSnapshot = "";
+function snapCfg() {
+  cfgSnapshot = JSON.stringify(cfg);
+}
+const dirty = computed(() => JSON.stringify(cfg) !== cfgSnapshot);
+function goPage(p: "stats" | "config" | "accounts") {
+  if (p === page.value) return;
+  if (dirty.value) {
+    askConfirm(
+      "有未保存的改动",
+      "当前修改尚未保存，切换页面后将丢失。是否继续？",
+      () => {
+        snapCfg(); // 丢弃改动（回到快照）
+        page.value = p;
+      },
+      "丢弃并切换"
+    );
+    return;
+  }
+  page.value = p;
+}
+
+// ---------- §5.2A 克隆服务 ----------
+function cloneService(svc?: any) {
+  const s = svc || activeSvc.value;
+  if (!s) return;
+  const used = new Set(
+    (cfg.services || [])
+      .map((x: any) => Number(x.listen_address))
+      .filter((n: any) => Number.isFinite(n))
+  );
+  let port = Number(s.listen_address) || 11011;
+  do {
+    port = port >= 65535 ? 11011 : port + 1;
+  } while (used.has(port));
+  const copy = JSON.parse(JSON.stringify(s));
+  copy.id = newSvcId();
+  copy.comment = (s.comment || "服务") + "-copy";
+  copy.listen_address = port;
+  cfg.services.push(copy);
+  selectedSvc.value = copy;
+  selected.value = copy.id;
+  showToast(`已克隆「${s.comment}」→ 端口 :${port}，保存后生效`, "success");
+}
+function cloneById(id: string) {
+  const s = (cfg.services || []).find((x: any) => (x.id || x.comment) === id);
+  if (s) cloneService(s);
+}
+function removeById(id: string) {
+  const s = (cfg.services || []).find((x: any) => (x.id || x.comment) === id);
+  if (s) removeSvc(s);
+}
+
+// ---------- §5.2A 服务列表视图（>6 服务自动启用，或手动切换） ----------
+const LIST_PREF_KEY = "o2a.panel.listView";
+const listMode = ref(localStorage.getItem(LIST_PREF_KEY) === "1");
+const useListView = computed(() => listMode.value || serviceList.value.length > 6);
+function toggleListView() {
+  listMode.value = !listMode.value;
+  localStorage.setItem(LIST_PREF_KEY, listMode.value ? "1" : "0");
+}
+const listRows = computed<ServiceRow[]>(() =>
+  (cfg.services || []).map((s: any) => {
+    const st = (status.services || []).find((x: any) => x.id === s.id);
+    const acc = accountById(s.account);
+    return {
+      id: s.id || s.comment,
+      comment: s.comment || "",
+      accountLabel: acc ? acc.name || acc.id : "未绑定账号",
+      api: s.api || "auto",
+      model: s.model || "",
+      port: s.listen_address ?? "?",
+      host: String(s.listen_host || "127.0.0.1"),
+      running: !!runningMap.value[s.id || s.comment],
+      busy: !!busyMap.value[s.id || s.comment],
+      ...(st ? {} : {}),
+    };
+  })
+);
+function openServiceFromList(id: string) {
+  const s = (cfg.services || []).find((x: any) => (x.id || x.comment) === id);
+  if (s) {
+    selectService(s);
+    page.value = "config";
+  }
+}
+function batchStart(ids: string[]) {
+  ids.forEach((id) => api.startService(id).catch((e) => showToast(`启动失败 ${id}: ${e}`, "error")));
+  setTimeout(() => loadStatus(), 1500);
+}
+function batchStop(ids: string[]) {
+  ids.forEach((id) => api.stopService(id).catch(() => {}));
+  setTimeout(() => loadStatus(), 800);
+}
+function batchRemove(ids: string[]) {
+  askConfirm(
+    "批量删除服务",
+    `确定删除 ${ids.length} 个服务？\n保存配置后生效。`,
+    () => {
+      const idSet = new Set(ids);
+      for (const id of ids) api.stopService(id).catch(() => {});
+      cfg.services = cfg.services.filter((x: any) => !idSet.has(x.id || x.comment));
+      showToast(`已删除 ${ids.length} 个服务，点击保存生效`, "success");
+    },
+    "删除"
+  );
+}
+// 今日用量按需拉取（列表打开/手动刷新时一次，不进轮询）
+function loadListUsage(ids: string[], done: (u: Record<string, { requests: number; cost: number }>) => void) {
+  Promise.all(ids.map((id) => api.getStats(id).catch(() => null))).then((res) => {
+    const out: Record<string, { requests: number; cost: number }> = {};
+    ids.forEach((id, i) => {
+      const r: any = res[i];
+      if (r) out[id] = { requests: Number(r.today?.requests || 0), cost: Number(r.today?.cost || 0) };
+    });
+    done(out);
+  });
+}
+
+// ---------- comment 改名 draft 提交（§3.3） ----------
+// 改名输入绑本地 draft，@change / 失焦 / 保存时才写回；
+// 校验失败 → 输入框下方红字，不写回、不 toast（回绑问题已由 id 身份物理消除）
+const draftComment = ref("");
+const commentErr = ref("");
+watch(activeSvc, (s) => {
+  draftComment.value = s?.comment || "";
+  commentErr.value = "";
+});
+function validateCommentName(name: string, self: any): string {
+  const v = String(name || "").trim();
+  if (!v) return "名称不能为空";
+  if (/[\/\\:*?"<>|]/.test(v)) return "名称含非法文件名字符（/ \\ : * ? \" < > |）";
+  const dup = (cfg.services || []).find((s: any) => s !== self && s.comment === v);
+  if (dup) return `与其他服务重名：「${v}」（:${dup.listen_address} · ${dup.model || "?"}）`;
+  return "";
+}
+function commitComment(): boolean {
+  const s = activeSvc.value;
+  if (!s) return true;
+  if (draftComment.value === s.comment) {
+    commentErr.value = "";
+    return true;
+  }
+  const err = validateCommentName(draftComment.value, s);
+  if (err) {
+    commentErr.value = err; // 不写回、不 toast
+    return false;
+  }
+  commentErr.value = "";
+  s.comment = draftComment.value.trim();
+  return true;
+}
+
+// 「保存并重启」：引擎启动时一次性读取配置，运行中改的配置需重启该服务生效（§9.1）
+async function saveAndRestart() {
+  const s = activeSvc.value;
+  if (!s) return;
+  const key = s.id || s.comment;
+  await saveConfig();
+  try {
+    await api.stopService(key);
+    await api.startService(key);
+    await loadStatus();
+    showToast(`「${s.comment}」已保存并重启，新配置已生效`, "success");
+  } catch (e: any) {
+    showToast("重启失败: " + e, "error");
+  }
+}
 const runningCount = computed(() => Object.values(runningMap.value).filter(Boolean).length);
 const stoppedCount = computed(() => Math.max(0, serviceList.value.length - runningCount.value));
 const dualCount = computed(
@@ -1026,12 +1282,14 @@ const outHint = computed(() => {
   return o ? `自动识别 → 出口 ${o}（Claude 转换 / Codex 透传）` : "⚠ 该账号未配置任何端点";
 });
 const floatService = computed(() =>
-  selected.value === ALL ? "" : serviceList.value.find((s: any) => s.comment === selected.value)?.comment || ""
+  selected.value === ALL
+    ? ""
+    : serviceList.value.find((s: any) => (s.id || s.comment) === selected.value)?.comment || ""
 );
 const statsService = computed(() => (selected.value === ALL ? "" : selected.value));
 
 const runningList = computed(() =>
-  serviceList.value.filter((s: any) => runningMap.value[s.comment])
+  serviceList.value.filter((s: any) => runningMap.value[s.id || s.comment])
 );
 const onMeta = computed(() =>
   runningList.value.length
@@ -1047,25 +1305,53 @@ const offMeta = computed(() => {
     ? "代理未启动 · 端口 " + (s.listen_address ?? "?") + " · " + (s.model || "")
     : "代理未启动";
 });
+// ---------- 服务身份 id（§2 id 化） ----------
+// svc-<8 位十六进制随机>：稳定身份，生成后终生不变；comment 仅为显示名。
+function newSvcId(): string {
+  const b = new Uint8Array(4);
+  crypto.getRandomValues(b);
+  return "svc-" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+function ensureSvcIds(c: any) {
+  const used = new Set<string>();
+  for (const s of c.services || []) {
+    if (s.id && !used.has(s.id)) used.add(s.id);
+  }
+  for (const s of c.services || []) {
+    if (!s.id || used.has(s.id)) {
+      let id = newSvcId();
+      while (used.has(id)) id = newSvcId();
+      s.id = id;
+      used.add(id);
+    }
+  }
+}
+
 async function loadConfig() {
   try {
     const prev = selectedSvc.value;
+    const prevId = prev?.id || null;
     const prevName = prev?.comment || (selected.value === ALL ? null : selected.value);
     const prevPort = prev?.listen_address;
     const c = await api.getConfig();
     Object.keys(cfg).forEach((k) => delete (cfg as any)[k]);
     Object.assign(cfg, c || {});
     migrateAccounts(cfg);
-    // 配置重载后重新关联选中服务：优先按名称，其次按端口（适配改名的保存场景）；
-    // 找不到则回到“全部”，而不是静默跳到第一个服务。
-    if (prevName) {
+    ensureSvcIds(cfg);
+    // 配置重载后重新关联选中服务：优先按 id（稳定身份，改名不丢选中），
+    // 其次按名称 / 端口（兼容）；找不到则回到“全部”，不静默跳到第一个服务。
+    if (prevId || prevName) {
+      const svcs: any[] = cfg.services || [];
       const next =
-        (cfg.services || []).find((s: any) => s.comment === prevName) ||
-        (prevPort ? (cfg.services || []).find((s: any) => String(s.listen_address) === String(prevPort)) : null) ||
+        (prevId ? svcs.find((s: any) => s.id === prevId) : null) ||
+        (prevName ? svcs.find((s: any) => s.comment === prevName) : null) ||
+        (prevPort
+          ? svcs.find((s: any) => String(s.listen_address) === String(prevPort))
+          : null) ||
         null;
       if (next) {
         selectedSvc.value = next;
-        selected.value = String(next.comment || selected.value);
+        selected.value = String(next.id || next.comment || selected.value);
       } else {
         selectedSvc.value = null;
         selected.value = ALL;
@@ -1076,6 +1362,7 @@ async function loadConfig() {
   } catch (e: any) {
     showToast("读取配置失败: " + e, "error");
   }
+  snapCfg();
 }
 
 async function loadConfigLocation() {
@@ -1130,16 +1417,17 @@ async function loadLive() {
   }
 }
 
-async function toggleSvc(name: string) {
-  if (!(name in runningMap.value)) {
+async function toggleSvc(id: string) {
+  if (!(id in runningMap.value)) {
     showToast("该服务尚未保存，请先保存配置", "error");
     return;
   }
+  const label = serviceList.value.find((s: any) => (s.id || s.comment) === id)?.comment || id;
   try {
-    await api.toggleService(name);
+    await api.toggleService(id);
     await loadStatus();
     offError.value = "";
-    showToast(name + (runningMap.value[name] ? " 已启动" : " 已停止"), "success");
+    showToast(label + (runningMap.value[id] ? " 已启动" : " 已停止"), "success");
   } catch (e: any) {
     showToast("操作失败: " + e, "error");
     offError.value = String(e);
@@ -1164,11 +1452,14 @@ function addService() {
   );
   let port = 11011;
   while (used.has(port)) port++;
+  // §11.6：默认模型留空 + 表单必填高亮（原硬编码 qwen-plus 对非 qwen 账号是错的）；
+  // 名字用「新服务-N」；id 即刻生成（稳定身份，未保存也不会与其他服务混淆）
   const svc = {
-    comment: "service-" + (cfg.services.length + 1),
+    id: newSvcId(),
+    comment: "新服务-" + (cfg.services.length + 1),
     account: (cfg.accounts || [])[0]?.id || "",
     client: "auto",
-    model: "qwen-plus",
+    model: "",
     override_model: true,
     listen_address: port,
     context_1m: false,
@@ -1176,24 +1467,24 @@ function addService() {
   };
   cfg.services.push(svc);
   selectedSvc.value = svc;
-  selected.value = svc.comment;
+  selected.value = svc.id;
   page.value = "config";
-  showToast("已添加服务，绑定账号后保存", "success");
+  showToast("已添加服务，绑定账号并选择模型后保存", "success");
 }
 
-function removeSvc() {
-  const s = activeSvc.value;
+function removeSvc(target?: any) {
+  const s = target || activeSvc.value;
   if (!s) return;
   const name = s.comment;
-  const running = !!runningMap.value[name];
+  const running = !!runningMap.value[s.id || s.comment];
   askConfirm(
     "删除服务",
     running
       ? `服务「${name}」正在运行，删除将先停止它并从配置中移除。\n保存配置后生效。`
       : `确定删除服务「${name}」？\n保存配置后生效。`,
     () => {
-      if (running) api.stopService(name).catch(() => {});
-      cfg.services = cfg.services.filter((x: any) => x.comment !== name);
+      if (running) api.stopService(s.id || s.comment).catch(() => {});
+      cfg.services = cfg.services.filter((x: any) => x.id !== s.id);
       selectedSvc.value = null;
       selected.value = ALL;
       showToast("已删除服务，点击保存生效", "success");
@@ -1212,6 +1503,9 @@ function validateConfig(): string | null {
     if (seen.has(comment)) return "服务备注重复：" + comment;
     seen.add(comment);
     if (!accountById(s.account)) return `服务 ${comment} 未绑定有效账号`;
+    if (!String(s.model || "").trim()) {
+      return `服务 ${comment} 未配置主模型 model（必填）`;
+    }
     const port = Number(s.listen_address);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
       return `服务 ${comment} 的监听端口无效（需为 1-65535 整数）`;
@@ -1250,15 +1544,27 @@ function migrateAccounts(c: any) {
     (s: any) => s.openai_base_url || s.openai_api_key
   );
   if (!c.accounts.length && hasLegacy) {
-    c.accounts = (c.services as any[]).map((s: any, i: number) => ({
-      id: "acc-" + (i + 1),
+    // §11.7：生成 acc-N 前先查重，避免与存量账号 id 冲突导致 Key 错挂
+    const usedIds = new Set(
+      (c.accounts as any[]).map((a: any) => String(a.id || "")).filter(Boolean)
+    );
+    const nextAccId = () => {
+      let i = 1;
+      while (usedIds.has("acc-" + i)) i++;
+      const id = "acc-" + i;
+      usedIds.add(id);
+      return id;
+    };
+    const generated = (c.services as any[]).map((s: any, i: number) => ({
+      id: nextAccId(),
       name: s.comment || "账号" + (i + 1),
       api_key: s.openai_api_key || "",
       openai_url: s.openai_base_url || "",
       anthropic_url: s.anthropic_base_url || "",
     }));
+    c.accounts = generated;
     (c.services as any[]).forEach((s: any, i: number) => {
-      s.account = "acc-" + (i + 1);
+      s.account = generated[i]?.id || "";
       s.client = modeToClient[s.mode || "claude"] || "auto";
       delete s.openai_base_url;
       delete s.openai_api_key;
@@ -1274,6 +1580,8 @@ function normalizeConfig() {
   (cfg.services || []).forEach((s: any) => {
     s.comment = String(s.comment || "").trim();
     s.listen_address = Number(s.listen_address);
+    s.listen_host = String(s.listen_host || "").trim();
+    if (!s.listen_host) delete s.listen_host;
     if (s.max_tokens === "" || s.max_tokens === undefined || s.max_tokens === null) {
       delete s.max_tokens;
     } else {
@@ -1283,6 +1591,20 @@ function normalizeConfig() {
     if (!s.api) delete s.api;
     if (!s.upstream_api || s.upstream_api === "openai-completions") delete s.upstream_api;
     if (!s.thinking_mode || s.thinking_mode === "auto") delete s.thinking_mode;
+    // §6 白名单 / 别名 / 策略归一化（空值删除字段，与 normalizeConfig 风格一致）
+    if (Array.isArray(s.models)) {
+      s.models = s.models.map((m: any) => String(m).trim()).filter(Boolean);
+      if (!s.models.length) delete s.models;
+    }
+    if (s.models_map && typeof s.models_map === "object") {
+      const map: Record<string, string> = {};
+      for (const [k, v] of Object.entries(s.models_map)) {
+        if (String(k).trim() && String(v).trim()) map[String(k).trim()] = String(v).trim();
+      }
+      if (Object.keys(map).length) s.models_map = map;
+      else delete s.models_map;
+    }
+    if (!s.model_policy || s.model_policy === "clamp") delete s.model_policy;
     s.auth_token = String(s.auth_token || "").trim();
     if (!s.auth_token) delete s.auth_token;
     delete s.openai_base_url;
@@ -1303,26 +1625,57 @@ function normalizeConfig() {
 }
 
 function computeRemovedServices(oldList: any[], newList: any[]): string[] {
+  // §2 id 化：删除判定按 id 差集 —— 改名（id 不变）不再被误判为删除；
+  // 旧状态列表无 id（旧版本）时回退按 comment，改名按端口启发式兜底。
+  const newIds = new Set(newList.map((x: any) => x.id).filter(Boolean));
   const newNames = new Set(newList.map((x: any) => x.comment));
-  // 无 id 的最小版区分“改名”和“删除”：旧名消失但端口被新服务占用视为改名，不停止进程；
-  // 真正删除的服务仍会 stopService，避免残留进程占用端口。
   return oldList
     .filter((x: any) => {
-      if (newNames.has(x.name)) return false;
-      const renamed = newList.some(
-        (s: any) => s.comment !== x.name && String(s.listen_address) === String(x.port)
-      );
-      return !renamed;
+      if (x.id && newIds.has(x.id)) return false;
+      if (!x.id && newNames.has(x.name)) return false;
+      // 无 id 的旧状态：旧名消失但端口被新服务占用视为改名，不停止进程
+      if (!x.id) {
+        const renamed = newList.some(
+          (s: any) => s.comment !== x.name && String(s.listen_address) === String(x.port)
+        );
+        if (renamed) return false;
+      }
+      return true;
     })
-    .map((x: any) => x.name);
+    .map((x: any) => x.id || x.name);
+}
+
+// §5.2B 端口占用预检：未运行服务的端口被占（外部进程）时保存前提醒
+async function precheckPorts(): Promise<string[]> {
+  const busy: string[] = [];
+  for (const s of cfg.services || []) {
+    const port = Number(s.listen_address);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) continue;
+    const host = String(s.listen_host || "127.0.0.1").trim() || "127.0.0.1";
+    if (runningMap.value[s.id || s.comment]) continue; // 自己管理的运行中服务跳过
+    if (await api.isPortOpen(host, port).catch(() => false)) {
+      busy.push(`${host}:${port}（服务「${s.comment}」）`);
+    }
+  }
+  return busy;
 }
 
 async function saveConfig() {
+  // 保存前先提交 comment draft 与 models_map 草稿；校验失败则阻止保存
+  if (!commitComment() || !commitModelsMap()) {
+    showToast("表单校验未通过，请修正后再保存", "error");
+    return;
+  }
   const err = validateConfig();
   if (err) {
     showToast(err, "error");
     return;
   }
+  precheckPorts().then((busy) => {
+    if (busy.length) {
+      showToast("端口已被外部进程占用（启动会失败）：" + busy.join("、"), "error");
+    }
+  });
   normalizeConfig();
   try {
     const removed = computeRemovedServices(status.services || [], cfg.services || []);
@@ -1339,6 +1692,7 @@ async function saveConfig() {
     } else {
       showToast("配置已保存", "success");
     }
+    snapCfg();
   } catch (e: any) {
     showToast("保存失败: " + e, "error");
   }
@@ -1718,10 +2072,11 @@ watch(selected, (v) => {
   } else if (
     !selectedSvc.value ||
     !(cfg.services || []).includes(selectedSvc.value) ||
-    selectedSvc.value.comment !== v
+    (selectedSvc.value.id || selectedSvc.value.comment) !== v
   ) {
+    // id 优先（稳定身份），comment 兼容兜底
     selectedSvc.value =
-      (cfg.services || []).find((s: any) => s.comment === v) || selectedSvc.value;
+      (cfg.services || []).find((s: any) => (s.id || s.comment) === v) || selectedSvc.value;
   }
   modelFilter.value = "";
   loadStats();

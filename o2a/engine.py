@@ -188,14 +188,19 @@ async def record_stats(service: Service, model: str, usage: dict,
         total_seconds = time.time() - req_start
         if total_seconds > 0:
             meta["output_tokens_per_sec"] = output_tokens / total_seconds
+    # §6 别名：统计按对外名记录（用户认知的名字）；上游名随记录带给计价端
+    display_model = service.reverse_models_map.get(model, model)
+    upstream_model = model if display_model != model else None
     await asyncio.to_thread(
-        _stats_for(service).record, model, usage or {}, error=error, meta=meta
+        _stats_for(service).record, display_model, usage or {},
+        error=error, meta=meta, upstream_model=upstream_model
     )
 
 
 def _stats_for(service: Service):
     """返回该服务的统计实例；pricing=none（订阅制）时不记录价格。"""
-    return get_stats(service.name, service.account.id, no_cost=service.pricing == "none")
+    return get_stats(service.name, service.account.id, no_cost=service.pricing == "none",
+                     service_id=service.id)
 
 
 def upstream_timeout(*, total=None):
@@ -1377,6 +1382,11 @@ async def handle_request(request: web.Request):
     if service.client == "auto" and not service.api:
         service = service.with_mode(mode)
 
+    # §6 模型白名单 / 别名映射（所有分派模式统一施加）
+    policy_err = _apply_model_policy(service, payload)
+    if policy_err is not None:
+        return policy_err
+
     if mode == "codex":
         if not service.account.openai_url:
             # 显式 api=openai-completions/responses + kind=anthropic 账号 → 无 OpenAI 端点
@@ -1461,12 +1471,76 @@ def _model_entry(service: Service) -> dict:
     return entry
 
 
+def _model_entries(service: Service) -> list:
+    """/v1/models 输出全集（§6.2 矩阵）。
+
+    白名单为空 → 维持现状单条；非空 → 白名单全集（别名键作为对外名一并列入，
+    上游名不暴露），主模型带 default=true，required 仅在 override_model=true
+    且为主模型时标记。"""
+    names = list(service.models)
+    for k in service.models_map:
+        if k not in names:
+            names.append(k)
+    if not names:
+        return [_model_entry(service)]
+    out = []
+    for m in names:
+        out.append({
+            "id": m,
+            "object": "model",
+            "created": 0,
+            "owned_by": service.account.name,
+            "context": service.max_tokens,
+            "required": bool(service.override_model) and m == service.model,
+            "default": m == service.model,
+        })
+    return out
+
+
+def _apply_model_policy(service: Service, payload: dict):
+    """§6 白名单与别名映射（转换/透传前施加）。返回 400 Response 或 None。
+
+    - 白名单（对外名）非空时：白名单外请求按 model_policy 处理
+      clamp=强转主模型（默认，最安全）/ reject=400 列出可用模型 / passthrough=照旧
+    - 别名命中（对外名 → 上游名）：重写 payload["model"] 供转发；
+      统计在 record_stats 里反查对外名，按用户认知的名字记录
+    - 白名单为空：仅做别名映射，其余逐字节兼容现状
+    """
+    req = payload.get("model")
+    allowed = set(service.models) | set(service.models_map.keys())
+    if req and req in service.models_map:
+        # 别名命中（白名单内外均映射）
+        if not allowed or req in allowed:
+            payload["model"] = service.models_map[req]
+            return None
+    if not allowed:
+        return None
+    if req in allowed:
+        return None
+    # 白名单外
+    if service.model_policy == "reject":
+        sample = ", ".join(sorted(allowed)[:10])
+        return json_response(
+            {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": f"model '{req}' is not allowed for this service. available models: {sample}",
+                },
+            },
+            status=400,
+        )
+    if service.model_policy == "clamp":
+        payload["model"] = service.model
+    return None  # passthrough / 未声明模型名：照旧
+
+
 async def handle_get(request: web.Request, service: Service):
     path = request.path
     if path in ("/models", "/v1/models"):
         return json_response({
             "object": "list",
-            "data": [_model_entry(service)],
+            "data": _model_entries(service),
         })
     if path == "/stats":
         if not is_cache_stats_enabled():
@@ -1477,7 +1551,8 @@ async def handle_get(request: web.Request, service: Service):
             # 账号级聚合：归并该账号下所有服务的 summary
             summary = await asyncio.to_thread(get_account_summary, account_id, period)
         else:
-            summary = await asyncio.to_thread(get_stats(service.name).get_summary, period)
+            summary = await asyncio.to_thread(
+                lambda: get_stats(service.name, service_id=service.id).get_summary(period))
         return json_response(summary)
     if path == "/health":
         return json_response({"status": "ok"})
@@ -1511,10 +1586,14 @@ def _parent_watchdog(parent_pid: int) -> None:
 
 async def serve(service_filter: str = None) -> int:
     services = load_config()
+    # enabled=false：停用态（保留配置，不装载、不参与 start_all）
+    services = [s for s in services if s.enabled]
     enabled = [s for s in services if s.account.valid]
     if service_filter:
+        # --service 同时接受 id 与 comment（老脚本兼容），端口亦可用
         enabled = [s for s in enabled
-                   if s.name == service_filter or str(s.port) == service_filter]
+                   if s.id == service_filter or s.name == service_filter
+                   or str(s.port) == service_filter]
     if not enabled:
         logger.error("没有可用的服务（请检查 config.json 的 services 与 API key）")
         return 1

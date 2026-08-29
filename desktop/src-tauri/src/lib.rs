@@ -236,6 +236,25 @@ fn primary_service(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
+/// 服务 id → 当前显示名（comment）翻译。
+/// 统计记录按 service 名匹配；前端以 id 为身份（§2 id 化）后，命令层先把 id
+/// 翻译为当前名再进 stats 层；带 service_id 的新记录在 stats.rs 读取层
+/// 归一化为当前名，改名后的历史统计不丢。
+fn resolve_service_name(state: &AppState, service: &str) -> String {
+    if service.is_empty() {
+        return String::new();
+    }
+    read_config_value(state)
+        .ok()
+        .and_then(|c| c.get("services").cloned())
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(service))
+        .and_then(|s| s.get("comment").and_then(|c| c.as_str()).map(String::from))
+        .unwrap_or_else(|| service.to_string())
+}
+
 fn read_config_value(state: &AppState) -> Result<serde_json::Value, String> {
     let p = config_path(state);
     let mut cfg = if !p.exists() {
@@ -438,6 +457,11 @@ fn save_config(state: State<'_, AppState>, mut cfg: serde_json::Value) -> Result
 }
 
 #[tauri::command]
+fn is_port_open(host: String, port: u16) -> bool {
+    crate::port_open(&host, port)
+}
+
+#[tauri::command]
 async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
     // 异步命令跑在 Tauri 线程池；内部含端口探测（200ms/服务超时），
     // 用 spawn_blocking 挪到阻塞线程池，避免占住异步运行时线程。
@@ -465,6 +489,12 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
                 .and_then(|c| c.as_str())
                 .unwrap_or("")
                 .to_string();
+            let sid = s
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
             let port: u16 = s
                 .get("listen_address")
                 .and_then(|v| v.as_u64().map(|n| n as u16))
@@ -479,14 +509,24 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("127.0.0.1")
                 .to_string();
-            let child_alive = children
-                .get_mut(&name)
+            // 子进程表 key：桌面端以 id 启停（阶段1 id 化）；保留按 name 兼容查找一个版本周期
+            let child_key: Option<String> = if !sid.is_empty() && children.contains_key(&sid) {
+                Some(sid.clone())
+            } else if children.contains_key(&name) {
+                Some(name.clone())
+            } else {
+                None
+            };
+            let child_alive = child_key
+                .and_then(|k| children.get_mut(&k))
                 .map(|c| c.try_wait().ok().flatten().is_none())
                 .unwrap_or(false);
             let running = child_alive || (port > 0 && port_open(&host, port));
             let mut svc = serde_json::json!({
+                "id": sid,
                 "name": name,
                 "running": running,
+                "enabled": enabled,
                 "port": port,
                 "host": host,
                 "mode": mode,
@@ -595,10 +635,11 @@ async fn get_stats(
     // 全量读 jsonl + 按月重算费用较重，异步执行 + stats.rs 内部 TTL 缓存
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
+        let svc_name = resolve_service_name(&state, &service);
         let r = range.as_deref().unwrap_or("today");
         stats::get_stats(
             &stats_dir(&state),
-            &service,
+            &svc_name,
             &primary_service(&state),
             r,
             start.as_deref(),
@@ -619,7 +660,8 @@ async fn get_daily(
 ) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        stats::get_daily(&stats_dir(&state), &service, &primary_service(&state), &start, &end)
+        let svc_name = resolve_service_name(&state, &service);
+        stats::get_daily(&stats_dir(&state), &svc_name, &primary_service(&state), &start, &end)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -629,7 +671,8 @@ async fn get_daily(
 async fn get_live(app: tauri::AppHandle, service: String) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        stats::get_live(&stats_dir(&state), &service, &primary_service(&state))
+        let svc_name = resolve_service_name(&state, &service);
+        stats::get_live(&stats_dir(&state), &svc_name, &primary_service(&state))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1139,6 +1182,7 @@ pub fn run() {
             read_config,
             save_config,
             get_status,
+            is_port_open,
             start_service,
             stop_service,
             toggle_service,
@@ -1277,6 +1321,18 @@ pub fn run() {
             // 创建：运行时动态创建透明 WebView2 会卡死事件循环（已实测验证），
             // macOS/Linux 也统一预创建，走同一套单窗逻辑。
             create_float_window(app.handle(), "float", "")?;
+
+            // autostart（§2.1/§5.2C）：延迟 1.2s 等窗口/托盘初始化完成后，
+            // 自动拉起标记 autostart=true 的服务（阻塞线程池里 sleep + 串行启动）
+            let app2 = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    let state = app2.state::<AppState>();
+                    let _ = crate::proxy::start_autostart(&state);
+                })
+                .await;
+            });
 
             Ok(())
         })
