@@ -434,7 +434,11 @@
       <span>o2a-proxy · v0.1.0</span>
       <button class="link-btn" @click="quitApp">退出应用</button>
     </footer>
-    <div id="toast" class="toast" :class="{ show: !!toast, [toastType]: !!toast }">{{ toast }}</div>
+    <div id="toast" class="toast" :class="{ show: !!toast, [toastType]: !!toast }">
+      <span class="toast-msg">{{ toast }}</span>
+      <button v-if="toastAction" class="toast-act" @click="onToastAction">{{ toastAction.label }}</button>
+      <button v-if="toast && toastAction" class="toast-x" @click="dismissToast">×</button>
+    </div>
     <ConfirmDialog
       :open="!!confirmBox"
       :title="confirmBox?.title || ''"
@@ -526,25 +530,49 @@ function onTabsWheel(e: WheelEvent) {
 const page = ref<"stats" | "config" | "accounts">("stats");
 type RangeKey = "today" | "yesterday" | "week" | "lastweek" | "month" | "lastmonth" | "custom";
 // 区间档位（历史档由日历点选自定义区间替代，仅今日/本月暴露为主档）
+// 区间档位：下拉可选档 = 主档 + 快捷预设（近7天/近30天）；lastweek/lastmonth
+// 仅保留 label 兼容（原 rangeOptions 死代码，§10.2-2 统一取值集合）
 const rangeOptions: { value: RangeKey; label: string }[] = [
   { value: "today", label: "今日" },
   { value: "yesterday", label: "昨日" },
   { value: "week", label: "本周" },
-  { value: "lastweek", label: "上周" },
   { value: "month", label: "本月" },
-  { value: "lastmonth", label: "上月" },
 ];
-function readRange(): RangeKey {
-  // 仅接受主界面暴露的档位（今日 / 本月）；自定义区间不记忆，刷新回今日
+// 持久化偏好（§10.2-2）：下拉全集 today/yesterday/week/month/7d/30d 都可记忆，
+// 重启后按同一语义恢复（7d/30d 重算相对日期）；自定义区间不记忆（原行为）
+function readRangePref(): { range: RangeKey; preset: string | null } {
   try {
     const v = localStorage.getItem("o2a-stats-range");
-    if (v === "today" || v === "month") return v as RangeKey;
+    if (v === "today" || v === "yesterday" || v === "week" || v === "month") {
+      return { range: v as RangeKey, preset: null };
+    }
+    if (v === "7d" || v === "30d") return { range: "custom", preset: v };
   } catch (_) {}
-  return "today";
+  return { range: "today", preset: null };
 }
-const range = ref<RangeKey>(readRange());
+const _rangePref = readRangePref();
+const range = ref<RangeKey>(_rangePref.range);
+const presetKey = ref<string | null>(_rangePref.preset);
+function persistRangePref() {
+  try {
+    if (range.value === "custom") {
+      if (presetKey.value) localStorage.setItem("o2a-stats-range", presetKey.value);
+      else localStorage.removeItem("o2a-stats-range");
+    } else {
+      localStorage.setItem("o2a-stats-range", range.value);
+    }
+  } catch (_) {}
+}
 const calOpen = ref(false);
 const customRange = ref<{ start: string; end: string } | null>(null);
+// 启动时恢复「近7天/近30天」预设：按当天重算区间（不触发 loadStats，由 onMounted 统一拉取）
+if (presetKey.value) {
+  const now = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  const iso = (d: Date) => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const days = presetKey.value === "7d" ? 6 : 29;
+  customRange.value = { start: iso(new Date(now.getTime() - days * 86400000)), end: iso(now) };
+}
 const modelFilter = ref<string>("");
 const toast = ref("");
 const toastType = ref<"info" | "success" | "error">("info");
@@ -769,9 +797,18 @@ function removeAccount(acc: any) {
     "删除账号",
     `确定删除账号「${acc.name || acc.id}」？\n其 API Key 与端点将从配置中移除，保存后生效。`,
     () => {
+      const idx = (cfg.accounts || []).indexOf(acc);
       cfg.accounts = cfg.accounts.filter((a: any) => a.id !== acc.id);
       if (editingAcc.value === acc.id) editingAcc.value = null;
-      showToast("已删除账号，点击保存配置生效", "success");
+      // §10.2-5 撤销：仅内存态回滚（未保存不落盘）
+      showToast(`已删除账号「${acc.name || acc.id}」，点击保存配置生效`, "success", {
+        label: "撤销",
+        fn: () => {
+          if (idx >= 0) (cfg.accounts || []).splice(idx, 0, acc);
+          else (cfg.accounts || []).push(acc);
+          showToast(`已恢复账号「${acc.name || acc.id}」`, "success");
+        },
+      });
     },
     "删除"
   );
@@ -905,11 +942,31 @@ async function warmModels() {
 }
 
 let toastTimer: any = null;
-function showToast(msg: string, type: "info" | "success" | "error" = "info") {
+// §10.2-5 Toast 增强：支持动作按钮（如「撤销」）与手动关闭
+const toastAction = ref<{ label: string; fn: () => void } | null>(null);
+function showToast(msg: string, type: "info" | "success" | "error" = "info",
+                   action?: { label: string; fn: () => void }) {
   toast.value = msg;
   toastType.value = type;
+  toastAction.value = action || null;
   if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (toast.value = ""), type === "error" ? 4200 : 2200);
+  const ttl = action ? 5000 : type === "error" ? 4200 : 2200;
+  toastTimer = setTimeout(() => {
+    toast.value = "";
+    toastAction.value = null;
+  }, ttl);
+}
+function onToastAction() {
+  const act = toastAction.value;
+  if (toastTimer) clearTimeout(toastTimer);
+  toast.value = "";
+  toastAction.value = null;
+  act?.fn();
+}
+function dismissToast() {
+  if (toastTimer) clearTimeout(toastTimer);
+  toast.value = "";
+  toastAction.value = null;
 }
 
 // 退出应用：确认（运行中的代理会被停止）
@@ -1141,9 +1198,19 @@ function batchRemove(ids: string[]) {
     `确定删除 ${ids.length} 个服务？\n保存配置后生效。`,
     () => {
       const idSet = new Set(ids);
+      const removed = (cfg.services || []).filter((x: any) => idSet.has(x.id || x.comment));
       for (const id of ids) api.stopService(id).catch(() => {});
       cfg.services = cfg.services.filter((x: any) => !idSet.has(x.id || x.comment));
-      showToast(`已删除 ${ids.length} 个服务，点击保存生效`, "success");
+      // §10.2-5 批量撤销：整体恢复（未保存不落盘）
+      showToast(`已删除 ${ids.length} 个服务，点击保存生效`, "success", {
+        label: "撤销",
+        fn: () => {
+          for (const s of removed) {
+            if (!(cfg.services || []).includes(s)) (cfg.services || []).push(s);
+          }
+          showToast(`已恢复 ${removed.length} 个服务`, "success");
+        },
+      });
     },
     "删除"
   );
@@ -1502,11 +1569,22 @@ function removeSvc(target?: any) {
       ? `服务「${name}」正在运行，删除将先停止它并从配置中移除。\n保存配置后生效。`
       : `确定删除服务「${name}」？\n保存配置后生效。`,
     () => {
+      const idx = (cfg.services || []).indexOf(s);
       if (running) api.stopService(s.id || s.comment).catch(() => {});
       cfg.services = cfg.services.filter((x: any) => x.id !== s.id);
       selectedSvc.value = null;
       selected.value = ALL;
-      showToast("已删除服务，点击保存生效", "success");
+      // §10.2-5 撤销：仅内存态回滚（未保存不落盘）
+      showToast(`已删除服务「${name}」，点击保存生效`, "success", {
+        label: "撤销",
+        fn: () => {
+          if (idx >= 0) (cfg.services || []).splice(idx, 0, s);
+          else (cfg.services || []).push(s);
+          selectedSvc.value = s;
+          selected.value = s.id || s.comment;
+          showToast(`已恢复「${name}」`, "success");
+        },
+      });
     },
     "删除"
   );
@@ -2020,21 +2098,20 @@ const liveSum = computed(() => {
 
 function setRange(r: RangeKey) {
   range.value = r;
-  try {
-    if (r === "custom") localStorage.removeItem("o2a-stats-range");
-    else localStorage.setItem("o2a-stats-range", r);
-  } catch (_) {}
+  presetKey.value = null;
+  persistRangePref();
   modelFilter.value = "";
   calOpen.value = false;
   loadStats();
 }
 
-// 时间区间下拉的当前值：今日/昨日/本周/本月直接映射；自定义区间统一回 "custom"
-const rangeSelectValue = computed(() =>
-  ["today", "yesterday", "week", "month"].includes(range.value)
-    ? range.value
-    : "custom"
-);
+// 时间区间下拉的当前值（§10.2-1 修复）：主档直接映射；预设（近7天/近30天）保持
+// 预设键显示"近 7 天"而非跳成"自定义"；仅日历手选的区间才显示"自定义"
+const rangeSelectValue = computed(() => {
+  if (presetKey.value) return presetKey.value;
+  if (["today", "yesterday", "week", "month"].includes(range.value)) return range.value;
+  return "custom";
+});
 
 // 时间区间下拉选项（与模型过滤等下拉统一用 SelectBox 组件）；自定义区间时追加动态 label
 const rangeSelectOptions = computed(() => {
@@ -2046,7 +2123,9 @@ const rangeSelectOptions = computed(() => {
     { value: "7d", label: "近 7 天" },
     { value: "30d", label: "近 30 天" },
   ];
-  if (range.value === "custom") opts.push({ value: "custom", label: `自定义 ${rangeLabel.value}` });
+  if (!presetKey.value && range.value === "custom") {
+    opts.push({ value: "custom", label: `自定义 ${rangeLabel.value}` });
+  }
   return opts;
 });
 
@@ -2055,18 +2134,19 @@ function onRangeSelect(v: string) {
   if (["today", "yesterday", "week", "month"].includes(v)) {
     setRange(v as RangeKey);
   } else if (v === "7d" || v === "30d") {
+    presetKey.value = v;
     onQuickRange(v);
   }
   // v === "custom"：当前已是自定义，无需处理
 }
 
-// 自定义区间：起止日期（YYYY-MM-DD）；保持日历展开，便于用户看到选中区间并可微调
-function setCustomRange(start: string, end: string) {
+// 自定义区间：起止日期（YYYY-MM-DD）；保持日历展开，便于用户看到选中区间并可微调。
+// fromPreset：来自"近7天/近30天"快捷（保持预设键以正确显示下拉文案并持久化）
+function setCustomRange(start: string, end: string, fromPreset = false) {
   customRange.value = { start, end };
   range.value = "custom";
-  try {
-    localStorage.removeItem("o2a-stats-range");
-  } catch (_) {}
+  if (!fromPreset) presetKey.value = null;
+  persistRangePref();
   modelFilter.value = "";
   loadStats();
 }
@@ -2083,12 +2163,12 @@ function onCalQuick(key: string) {
   if (key === "yesterday") {
     const y = new Date(now.getTime() - 86400000);
     const s = iso(y);
-    setCustomRange(s, s);
+    setCustomRange(s, s); // 日历手选性质：清除预设键
     return;
   }
   const days = key === "7d" ? 6 : 29;
   const start = iso(new Date(now.getTime() - days * 86400000));
-  setCustomRange(start, iso(now));
+  setCustomRange(start, iso(now), true);
 }
 
 // 图表头部快捷区间：近7天 / 近30天（复用日历快捷逻辑）
@@ -2141,7 +2221,34 @@ watch(
   { deep: true }
 );
 
-let timers: any[] = [];
+// ---------- §10.1 单一心跳轮询 ----------
+// 原 4 个独立 setInterval（3s 状态 / 5s 统计 / 3s 实时 / 10s 账号）收敛为
+// 单一 1s tick，按各自周期分发；暂停条件（面板隐藏 / 文档隐藏）只判一处。
+// 统计轮询自适应降频：连续无变化时 5s → 15s。
+let heartbeat: any = null;
+let lastStatus = 0, lastStats = 0, lastLive = 0, lastAcc = 0;
+let statsIdleCount = 0;
+const statsInterval = () => (statsIdleCount >= 3 ? 15000 : 5000);
+function heartbeatTick() {
+  if (!panelVisible.value || document.hidden) return;
+  const now = Date.now();
+  if (now - lastStatus >= 3000) { lastStatus = now; loadStatus(); }
+  if (now - lastLive >= 3000) { lastLive = now; loadLive(); }
+  if (now - lastStats >= statsInterval()) {
+    lastStats = now;
+    const before = stats.today;
+    loadStats().then(() => {
+      // 无变化 → 计数+1（触发降频）；有变化 → 复位
+      if (JSON.stringify(stats.today) === JSON.stringify(before)) statsIdleCount = Math.min(statsIdleCount + 1, 5);
+      else statsIdleCount = 0;
+    });
+  }
+  if (now - lastAcc >= 10000) { lastAcc = now; loadAccountStats(); }
+}
+function startHeartbeat() {
+  lastStatus = lastStats = lastLive = lastAcc = 0;
+  heartbeat = setInterval(heartbeatTick, 1000);
+}
 // 面板可见性：隐藏时暂停轮询，避免面板长期隐藏期间空转 + 反复全量读统计。
 // 托盘点击/失焦收起由 Rust 发 panel-visible 事件通知（可靠），再叠加
 // document.hidden（WebView2 窗口隐藏时可见性置位）双保险；
@@ -2192,14 +2299,11 @@ onMounted(async () => {
   watchSystemTheme(() => emitTheme());
   emitTheme();
   nextTick(onTabsScroll);
-  timers.push(setInterval(() => { if (panelVisible.value) loadStatus(); }, 3000));
-  timers.push(setInterval(() => { if (panelVisible.value) loadStats(); }, 5000));
-  timers.push(setInterval(() => { if (panelVisible.value) loadLive(); }, 3000));
-  timers.push(setInterval(() => { if (panelVisible.value) loadAccountStats(); }, 10000));
+  startHeartbeat();
 });
 onUnmounted(() => {
   unlistenPanel?.();
   document.removeEventListener("visibilitychange", onVisibilityChange);
-  timers.forEach(clearInterval);
+  if (heartbeat) clearInterval(heartbeat);
 });
 </script>

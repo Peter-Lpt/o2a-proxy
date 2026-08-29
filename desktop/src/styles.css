@@ -635,7 +635,7 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
   box-shadow: var(--shadow);
   opacity: 0; pointer-events: none; transition: all 0.22s ease; z-index: 99;
 }
-.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; }
 .toast.success {
   background: var(--green-dim);
   border-color: rgba(52, 211, 153, 0.45);
@@ -646,6 +646,20 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
   border-color: rgba(248, 113, 113, 0.45);
   color: var(--red);
 }
+/* §10.2-5 Toast 动作按钮（撤销/打开配置）与手动关闭 */
+.toast .toast-msg { flex: 1; }
+.toast { display: flex; align-items: center; gap: 9px; max-width: 86%; }
+.toast .toast-act {
+  flex: none; font-size: 11px; font-weight: 600; color: var(--blue);
+  background: var(--blue-dim); border: 1px solid rgba(79, 140, 255, 0.35);
+  border-radius: 7px; padding: 2px 9px; cursor: pointer;
+}
+.toast .toast-act:hover { filter: brightness(1.12); }
+.toast .toast-x {
+  flex: none; font-size: 13px; line-height: 1; color: inherit; opacity: 0.6;
+  cursor: pointer; padding: 0 2px;
+}
+.toast .toast-x:hover { opacity: 1; }
 
 /* 刷新按钮加载旋转 */
 .icon-btn.spinning svg { animation: spin 0.8s linear infinite; }

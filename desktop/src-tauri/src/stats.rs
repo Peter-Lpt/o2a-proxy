@@ -515,10 +515,46 @@ fn day_to_series(dd: &Value) -> Value {
     v
 }
 
-/// get_stats 短时缓存（TTL 2.5s）：面板 5s 轮询 + 账号聚合每 10s 按服务各调
-/// 一次，全部重读 jsonl 并遍历当月重算费用开销大，同批轮询只扫一遍文件。
-/// 键含统计目录，避免不同目录/测试间串缓存。
-static STATS_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
+/// §10.1 多槽短时缓存：替代原单槽实现（"全部"视图与各服务/各悬浮窗交替轮询
+/// 时互相顶掉、命中率低）。HashMap<key, (Instant, Value)> + 条目数上限，
+/// 单条 TTL 不变；键含统计目录，避免不同目录/测试间串缓存。
+struct SlotCache {
+    ttl: Duration,
+    max: usize,
+    map: std::collections::HashMap<String, (Instant, Value)>,
+}
+
+impl SlotCache {
+    fn new(ttl_ms: u64, max: usize) -> Self {
+        Self { ttl: Duration::from_millis(ttl_ms), max, map: Default::default() }
+    }
+
+    fn get(&self, key: &str) -> Option<Value> {
+        let (t, v) = self.map.get(key)?;
+        if t.elapsed() < self.ttl {
+            Some(v.clone())
+        } else {
+            None
+        }
+    }
+
+    fn set(&mut self, key: String, v: Value) {
+        if self.map.len() >= self.max && !self.map.contains_key(&key) {
+            // 淘汰最旧条目
+            if let Some(oldest) = self
+                .map
+                .iter()
+                .min_by_key(|(_, (t, _))| *t)
+                .map(|(k, _)| k.clone())
+            {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(key, (Instant::now(), v));
+    }
+}
+
+static STATS_CACHE: Mutex<Option<SlotCache>> = Mutex::new(None);
 
 pub fn get_stats(
     dir: &Path,
@@ -539,16 +575,19 @@ pub fn get_stats(
         end.unwrap_or(""),
         model
     );
-    if let Some((k, t, v)) = &*STATS_CACHE.lock().unwrap() {
-        if t.elapsed() < Duration::from_millis(2500) && k == &key {
-            let mut v = v.clone();
+    if let Some(cache) = &*STATS_CACHE.lock().unwrap() {
+        if let Some(mut v) = cache.get(&key) {
             // 命中缓存时刷新时间戳，面板上“更新于”仍保持接近实时
             v["updatedAt"] = json!(chrono::Local::now().to_rfc3339());
             return Ok(v);
         }
     }
     let out = get_stats_impl(dir, service, primary, range, start, end, model)?;
-    *STATS_CACHE.lock().unwrap() = Some((key, Instant::now(), out.clone()));
+    STATS_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| SlotCache::new(2500, 32))
+        .set(key, out.clone());
     Ok(out)
 }
 
@@ -882,21 +921,25 @@ fn daily_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, Naive
     out
 }
 
-/// get_live 短时缓存（TTL 1.5s）：面板与各悬浮窗每 3s 各读一次今日 jsonl，
+/// get_live 短时缓存（TTL 1.5s，多槽 §10.1）：面板与各悬浮窗每 3s 各读一次今日 jsonl，
 /// 高频轮询下避免重复全量读取。
-static LIVE_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
+static LIVE_CACHE: Mutex<Option<SlotCache>> = Mutex::new(None);
 
 pub fn get_live(dir: &Path, service: &str, primary: &str) -> Result<Value, String> {
     // 缓存 key 带上日期：跨天时避免命中昨天日期的旧缓存（防御旧记录混入新列表）
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
     let key = format!("{}|{}|{}|{}", dir.to_string_lossy(), service, primary, today_str);
-    if let Some((k, t, v)) = &*LIVE_CACHE.lock().unwrap() {
-        if t.elapsed() < Duration::from_millis(1500) && k == &key {
-            return Ok(v.clone());
+    if let Some(cache) = &*LIVE_CACHE.lock().unwrap() {
+        if let Some(v) = cache.get(&key) {
+            return Ok(v);
         }
     }
     let out = get_live_impl(dir, service, primary)?;
-    *LIVE_CACHE.lock().unwrap() = Some((key, Instant::now(), out.clone()));
+    LIVE_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| SlotCache::new(1500, 32))
+        .set(key, out.clone());
     Ok(out)
 }
 
@@ -924,8 +967,8 @@ fn get_live_impl(dir: &Path, service: &str, primary: &str) -> Result<Value, Stri
     }))
 }
 
-/// get_daily 短时缓存（TTL 2.5s）：日历热力图轮询时避免重复全量读取
-static DAILY_CACHE: Mutex<Option<(String, Instant, Value)>> = Mutex::new(None);
+/// get_daily 短时缓存（TTL 2.5s，多槽 §10.1）：日历热力图轮询时避免重复全量读取
+static DAILY_CACHE: Mutex<Option<SlotCache>> = Mutex::new(None);
 
 /// 返回 [start, end] 区间内每日请求数（热力图用），含 0 值补全。
 pub fn get_daily(
@@ -936,9 +979,9 @@ pub fn get_daily(
     end: &str,
 ) -> Result<Value, String> {
     let key = format!("{}|{}|{}|{}|{}", dir.to_string_lossy(), service, primary, start, end);
-    if let Some((k, t, v)) = &*DAILY_CACHE.lock().unwrap() {
-        if t.elapsed() < Duration::from_millis(2500) && k == &key {
-            return Ok(v.clone());
+    if let Some(cache) = &*DAILY_CACHE.lock().unwrap() {
+        if let Some(v) = cache.get(&key) {
+            return Ok(v);
         }
     }
     let pricing = load_pricing(dir);
@@ -961,7 +1004,11 @@ pub fn get_daily(
         out.push(json!({"date": ds, "requests": req, "cost": (cost * 10000.0).round() / 10000.0}));
     }
     let v = json!({"daily": out});
-    *DAILY_CACHE.lock().unwrap() = Some((key, Instant::now(), v.clone()));
+    DAILY_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| SlotCache::new(2500, 32))
+        .set(key, v.clone());
     Ok(v)
 }
 

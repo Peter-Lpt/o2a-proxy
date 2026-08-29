@@ -41,6 +41,21 @@
     <div v-if="open" class="sb-mask" data-tauri-drag-region="false" @mousedown="close"></div>
 
     <div v-if="open" class="sb-menu" :style="menuStyle" role="listbox">
+      <!-- §10.2-6：非 custom 模式同样提供搜索（模型一多不用滚动查找） -->
+      <div v-if="!allowCustom && (opts.length > 8 || query)" class="sb-search">
+        <input
+          ref="searchEl"
+          v-model="query"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder="搜索…"
+          @keydown.esc.stop="close"
+          @keydown.down.prevent="moveHighlight(1)"
+          @keydown.up.prevent="moveHighlight(-1)"
+          @keydown.enter.prevent="pickHighlighted"
+        />
+      </div>
       <button
         v-for="(opt, i) in visibleOptions"
         :key="opt.value"
@@ -60,7 +75,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 
 const props = defineProps<{
@@ -75,6 +90,7 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: "update:modelValue", v: string): void }>();
 
 const rootEl = ref<HTMLElement | null>(null);
+const searchEl = ref<HTMLInputElement | null>(null);
 const open = ref(false);
 const query = ref("");
 const menuStyle = ref<Record<string, string>>({});
@@ -97,7 +113,7 @@ const currentLabel = computed(
 );
 
 const visibleOptions = computed(() => {
-  if (!props.allowCustom || !query.value) return opts.value;
+  if (!query.value) return opts.value;
   const q = query.value.toLowerCase();
   return opts.value.filter(
     (o) => o.value.toLowerCase().includes(q) || (o.label || "").toLowerCase().includes(q)
@@ -150,11 +166,16 @@ function openMenu() {
   // 高亮当前值，便于键盘直接确认
   const idx = visibleOptions.value.findIndex((o) => o.value === props.modelValue);
   highlightIndex.value = idx >= 0 ? idx : 0;
+  // 非 custom 模式打开后聚焦搜索框（下一帧等渲染）
+  if (!props.allowCustom) {
+    nextTick(() => searchEl.value?.focus());
+  }
 }
 
 function close() {
   open.value = false;
   highlightIndex.value = -1;
+  if (!props.allowCustom) query.value = ""; // custom 模式的 query 即输入文本，不清
 }
 
 function toggle() {
@@ -220,6 +241,11 @@ watch(
     if (props.allowCustom) query.value = v;
   }
 );
+
+// 非 custom 模式搜索时高亮复位，避免指向被过滤掉的项
+watch(query, () => {
+  if (!props.allowCustom && open.value) highlightIndex.value = 0;
+});
 
 window.addEventListener("scroll", onViewportChange, true);
 window.addEventListener("resize", onViewportChange);
@@ -382,5 +408,23 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--muted-2);
   text-align: center;
+}
+.sb-search {
+  padding: 2px 2px 4px;
+  border-bottom: 1px solid var(--border-soft);
+  margin-bottom: 3px;
+}
+.sb-search input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  color: var(--text);
+  outline: none;
+}
+.sb-search input:focus {
+  border-color: var(--blue);
 }
 </style>
