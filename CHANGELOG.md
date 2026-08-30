@@ -5,19 +5,19 @@
 
 ## [Unreleased]
 
-### 价格架构完善（《价格架构完善方案.md》P0-P4 核心）
+### 价格架构完善
 
-- **P0 地基**：`CostResult` 增加 `complete/currency/rule_id/source/updated_at/approximate`
+- **费用结果增强**：`CostResult` 增加 `complete/currency/rule_id/source/updated_at/approximate`
   （Python 内部 API 返回；UI 默认不切换 `—`，避免存量回归）；`CacheStats._calc_cost` 与 Rust
   `recalc_cost` 均传入 `service_id`，服务级定价真正生效；`pricing_extra.batch` 注入
   `meta.batch=true`，batch modifier 可应用；free_quota/cumulative 累计口径继续以共享 golden 固化。
-- **P1 历史价格**：`pricing.json` v3 `rules`（事件时间区间 + 最具体 scope 优先 + 重叠校验）；
+- **历史价格规则**：`pricing.json` v3 `rules`（事件时间区间 + 最具体 scope 优先 + 重叠校验）；
   同一模型不同日期命中不同规则；有 rules 未命中时 fail-closed 返回 `complete=false`；
   新增 `pricing_fingerprint` 与 `GET /pricing-meta`；`POST /pricing-reload` 显式清缓存热加载；
   Python `/stats` 改为从 JSONL 按事件时间派生费用（summary 仅作旧数据回退）。
-- **P2 套餐/额度**：新增 `plans.json` 套餐目录（included/overage/free_tier/windows/version）；
+- **套餐目录**：新增 `plans.json` 套餐目录（included/overage/free_tier/windows/version）；
   `services[].pricing.plan` 在 `/quota` 快照中补全套餐名、额度与超额定义。
-- **P3 第三方适配**：新增 `declarative`、`opencode-go`、`zai`（含 `glm-coding-plan` 别名）
+- **第三方配额适配**：新增 `declarative`、`opencode-go`、`zai`（含 `glm-coding-plan` 别名）
   与 OpenRouter credits 模式；失败降级 local 并标 stale；mock 单测覆盖。
 - **订阅消耗展示**：OpenCode Go 适配器升级为 Cookie + 工作区页（rolling/weekly/monthly），
    新增 ChatGPT / Codex 订阅适配器（chatgpt.com wham/usage + OAuth token/refresh）；引擎 /quota
@@ -28,10 +28,10 @@
 
 ## [0.3.0] - 2026-08-28
 
-综合优化方案（《综合优化方案.md》）阶段 0-5 落地：安全鉴权、服务身份 id 化、
+安全鉴权、服务身份 id 化、
 模型白名单、定价引擎 v2、订阅额度、配置热加载与统计/面板体验重构。
 
-### 安全（P0）
+### 安全
 
 - **引擎接入层鉴权**：`services[].auth_token`（服务级，顶层 `auth_token` 全局兜底）非空时，
   所有路径校验 `Authorization: Bearer` / `x-api-key`，`/health` 恒放行探活；未配置凭证的
@@ -126,15 +126,15 @@
 
 ## [0.1.1] - 2026-08-12
 
-协议审计专项修复（30 项问题，含 3 个 P1 级流式终止缺陷，均已在真实引擎上实证复现并修复）。
+协议审计专项修复（30 项问题，含 3 个流式终止缺陷，均已在真实引擎上实证复现并修复）。
 
-### 修复（P1 —— 客户端挂起 / usage 错乱）
+### 修复（客户端挂起 / usage 错乱）
 
 - **流式终止兜底**：claude 流上游 EOF 无 `[DONE]` 时补发 `message_delta` / `message_stop`（含 thinking / 工具块闭合），并补 `record_stats`；`STREAM_TIMEOUT` 收尾同步补统计与工具块闭合
 - **Responses 转换流终止**：`[DONE]` / EOF 时 flush `_ResponsesStreamTranslator._finish()` 补发 done 事件与 `response.completed`（此前无 finish_reason 的流永不结束）
 - **completed usage 修复**：`response.completed` 延迟到流结束发射（usage 尾块先到达），usage 不再为 null；`_finish` / `complete` 幂等化
 
-### 修复（P2 —— 映射与语义丢失）
+### 修复（映射与语义丢失）
 
 - `tool_choice="any"`（Anthropic 必须调用）→ 单工具绑定 / 多工具 `required`，dict 形式不再静默丢弃
 - DeepSeek 顶层 `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` 计入缓存读，命中率统计不再失真
@@ -142,7 +142,7 @@
 - 非 200 上游错误体原样透传（去掉 `[:300]` 截断，429 `Retry-After` 等错误码信息不再丢失）
 - `max_tokens` 统一 131072 封顶（`convert_request` 与 `_responses_to_chat` 两条转换路径，避免 1M 上下文默认值触发上游 400）
 
-### 修复（P3/P4 —— 中低危与稳定性）
+### 修复（中低危与稳定性）
 
 - 三个流式 handler（passthrough / codex / direct）异常时发流内 `error` event，客户端不再挂起到自身超时
 - 流式 `stop_reason` 映射带 `has_tool_calls`；对外 usage 补 `reasoning_tokens` 字段
