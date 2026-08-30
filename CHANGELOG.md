@@ -3,6 +3,25 @@
 本项目版本格式遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。桌面客户端版本同时记录于
 `desktop/package.json`、`desktop/src-tauri/Cargo.toml`、`desktop/src-tauri/tauri.conf.json`（三处保持一致）。
 
+## [Unreleased]
+
+### 价格架构完善（《价格架构完善方案.md》P0-P4 核心）
+
+- **P0 地基**：`CostResult` 增加 `complete/currency/rule_id/source/updated_at/approximate`
+  （Python 内部 API 返回；UI 默认不切换 `—`，避免存量回归）；`CacheStats._calc_cost` 与 Rust
+  `recalc_cost` 均传入 `service_id`，服务级定价真正生效；`pricing_extra.batch` 注入
+  `meta.batch=true`，batch modifier 可应用；free_quota/cumulative 累计口径继续以共享 golden 固化。
+- **P1 历史价格**：`pricing.json` v3 `rules`（事件时间区间 + 最具体 scope 优先 + 重叠校验）；
+  同一模型不同日期命中不同规则；有 rules 未命中时 fail-closed 返回 `complete=false`；
+  新增 `pricing_fingerprint` 与 `GET /pricing-meta`；`POST /pricing-reload` 显式清缓存热加载；
+  Python `/stats` 改为从 JSONL 按事件时间派生费用（summary 仅作旧数据回退）。
+- **P2 套餐/额度**：新增 `plans.json` 套餐目录（included/overage/free_tier/windows/version）；
+  `services[].pricing.plan` 在 `/quota` 快照中补全套餐名、额度与超额定义。
+- **P3 第三方适配**：新增 `declarative`、`opencode-go`、`zai`（含 `glm-coding-plan` 别名）
+  与 OpenRouter credits 模式；失败降级 local 并标 stale；mock 单测覆盖。
+- **双端一致性**：`pricing/golden/cases.json` 新增 v3 历史规则、scope 精确优先、batch、
+  完整性用例；pytest 与 cargo test 全绿。
+
 ## [0.3.0] - 2026-08-28
 
 综合优化方案（《综合优化方案.md》）阶段 0-5 落地：安全鉴权、服务身份 id 化、

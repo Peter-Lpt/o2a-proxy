@@ -39,7 +39,7 @@ fn find_service<'a>(services: &'a [serde_json::Value], name: &str) -> Option<&'a
         if mode != "claude" && mode != "codex" && mode != "direct" && mode != "auto" {
             return false;
         }
-        // 同时接受 id（§2 服务身份 id 化）与 comment（老配置/老脚本兼容），端口亦可用
+        // 同时接受 id（ 服务身份 id 化）与 comment（老配置/老脚本兼容），端口亦可用
         let sid = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let comment = s.get("comment").and_then(|c| c.as_str()).unwrap_or("");
         let port = s.get("listen_address").and_then(|p| p.as_str()).unwrap_or("");
@@ -264,7 +264,7 @@ pub fn start_all(state: &AppState) -> Result<(), String> {
     let services = config_services(state);
     let mut last_err = None;
     for s in &services {
-        // enabled=false：停用态不参与 start_all（优化方案 §2.1）
+        // enabled=false：停用态不参与 start_all
         if !is_service_enabled(s) {
             continue;
         }
@@ -288,7 +288,7 @@ pub fn start_all(state: &AppState) -> Result<(), String> {
     }
 }
 
-/// 启动 autostart=true 且 enabled 的服务（App 启动时自动拉起，§5.2C 生命周期）。
+/// 启动 autostart=true 且 enabled 的服务（App 启动时自动拉起， 生命周期）。
 pub fn start_autostart(state: &AppState) -> Result<(), String> {
     let services = config_services(state);
     let mut last_err = None;

@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-// §5.2A 服务列表视图（v2 精简）：去掉搜索 / 状态筛选 / 排序下拉 / 批量勾选 / 今日用量，
+//  服务列表视图（v2 精简）：去掉搜索 / 状态筛选 / 排序下拉 / 批量勾选 / 今日用量，
 // 职责收敛为两件事：
 //   1) 展示服务行（状态灯 / 名称 / 端口 / 模型 / 行内启停·克隆·删除），点击行进入配置页；
 //   2) 拖动 ⠿ 调整服务顺序：指针拖拽 + TransitionGroup FLIP 平滑换位。
@@ -70,7 +70,7 @@ const rows = computed(() => props.services);
 
 // ---------- 键盘可达性 ----------
 const rootEl = ref<HTMLElement | null>(null);
-// §10.4 Ctrl+K：打开列表后聚焦首行（原聚焦搜索框，搜索已移除）
+//  Ctrl+K：打开列表后聚焦首行（原聚焦搜索框，搜索已移除）
 defineExpose({
   focusList: () => rootEl.value?.querySelector<HTMLElement>(".slv-row")?.focus(),
 });

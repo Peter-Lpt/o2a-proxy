@@ -22,7 +22,7 @@ from .pricing import resolve_cost
 class CacheStats:
     """缓存命中统计：记录、聚合、查询。service 非空时按服务分目录写 summary。
 
-    服务身份 id 化（优化方案 §2.2）：service_id 非空时 summary 目录用 <id>，
+    服务身份 id 化：service_id 非空时 summary 目录用 <id>，
     读取时若 id 目录缺失回退 <旧名> 目录（历史数据双查）；JSONL 记录新增
     service_id 字段，service（显示名）字段保持原样不回改。
     """
@@ -38,6 +38,7 @@ class CacheStats:
         self._lock = threading.Lock()
         self._last_hour = None
         self._pricing = None
+        self._pricing_sig = None
         self._month_cum_cache = None  # (dir, month, sig) → 本账号当月累计 tokens
         os.makedirs(self._summary_root(), exist_ok=True)
         self._cleanup_old_files()
@@ -97,27 +98,34 @@ class CacheStats:
                     pass
 
     def _load_pricing(self):
-        """加载定价数据（缓存，取自项目根目录 pricing.json）。"""
-        if self._pricing is not None:
-            return self._pricing
+        """加载定价数据（带文件 mtime/size 签名缓存，热加载）。
+
+        文件变化后下次读取自动重载；不需要重启才生效。"""
         pricing_path = os.path.join(PROJECT_ROOT, "pricing.json")
         try:
-            with open(pricing_path, "r", encoding="utf-8") as f:
-                self._pricing = json.load(f)
+            st = os.stat(pricing_path)
+            sig = (st.st_mtime_ns, st.st_size)
+            if self._pricing is None or self._pricing_sig != sig:
+                with open(pricing_path, "r", encoding="utf-8") as f:
+                    self._pricing = json.load(f)
+                self._pricing_sig = sig
         except (OSError, ValueError):
-            self._pricing = {}
+            if self._pricing is None:
+                self._pricing = {}
+                self._pricing_sig = None
         return self._pricing
 
     def _calc_cost(self, model, input_tokens, cache_read, cache_write, output_tokens,
-                   account=None, timestamp=None, cumulative_tokens=None):
+                   account=None, timestamp=None, cumulative_tokens=None, meta=None):
         """计算单次请求的费用（CNY）。
 
         account 为账号 id（也可识别 name）；有账号级定价
         （pricing.json["accounts"][账号 id/name]）时优先，否则回退全局按模型名查找。
         timestamp 为记录本地时间（schedule 判定用）；
-        context_tokens（输入侧 prompt 总量）供 context_tier 阶梯判定（§7-④）；
-        cumulative_tokens（本月已消耗 tokens，早于本记录）供 free_quota 冲抵（§7-⑤）。
-        §7：解析与求值委托 o2a/pricing 包（v1 兼容映射在包内 loader，
+        context_tokens（输入侧 prompt 总量）供 context_tier 阶梯判定；
+        cumulative_tokens（本月已消耗 tokens，早于本记录）供 free_quota 冲抵。
+        meta 可携带 batch 等计价上下文。
+        解析与求值委托 o2a/pricing 包（v1 兼容映射在包内 loader，
         行为与旧实现逐字节一致，由 golden fixtures 固化）。
         """
         pricing = self._load_pricing()
@@ -132,14 +140,15 @@ class CacheStats:
                     break
         result = resolve_cost(
             pricing, model, input_tokens, cache_read, cache_write, output_tokens,
-            account_keys=keys, timestamp=timestamp,
+            account_keys=keys, service_id=self.service_id, timestamp=timestamp,
             context_tokens=input_tokens + cache_read + cache_write,
             cumulative_tokens=cumulative_tokens,
+            meta=meta,
         )
         return result["total"]
 
     def _month_cumulative_tokens(self, before_ts: str):
-        """本月已消耗 tokens（早于 before_ts 的记录，§7-⑤ free_quota 冲抵用）。
+        """本月已消耗 tokens（早于 before_ts 的记录， free_quota 冲抵用）。
 
         按 (目录, 月份, 文件签名) 缓存，文件追加后自动失效；签名只做 stat()，
         不重复读盘。统计口径与 Rust 读取端一致：input+cache_read+cache_write+output，
@@ -199,7 +208,8 @@ class CacheStats:
         cache_coverage = cache_read / denom_cov if denom_cov > 0 else 0.0
         return cache_hit_rate, cache_coverage
 
-    def _build_record(self, model, usage, error=None, meta=None, upstream_model=None):
+    def _build_record(self, model, usage, error=None, meta=None, upstream_model=None,
+                      batch=False):
         """构建一条统计记录。
 
         usage 为空时仍可记录一次错误调用（error 非空）。meta 可携带：
@@ -207,7 +217,8 @@ class CacheStats:
         - first_token_ms: 首 token 耗时（毫秒，流式请求）
         - output_tokens_per_sec: 输出 token 速度（tok/s）
 
-        §6 别名：model 为对外名（展示用），upstream_model 为实际上游名（计价用）。
+        batch=True 时给计价上下文注入 meta.batch=true，并在 JSONL 记录 batch 快照。
+        别名说明：model 为对外名（展示用），upstream_model 为实际上游名（计价用）。
         """
         input_tokens = usage.get("input_tokens", 0)
         cache_read = usage.get("cache_read_input_tokens", 0)
@@ -221,6 +232,7 @@ class CacheStats:
             upstream_model or model, input_tokens, cache_read, cache_write,
             output_tokens, account=self.account, timestamp=ts,
             cumulative_tokens=self._month_cumulative_tokens(ts),
+            meta={"batch": True} if batch else None,
         )
         record = {
             "timestamp": ts,
@@ -238,6 +250,8 @@ class CacheStats:
         }
         if self.service_id:
             record["service_id"] = self.service_id  # 稳定身份；service 显示名保持原样
+        if batch:
+            record["batch"] = True  # 计价上下文快照：重放时保持批量价口径
         if upstream_model and upstream_model != model:
             record["upstream_model"] = upstream_model  # 计价用上游名（双端一致）
         if error:
@@ -260,17 +274,18 @@ class CacheStats:
             f"out={record['output_tokens']:,}"
         )
 
-    def record(self, model, usage, error=None, meta=None, upstream_model=None):
+    def record(self, model, usage, error=None, meta=None, upstream_model=None,
+               batch=False):
         """记录一次请求的缓存统计（成功或失败）。
 
         error 非空时记录为一次失败调用；usage 可为空字典。meta 见 _build_record。
-        upstream_model 为实际上游模型名（§6 别名映射时用于计价），记录的 model
-        保持对外名。
+        upstream_model 为实际上游模型名（用于计价），记录的 model 保持对外名。
+        batch=True 时按批量价注入计价上下文。
         """
         if not usage and not error:
             return
         record = self._build_record(model, usage or {}, error=error, meta=meta,
-                                    upstream_model=upstream_model)
+                                    upstream_model=upstream_model, batch=batch)
 
         with self._lock:
             # 写入 JSONL（文件锁防多进程，仅 Unix 支持）
@@ -392,8 +407,131 @@ class CacheStats:
             else:
                 return {"error": f"unknown period: {period}"}
 
+    def _matches_record(self, rec):
+        """记录是否属于本 CacheStats 实例（服务 id/名/默认兜底）。
+
+        读取端统一按原始 JSONL 重放，服务维度用与 Rust 相同的
+        id/显示名任一命中规则。"""
+        sid = str(rec.get("service_id") or "")
+        rsvc = str(rec.get("service") or "")
+        if self.service_id and sid == self.service_id:
+            return True
+        if self.service and rsvc == self.service:
+            return True
+        if not self.service_id and not self.service:
+            return not sid and not rsvc
+        return False
+
     def _load_day_summary(self, date_str):
-        """加载某天的 summary JSON（id 目录优先，名字目录兜底），清理内部字段。"""
+        """返回某天的聚合统计（从原始 JSONL 派生费用）。
+
+        价格是目录/规则，读取端按记录 timestamp + 当前 pricing catalog 重算；
+        summary JSON 不再作为计费源（历史记录 JSONL 才是事实）。
+        若 JSONL 不存在（如被清理），回退旧 summary 文件保证历史展示不空。
+        """
+        path = os.path.join(self.stats_dir, f"{date_str}.jsonl")
+        records = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("status") == "error" or not self._matches_record(rec):
+                        continue
+                    records.append(rec)
+        except OSError:
+            return self._load_day_summary_file(date_str)
+
+        if not records:
+            return None
+
+        hours = {}
+        day = {
+            "requests": 0,
+            "total_input_tokens": 0,
+            "total_cache_read_tokens": 0,
+            "total_cache_write_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cost": 0.0,
+        }
+        for rec in records:
+            ts = str(rec.get("timestamp", ""))
+            hour = ts[11:13] if len(ts) >= 13 else ""
+            hour_cost = self._replay_record_cost(rec)
+            h = hours.setdefault(hour, {
+                "requests": 0,
+                "total_input_tokens": 0,
+                "total_cache_read_tokens": 0,
+                "total_cache_write_tokens": 0,
+                "total_output_tokens": 0,
+                "total_cost": 0.0,
+                "_hit_rate_sum": 0.0,
+                "_coverage_sum": 0.0,
+            })
+            h["requests"] += 1
+            h["total_input_tokens"] += rec.get("input_tokens", 0) or 0
+            h["total_cache_read_tokens"] += rec.get("cache_read_tokens", 0) or 0
+            h["total_cache_write_tokens"] += rec.get("cache_write_tokens", 0) or 0
+            h["total_output_tokens"] += rec.get("output_tokens", 0) or 0
+            h["total_cost"] += hour_cost
+            h["_hit_rate_sum"] += rec.get("cache_hit_rate", 0) or 0
+            h["_coverage_sum"] += rec.get("cache_coverage", 0) or 0
+            day["requests"] += 1
+            day["total_input_tokens"] += rec.get("input_tokens", 0) or 0
+            day["total_cache_read_tokens"] += rec.get("cache_read_tokens", 0) or 0
+            day["total_cache_write_tokens"] += rec.get("cache_write_tokens", 0) or 0
+            day["total_output_tokens"] += rec.get("output_tokens", 0) or 0
+            day["total_cost"] += hour_cost
+
+        hours_list = []
+        for hour in sorted(hours):
+            h = hours[hour]
+            req = h["requests"]
+            hours_list.append({
+                "hour": f"{date_str}T{hour}:00:00",
+                "requests": req,
+                "avg_cache_hit_rate": round(h["_hit_rate_sum"] / req, 4) if req else 0.0,
+                "avg_cache_coverage": round(h["_coverage_sum"] / req, 4) if req else 0.0,
+                "total_cache_read_tokens": h["total_cache_read_tokens"],
+                "total_cache_write_tokens": h["total_cache_write_tokens"],
+                "total_input_tokens": h["total_input_tokens"],
+                "total_output_tokens": h["total_output_tokens"],
+                "total_cost": round(h["total_cost"], 6),
+            })
+        denom_hit = day["total_cache_read_tokens"] + day["total_input_tokens"]
+        denom_cov = denom_hit + day["total_cache_write_tokens"]
+        day["avg_cache_hit_rate"] = round(
+            day["total_cache_read_tokens"] / denom_hit, 4
+        ) if denom_hit > 0 else 0.0
+        day["avg_cache_coverage"] = round(
+            day["total_cache_read_tokens"] / denom_cov, 4
+        ) if denom_cov > 0 else 0.0
+        return {"date": date_str, "hours": hours_list, "daily_total": day}
+
+    def _replay_record_cost(self, rec):
+        """按当前 pricing 重放单条记录费用（写入侧 cost 保留为快照，读取端以重算为准）。"""
+        if self.no_cost:
+            return 0.0
+        model = str(rec.get("upstream_model") or rec.get("model") or "")
+        return self._calc_cost(
+            model,
+            rec.get("input_tokens", 0) or 0,
+            rec.get("cache_read_tokens", 0) or 0,
+            rec.get("cache_write_tokens", 0) or 0,
+            rec.get("output_tokens", 0) or 0,
+            account=self.account or rec.get("account", ""),
+            timestamp=str(rec.get("timestamp") or ""),
+            cumulative_tokens=self._month_cumulative_tokens(str(rec.get("timestamp") or "")),
+            meta={"batch": True} if rec.get("batch") else None,
+        )
+
+    def _load_day_summary_file(self, date_str):
+        """回退：读取旧 summary JSON（id 目录优先，名字目录兜底），清理内部字段。"""
         summary = None
         for d in self._summary_read_dirs():
             summary_path = os.path.join(d, f"{date_str}.json")
@@ -530,6 +668,18 @@ def get_stats(service=None, account=None, no_cost=False, service_id=None):
                                          service=service, account=account, no_cost=no_cost,
                                          service_id=service_id)
     return _stats[key]
+
+
+def clear_pricing_cache():
+    """清空所有 CacheStats 的定价缓存（POST /pricing-reload 触发）。
+
+    下次读取 JSONL 时自动按新 pricing.json 重算；不修改 JSONL 中已写入的
+    cost 快照字段。"""
+    with _stats_lock:
+        for s in _stats.values():
+            s._pricing = None
+            s._pricing_sig = None
+            s._month_cum_cache = None
 
 
 def is_cache_stats_enabled():

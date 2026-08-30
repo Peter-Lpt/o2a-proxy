@@ -1,8 +1,8 @@
-"""free_quota modifier：周期免费额度冲抵（§7.6-②/⑤，pricing.json 已有字段）。
+"""free_quota modifier：周期免费额度冲抵（，pricing.json 已有字段）。
 
 用法：{"type": "free_quota", "period": "month", "unit": "tokens", "amount": 1000000}
 
-冲抵语义（最后一步，§7.3）：
+冲抵语义（最后一步，）：
 - remaining = max(0, amount - cumulative)（cumulative = 本周期内、当前记录之前
   已消耗的 tokens，由调用方从统计确定性计算：当月 ts 严格早于本记录的记录总量）
 - 本次请求 tokens = input + cache_read + cache_write + output（reasoning ⊂ output 不重复计）

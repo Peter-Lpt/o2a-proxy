@@ -1,4 +1,4 @@
-"""一次性迁移脚本：服务身份 id 化（优化方案 §2.2）。
+"""一次性迁移脚本：服务身份 id 化。
 
 用法（手动执行，禁止启动时自动迁移）：
     python scripts/migrate_service_ids.py --dry-run   # 只预览将要做的变更

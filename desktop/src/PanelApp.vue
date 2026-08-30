@@ -53,7 +53,7 @@
       </button>
     </div>
 
-    <!-- §5.2A 服务列表视图：服务 >6 自动启用，或手动切换；拖动行 ⠿ 调整顺序（松手自动保存） -->
+    <!--  服务列表视图：服务 >6 自动启用，或手动切换；拖动行 ⠿ 调整顺序（松手自动保存） -->
     <Transition name="slvroll">
       <div v-if="useListView" class="slv-roll">
         <div class="slv-roll-clip">
@@ -84,11 +84,11 @@
     </nav>
 
     <main>
-      <!-- 统计（§10.1 拆分为 views/StatsView.vue） -->
+      <!-- 统计（ 拆分为 views/StatsView.vue） -->
       <section v-show="page === 'stats'" class="panel stats-panel" :class="{ active: page === 'stats' }">
         <StatsView :theme="theme" @add-service="addService" @go-accounts="goAccounts" />
       </section>
-      <!-- 配置（§10.1 拆分为 views/ServicesView.vue） -->
+      <!-- 配置（ 拆分为 views/ServicesView.vue） -->
       <section v-show="page === 'config'" class="panel" :class="{ active: page === 'config' }">
         <ServicesView
           @save="saveConfig()"
@@ -99,7 +99,7 @@
           @reload="onLocationReload"
         />
       </section>
-      <!-- 账号（§10.1 拆分为 views/AccountsView.vue） -->
+      <!-- 账号（ 拆分为 views/AccountsView.vue） -->
       <section v-show="page === 'accounts'" class="panel" :class="{ active: page === 'accounts' }">
         <AccountsView :acc-stats="accStats" :acc-stats-state="accStatsState" @save="saveConfig()" />
       </section>
@@ -435,7 +435,7 @@ function goPage(p: "stats" | "config" | "accounts") {
   page.value = p;
 }
 
-// ---------- §5.2A 克隆服务 ----------
+// ----------  克隆服务 ----------
 function cloneService(svc?: any) {
   const s = svc || activeSvc.value;
   if (!s) return;
@@ -466,7 +466,7 @@ function removeById(id: string) {
   if (s) removeSvc(s);
 }
 
-// ---------- §5.2A 服务列表视图（>6 服务自动启用，或手动切换；拖动行 ⠿ 调整顺序） ----------
+// ----------  服务列表视图（>6 服务自动启用，或手动切换；拖动行 ⠿ 调整顺序） ----------
 const LIST_PREF_KEY = "o2a.panel.listView";
 const listMode = ref(localStorage.getItem(LIST_PREF_KEY) === "1");
 const useListView = computed(() => listMode.value || serviceList.value.length > 6);
@@ -499,7 +499,7 @@ function openServiceFromList(id: string) {
     page.value = "config";
   }
 }
-// ---------- §5.2A 拖动排序：按列表新顺序重排 cfg.services ----------
+// ----------  拖动排序：按列表新顺序重排 cfg.services ----------
 // 拖动过程中仅内存态重排（对象引用不变，选中态不受影响）；松手后 onReorderEnd
 // 直接复用 saveConfig 完整管线落盘（草稿提交 → 校验 → 写入 → 热加载 → 快照复位），
 // 顺序属于配置本体，无需再到配置页手动保存。
@@ -525,10 +525,10 @@ function onReorderEnd() {
   void saveConfig();
 }
 
-// ---------- comment 改名 draft 提交（§3.3） ----------
+// ---------- comment 改名 draft 提交（） ----------
 // 改名输入绑本地 draft，@change / 失焦 / 保存时才写回；
 // 校验失败 → 输入框下方红字，不写回、不 toast（回绑问题已由 id 身份物理消除）
-// 「保存并重启」：引擎启动时一次性读取配置，运行中改的配置需重启该服务生效（§9.1）
+// 「保存并重启」：引擎启动时一次性读取配置，运行中改的配置需重启该服务生效（）
 async function saveAndRestart() {
   const s = activeSvc.value;
   if (!s) return;
@@ -566,7 +566,7 @@ const offMeta = computed(() => {
     ? "代理未启动 · 端口 " + (s.listen_address ?? "?") + " · " + (s.model || "")
     : "代理未启动";
 });
-// ---------- 服务身份 id（§2 id 化；生成/补齐移至 stores/config.ts） ----------
+// ---------- 服务身份 id（ id 化；生成/补齐移至 stores/config.ts） ----------
 
 async function loadConfig() {
   try {
@@ -707,7 +707,7 @@ function addService() {
   );
   let port = 11011;
   while (used.has(port)) port++;
-  // §11.6：默认模型留空 + 表单必填高亮（原硬编码 qwen-plus 对非 qwen 账号是错的）；
+  // ：默认模型留空 + 表单必填高亮（原硬编码 qwen-plus 对非 qwen 账号是错的）；
   // 名字用「新服务-N」；id 即刻生成（稳定身份，未保存也不会与其他服务混淆）
   const svc = {
     id: newSvcId(),
@@ -743,7 +743,7 @@ function removeSvc(target?: any) {
       cfg.services = cfg.services.filter((x: any) => x.id !== s.id);
       selectedSvc.value = null;
       selected.value = ALL;
-      // §10.2-5 撤销：仅内存态回滚（未保存不落盘）
+      //  撤销：仅内存态回滚（未保存不落盘）
       showToast(`已删除服务「${name}」，点击保存生效`, "success", {
         label: "撤销",
         fn: () => {
@@ -810,7 +810,7 @@ function migrateAccounts(c: any) {
     (s: any) => s.openai_base_url || s.openai_api_key
   );
   if (!c.accounts.length && hasLegacy) {
-    // §11.7：生成 acc-N 前先查重，避免与存量账号 id 冲突导致 Key 错挂
+    // ：生成 acc-N 前先查重，避免与存量账号 id 冲突导致 Key 错挂
     const usedIds = new Set(
       (c.accounts as any[]).map((a: any) => String(a.id || "")).filter(Boolean)
     );
@@ -857,7 +857,7 @@ function normalizeConfig() {
     if (!s.api) delete s.api;
     if (!s.upstream_api || s.upstream_api === "openai-completions") delete s.upstream_api;
     if (!s.thinking_mode || s.thinking_mode === "auto") delete s.thinking_mode;
-    // §6 白名单 / 别名 / 策略归一化（空值删除字段，与 normalizeConfig 风格一致）
+    //  白名单 / 别名 / 策略归一化（空值删除字段，与 normalizeConfig 风格一致）
     if (Array.isArray(s.models)) {
       s.models = s.models.map((m: any) => String(m).trim()).filter(Boolean);
       if (!s.models.length) delete s.models;
@@ -891,7 +891,7 @@ function normalizeConfig() {
 }
 
 function computeRemovedServices(oldList: any[], newList: any[]): string[] {
-  // §2 id 化：删除判定按 id 差集 —— 改名（id 不变）不再被误判为删除；
+  //  id 化：删除判定按 id 差集 —— 改名（id 不变）不再被误判为删除；
   // 旧状态列表无 id（旧版本）时回退按 comment，改名按端口启发式兜底。
   const newIds = new Set(newList.map((x: any) => x.id).filter(Boolean));
   const newNames = new Set(newList.map((x: any) => x.comment));
@@ -911,7 +911,7 @@ function computeRemovedServices(oldList: any[], newList: any[]): string[] {
     .map((x: any) => x.id || x.name);
 }
 
-// §5.2B 端口占用预检：未运行服务的端口被占（外部进程）时保存前提醒
+//  端口占用预检：未运行服务的端口被占（外部进程）时保存前提醒
 async function precheckPorts(): Promise<string[]> {
   const busy: string[] = [];
   for (const s of cfg.services || []) {
@@ -952,7 +952,7 @@ async function saveConfig() {
     for (const n of removed) {
       await api.stopService(n).catch(() => {});
     }
-    // §9 热加载：优先触发热重载（原地生效，无需重启）；失败则回退"重启生效"提示
+    //  热加载：优先触发热重载（原地生效，无需重启）；失败则回退"重启生效"提示
     if (anyRunning.value) {
       try {
         const res: any = await api.reloadEngine();
@@ -1026,7 +1026,7 @@ watch(
   { deep: true }
 );
 
-// ---------- §10.1 单一心跳轮询 ----------
+// ----------  单一心跳轮询 ----------
 // 原 4 个独立 setInterval（3s 状态 / 5s 统计 / 3s 实时 / 10s 账号）收敛为
 // 单一 1s tick，按各自周期分发；暂停条件（面板隐藏 / 文档隐藏）只判一处。
 // 统计轮询自适应降频：连续无变化时 5s → 15s。
@@ -1084,7 +1084,7 @@ function onVisibilityChange() {
   onPanelVisible(!document.hidden);
 }
 
-// ---------- §10.4 键盘流：Ctrl+K 打开服务列表快速跳转；Esc 关面板 ----------
+// ----------  键盘流：Ctrl+K 打开服务列表快速跳转；Esc 关面板 ----------
 const listViewRef = ref<InstanceType<typeof ServiceListView> | null>(null);
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {

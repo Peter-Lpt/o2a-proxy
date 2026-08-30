@@ -1,11 +1,12 @@
-"""额度适配器注册表 + auto 域名嗅探（§8.3）。
+"""额度适配器注册表 + auto 域名嗅探。
 
 选择逻辑：accounts[].quota_source
 - auto：按 openai_url 域名嗅探（openrouter.ai → openrouter；嗅探不到 → local）
-- 显式名：openrouter / local / local-rolling-5h / manual / none
-- 未注册的显式名（anthropic / codex / zen 等）→ 预留名，回退 local
+- 显式名：openrouter / local / local-rolling-5h / manual / declarative /
+  opencode-go / zai / none
+- 未注册的显式名 → 预留名，回退 local
 
-失败隔离（§8.4-3）：fetch 抛错/超时 → 上层 get_snapshot 降级 local 并标 stale。
+失败隔离：fetch 抛错/超时 → 上层 get_snapshot 降级 local 并标 stale。
 """
 
 import asyncio
@@ -16,13 +17,16 @@ from .adapters.local import LocalQuotaAdapter
 from .adapters.local_rolling_5h import LocalRolling5hAdapter
 from .adapters.manual import ManualQuotaAdapter
 from .adapters.openrouter import OpenRouterAdapter
-from .base import QuotaAdapter, QuotaContext, QuotaError, make_snapshot
+from .adapters.declarative import DeclarativeQuotaAdapter
+from .adapters.opencode_go import OpenCodeGoAdapter
+from .adapters.zai import ZaiAdapter
+from .base import UPSTREAM_TIMEOUT_S, QuotaAdapter, QuotaContext, QuotaError, make_snapshot
 
 _ADAPTERS = {}
 
 
 def register(adapter: QuotaAdapter):
-    """注册一行：新增一个供应商适配 = 新增一个文件 + 这里一行（§8.4-1）。"""
+    """注册一行：新增一个供应商适配 = 新增一个文件 + 这里一行。"""
     _ADAPTERS[adapter.name] = adapter
 
 
@@ -30,20 +34,35 @@ register(LocalQuotaAdapter())
 register(LocalRolling5hAdapter())
 register(ManualQuotaAdapter())
 register(OpenRouterAdapter())
+register(DeclarativeQuotaAdapter())
+register(OpenCodeGoAdapter())
+register(ZaiAdapter())
 
 # 域名嗅探表：子串 → 适配器名（auto 用）
 _SNIFF = [
     ("openrouter.ai", "openrouter"),
+    ("opencode.ai", "opencode-go"),
+    ("bigmodel.cn", "zai"),
+    ("z.ai", "zai"),
 ]
 
+# 显式名 → 适配器名别名（支持套餐名等用户友好写法）
+_ALIASES = {
+    "glm-coding-plan": "zai",
+    "glm": "zai",
+    "codex_zen": "zai",
+    "opencode_go": "opencode-go",
+}
+
 # 预留显式名（尚未实现 → 回退 local）
-_RESERVED = {"anthropic", "codex", "openai_codex", "zen", "opencode_zen", "generic"}
+_RESERVED = {"anthropic", "codex", "openai_codex", "zen", "generic"}
 
 
 def resolve_adapter_name(account) -> str:
     source = (getattr(account, "quota_source", "") or "auto").strip()
     if source in _RESERVED:
         return "local"
+    source = _ALIASES.get(source, source)
     if source != "auto" and source in _ADAPTERS:
         return source
     url = (getattr(account, "openai_url", "") or "")
@@ -95,7 +114,7 @@ async def _finalize(snapshot, account, ctx: QuotaContext, name: str, ttl_cache=N
 async def get_snapshot_async(account, ctx: QuotaContext, ttl_cache=None, degrade=True):
     """取额度快照：优先缓存 → 注册表适配器 → 失败降级 local（标 stale）。
 
-    适配器异常/超时绝不外泄（§8.4-3 失败隔离）。"""
+    适配器异常/超时绝不外泄。"""
     if account is None:
         return None
     key = getattr(account, "id", "") or ""

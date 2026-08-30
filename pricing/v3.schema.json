@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/o2a-proxy/o2a-proxy/schemas/pricing-v3.json",
+  "title": "o2a-proxy pricing v3",
+  "description": "版本化价格规则目录（方案 §4.1）。与 v1/v2 兼容输入同存；优先使用 rules 事件时间计价。",
+  "type": "object",
+  "required": ["version", "rules"],
+  "properties": {
+    "version": {"const": 3},
+    "currency": {"type": "string", "default": "CNY"},
+    "rules": {
+      "type": "array",
+      "items": {"$ref": "#/definitions/rule"}
+    },
+    "_meta": {"type": "object"},
+    "accounts": {"type": "object"},
+    "services": {"type": "object"}
+  },
+  "definitions": {
+    "rule": {
+      "type": "object",
+      "required": ["id", "model"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "model": {"type": "string", "minLength": 1},
+        "scope": {
+          "type": "object",
+          "properties": {
+            "service": {"type": "string", "default": "*"},
+            "account": {"type": "string", "default": "*"}
+          }
+        },
+        "effective_from": {"type": ["string", "null"]},
+        "effective_to": {"type": ["string", "null"]},
+        "components": {
+          "type": "object",
+          "properties": {
+            "input": {"type": "number"},
+            "output": {"type": "number"},
+            "cache_read": {"type": "number"},
+            "cache_write": {"type": "number"},
+            "request": {"type": "number"},
+            "output_thinking": {"type": "number"}
+          }
+        },
+        "modifiers": {"type": "array"},
+        "source": {"type": "string"},
+        "updated_at": {"type": "string"},
+        "currency": {"type": "string"}
+      }
+    }
+  }
+}

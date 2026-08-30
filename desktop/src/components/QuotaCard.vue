@@ -35,8 +35,8 @@
 </template>
 
 <script setup lang="ts">
-// §8.4-5 前端隔离：本组件只认 QuotaSnapshot，不知道任何供应商细节。
-// 多窗口时进度条并列展示；最紧一档（pct 最大）>80% 变琥珀色（§8.5）。
+//  前端隔离：本组件只认 QuotaSnapshot，不知道任何供应商细节。
+// 多窗口时进度条并列展示；最紧一档（pct 最大）>80% 变琥珀色（）。
 import { computed } from "vue";
 
 interface QuotaWindow {

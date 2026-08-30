@@ -52,7 +52,7 @@
 import { computed, onBeforeUnmount, ref } from "vue";
 import Icon from "./Icon.vue";
 
-// §6 可见模型白名单多选器：搜索 + 复选 + 全选/清空 + 主模型锁定不可移除。
+//  可见模型白名单多选器：搜索 + 复选 + 全选/清空 + 主模型锁定不可移除。
 // 数据源 = 服务页模型缓存（与主模型下拉同一体系）。
 const props = defineProps<{
   modelValue: string[];

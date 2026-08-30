@@ -1,4 +1,4 @@
-"""context_tier modifier：按上下文长度分档计价（§7.4，阶梯）。
+"""context_tier modifier：按上下文长度分档计价（，阶梯）。
 
 用法：
 {"type": "context_tier", "by": "context_tokens", "tiers": [

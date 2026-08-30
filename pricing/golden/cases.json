@@ -1,5 +1,5 @@
 {
-  "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（§7.5）。期望值由重构前旧算法计算，固化零行为变更。由 scripts/gen_pricing_golden.py 生成。",
+  "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（）。期望值由重构前旧算法计算，固化零行为变更。由 scripts/gen_pricing_golden.py 生成。",
   "cases": [
     {
       "name": "flat-explicit-cache",
@@ -382,7 +382,7 @@
         "cache_write": 20000
       },
       "expected_total": 1.8599999999999999,
-      "note": "§7.6-② 行为变更：discount 0.5 生效，费用减半（旧算法不读取 discount）"
+      "note": " 行为变更：discount 0.5 生效，费用减半（旧算法不读取 discount）"
     },
     {
       "name": "sched-wed-2159-peak",
@@ -782,7 +782,7 @@
       },
       "expected_total": 0.66,
       "context_tokens": 320000,
-      "note": "context_tokens=320000 → 第二档单价（§7.6-④ 300K 验收）"
+      "note": "context_tokens=320000 → 第二档单价（ 300K 验收）"
     },
     {
       "name": "ctx-tier-first-tier",
@@ -1048,6 +1048,217 @@
       "expected_total": 0.78,
       "cumulative": 1200000,
       "note": "月累计 1.2M 超出第一档 → 第二档（无覆盖，基础价）"
+    },
+    {
+      "name": "v3-event-time-old-rule",
+      "pricing": {
+        "version": 3,
+        "currency": "CNY",
+        "rules": [
+          {
+            "id": "old-rule",
+            "model": "m",
+            "scope": {"service": "*", "account": "*"},
+            "effective_from": "2026-01-01T00:00:00+08:00",
+            "effective_to": "2026-07-01T00:00:00+08:00",
+            "components": {"input": 1.0, "output": 2.0, "cache_read": 0.02, "cache_write": 1.0},
+            "modifiers": [],
+            "source": "https://example.com/pricing/old",
+            "updated_at": "2026-01-02T00:00:00Z"
+          },
+          {
+            "id": "new-rule",
+            "model": "m",
+            "scope": {"service": "*", "account": "*"},
+            "effective_from": "2026-07-01T00:00:00+08:00",
+            "effective_to": null,
+            "components": {"input": 2.0, "output": 4.0, "cache_read": 0.1, "cache_write": 2.0},
+            "modifiers": [],
+            "source": "https://example.com/pricing/new",
+            "updated_at": "2026-07-02T00:00:00Z"
+          }
+        ]
+      },
+      "model": "m",
+      "account_keys": [],
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "timestamp": "2026-06-15T12:00:00",
+      "expected_total": 3.0,
+      "expected_rule_id": "old-rule",
+      "expected_source": "https://example.com/pricing/old",
+      "note": "同一模型不同日期命中不同历史规则"
+    },
+    {
+      "name": "v3-event-time-new-rule",
+      "pricing": {
+        "version": 3,
+        "currency": "CNY",
+        "rules": [
+          {
+            "id": "old-rule",
+            "model": "m",
+            "scope": {"service": "*", "account": "*"},
+            "effective_from": "2026-01-01T00:00:00+08:00",
+            "effective_to": "2026-07-01T00:00:00+08:00",
+            "components": {"input": 1.0, "output": 2.0, "cache_read": 0.02, "cache_write": 1.0},
+            "modifiers": [],
+            "source": "https://example.com/pricing/old"
+          },
+          {
+            "id": "new-rule",
+            "model": "m",
+            "scope": {"service": "*", "account": "*"},
+            "effective_from": "2026-07-01T00:00:00+08:00",
+            "effective_to": null,
+            "components": {"input": 2.0, "output": 4.0, "cache_read": 0.1, "cache_write": 2.0},
+            "modifiers": [],
+            "source": "https://example.com/pricing/new"
+          }
+        ]
+      },
+      "model": "m",
+      "account_keys": [],
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "timestamp": "2026-08-01T12:00:00",
+      "expected_total": 6.0,
+      "expected_rule_id": "new-rule",
+      "expected_source": "https://example.com/pricing/new",
+      "note": "历史切换后按新价计算"
+    },
+    {
+      "name": "v3-scope-specific-most-specific",
+      "pricing": {
+        "version": 3,
+        "currency": "CNY",
+        "rules": [
+          {
+            "id": "global",
+            "model": "m",
+            "scope": {"service": "*", "account": "*"},
+            "effective_from": null,
+            "effective_to": null,
+            "components": {"input": 1.0, "output": 1.0},
+            "modifiers": []
+          },
+          {
+            "id": "account-only",
+            "model": "m",
+            "scope": {"service": "*", "account": "acc-1"},
+            "effective_from": null,
+            "effective_to": null,
+            "components": {"input": 3.0, "output": 3.0},
+            "modifiers": []
+          },
+          {
+            "id": "service-only",
+            "model": "m",
+            "scope": {"service": "svc-a", "account": "*"},
+            "effective_from": null,
+            "effective_to": null,
+            "components": {"input": 4.0, "output": 4.0},
+            "modifiers": []
+          },
+          {
+            "id": "service-account",
+            "model": "m",
+            "scope": {"service": "svc-a", "account": "acc-1"},
+            "effective_from": null,
+            "effective_to": null,
+            "components": {"input": 2.0, "output": 2.0},
+            "modifiers": []
+          }
+        ]
+      },
+      "model": "m",
+      "account_keys": ["acc-1"],
+      "service_id": "svc-a",
+      "timestamp": "2026-09-01T12:00:00",
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 4.0,
+      "expected_rule_id": "service-account",
+      "note": "最具体 scope 优先：service+account 精确 > 单维 > 通配（）"
+    },
+    {
+      "name": "v3-unmatched-rule-fail-closed",
+      "pricing": {
+        "version": 3,
+        "rules": [
+          {
+            "id": "future-only",
+            "model": "m",
+            "effective_from": "2026-01-01T00:00:00+08:00",
+            "effective_to": null,
+            "components": {"input": 1.0, "output": 2.0},
+            "modifiers": []
+          }
+        ]
+      },
+      "model": "m",
+      "account_keys": [],
+      "timestamp": "2025-12-31T12:00:00",
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 0.0,
+      "expected_complete": false,
+      "note": "有 rules 但事件时间未命中 → fail-closed 0/不可信（）"
+    },
+    {
+      "name": "batch-modifier-applied",
+      "pricing": {
+        "p": {"models": {"m": {
+          "components": {"input": 2.0, "output": 4.0, "cache_read": 0.0, "cache_write": 0.0},
+          "modifiers": [{"type": "batch", "factor": 0.5, "when": {"batch": true}}]
+        }}}
+      },
+      "model": "m",
+      "account_keys": [],
+      "meta": {"batch": true},
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 3.0,
+      "note": "batch modifier 在 ctx.meta.batch 注入后生效（）"
+    },
+    {
+      "name": "incomplete-missing-output-price",
+      "pricing": {
+        "p": {"models": {"m": {
+          "components": {"input": 1.0}
+        }}}
+      },
+      "model": "m",
+      "account_keys": [],
+      "usage": {
+        "input": 1000000,
+        "output": 1000000,
+        "cache_read": 0,
+        "cache_write": 0
+      },
+      "expected_total": 1.0,
+      "expected_complete": false,
+      "note": "正 output token 未声明 output 单价 → total=1 但 complete=false"
     }
   ]
 }

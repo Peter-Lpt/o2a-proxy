@@ -1,9 +1,9 @@
-"""quota 基础设施：上下文、快照结构、适配器协议（§8.2/§8.3）。"""
+"""quota 基础设施：上下文、快照结构、适配器协议（）。"""
 
 import threading
 from datetime import datetime, timedelta
 
-# 上游请求超时：永不阻塞主流程（§8.3）
+# 上游请求超时：永不阻塞主流程（）
 UPSTREAM_TIMEOUT_S = 1.5
 
 
@@ -12,7 +12,7 @@ class QuotaError(Exception):
 
 
 class QuotaContext:
-    """适配器取数上下文（§8.4-2 依赖隔离：适配器只允许从这里拿数据）。
+    """适配器取数上下文（ 依赖隔离：适配器只允许从这里拿数据）。
 
     - stats_dir：JSONL 统计目录（local 系适配器聚合用）
     - account：o2a.config.Account（只读使用）
@@ -44,7 +44,7 @@ def empty_window(kind, unit="requests", used=0, limit=None, reset_at=None):
 
 def make_snapshot(adapter_id, windows, scope="account", source="local_stats",
                   plan=None, stale=False, now_fn=None):
-    """构造 QuotaSnapshot（§8.2 归一化结构，前端 QuotaCard 只认这个形状）。"""
+    """构造 QuotaSnapshot（ 归一化结构，前端 QuotaCard 只认这个形状）。"""
     now = (now_fn or datetime.now)()
     return {
         "adapterId": adapter_id,
@@ -71,7 +71,7 @@ class QuotaAdapter:
 
 
 class TTLCache:
-    """额度查询 TTL 缓存（60s，§8.3）：面板隐藏时不刷新由调用方保证。"""
+    """额度查询 TTL 缓存（60s，）：面板隐藏时不刷新由调用方保证。"""
 
     def __init__(self, ttl_s=60):
         self.ttl_s = ttl_s

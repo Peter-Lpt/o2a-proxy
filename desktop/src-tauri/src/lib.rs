@@ -238,7 +238,7 @@ fn primary_service(state: &AppState) -> String {
 }
 
 /// 服务 id → 当前显示名（comment）翻译。
-/// 统计记录按 service 名匹配；前端以 id 为身份（§2 id 化）后，命令层先把 id
+/// 统计记录按 service 名匹配；前端以 id 为身份（ id 化）后，命令层先把 id
 /// 翻译为当前名再进 stats 层；带 service_id 的新记录在 stats.rs 读取层
 /// 归一化为当前名，改名后的历史统计不丢。
 fn resolve_service_name(state: &AppState, service: &str) -> String {
@@ -568,7 +568,7 @@ fn is_port_open(host: String, port: u16) -> bool {
     crate::port_open(&host, port)
 }
 
-/// §10.4 托盘逐服务启停：按当前配置重建托盘菜单（含每服务 启动/停止 项）。
+///  托盘逐服务启停：按当前配置重建托盘菜单（含每服务 启动/停止 项）。
 /// 在 get_status 轮询与 save_config 后调用 —— 面板打开期间保持菜单与运行态同步。
 fn rebuild_tray_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::menu::{MenuItem, PredefinedMenuItem, Submenu};
@@ -628,7 +628,7 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// §9 热重载触发：对每个监听中的服务端口 POST /_reload（带接入凭证）。
+///  热重载触发：对每个监听中的服务端口 POST /_reload（带接入凭证）。
 /// 引擎收到后按 id diff 重载（原地生效/换端口重启）；失败保持旧配置。
 fn reload_engine_impl(state: &AppState) -> Result<serde_json::Value, String> {
     let cfg = read_config_value(state)?;
@@ -710,7 +710,7 @@ async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> 
     .await
     .map_err(|e| e.to_string())?;
     let out = out?;
-    // §10.4：轮询后同步托盘逐服务菜单（运行态变化时托盘文案随之更新）
+    // ：轮询后同步托盘逐服务菜单（运行态变化时托盘文案随之更新）
     let _ = rebuild_tray_menu(&app_for_tray);
     Ok(out)
 }
@@ -889,7 +889,7 @@ async fn get_stats(
             end.as_deref(),
             model.as_deref().unwrap_or(""),
         );
-        // §临时诊断：定位“选中服务无数据”——打印运行时查询三要素（用后即删）
+        // ：定位“选中服务无数据”——打印运行时查询三要素（用后即删）
         if let Ok(ref v) = out {
             eprintln!(
                 "[stats-diag] raw={:?} resolved={:?} range={:?} dir={} today.requests={} month.requests={}",
@@ -947,9 +947,9 @@ fn models_url(base: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// §8.4-4 端隔离：额度只存在引擎一份实现，桌面端仅转发 + 缓存（不重写适配逻辑）。
+//  端隔离：额度只存在引擎一份实现，桌面端仅转发 + 缓存（不重写适配逻辑）。
 // 引擎侧自带 60s TTL；桌面端再加一层多槽缓存（key = account），避免多窗口
-// 交替轮询互相顶掉（对齐 §10.1 多槽缓存方向）。
+// 交替轮询互相顶掉（对齐  多槽缓存方向）。
 // ---------------------------------------------------------------------------
 static QUOTA_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, (std::time::Instant, serde_json::Value)>>> =
     std::sync::Mutex::new(None);
@@ -1044,7 +1044,7 @@ fn get_quota_impl(state: &AppState, account: &str) -> Result<serde_json::Value, 
             }
         }
     }
-    // 全部失败：返回过期缓存并标 stale（§8.3 降级展示），否则报错
+    // 全部失败：返回过期缓存并标 stale（ 降级展示），否则报错
     if let Some(v) = quota_cache_stale(account) {
         return Ok(v);
     }
@@ -1644,7 +1644,7 @@ pub fn run() {
                         });
                     }
                     id if id.starts_with("svc:toggle:") => {
-                        // §10.4 托盘逐服务启停：id 形如 svc:toggle:<服务id>
+                        //  托盘逐服务启停：id 形如 svc:toggle:<服务id>
                         let sid = id.trim_start_matches("svc:toggle:").to_string();
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
@@ -1714,7 +1714,7 @@ pub fn run() {
             // macOS/Linux 也统一预创建，走同一套单窗逻辑。
             create_float_window(app.handle(), "float", "")?;
 
-            // autostart（§2.1/§5.2C）：延迟 1.2s 等窗口/托盘初始化完成后，
+            // autostart（）：延迟 1.2s 等窗口/托盘初始化完成后，
             // 自动拉起标记 autostart=true 的服务（阻塞线程池里 sleep + 串行启动）
             let app2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {

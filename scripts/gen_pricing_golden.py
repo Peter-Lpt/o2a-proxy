@@ -1,11 +1,11 @@
 """生成 golden 定价 fixtures：用"旧 _calc_cost 算法"计算期望值并固化。
 
-§7.5：双端（pytest / cargo test）跑同一份 fixtures，是 Python 与 Rust 双实现
+：双端（pytest / cargo test）跑同一份 fixtures，是 Python 与 Rust 双实现
 不漂移的唯一可靠办法。本脚本只在算法变更或新增用例时手动运行：
     python scripts/gen_pricing_golden.py
 
 期望值计算复刻自重构前的 stats.py::_calc_cost（tiers[0] + cache 回退 0.2/1.0），
-用于固化"抽模块前后零行为变更"这一验收标准（§7.6-①）。
+用于固化"抽模块前后零行为变更"这一验收标准（）。
 """
 import json
 import os
@@ -108,14 +108,14 @@ def main():
         case("account-by-name", pricing_accounts, "qwen-plus", usage, ["acc-9", "某中转站"]),
         case("account-fallback-global", pricing_accounts, "qwen-plus", usage, ["acc-404"]),
         case("no-account-global", pricing_accounts, "qwen-plus", usage, []),
-        # §7.6-② 行为变更：v1 discount 字段自此生效（原为未读取 → 费用虚高一倍）。
+        #  行为变更：v1 discount 字段自此生效（原为未读取 → 费用虚高一倍）。
         # 期望 = 旧算法结果 × 0.5（0.5 为 2 的幂，浮点精确；双端一致验证 discount 生效）。
         case("v1-discount-halves-cost", pricing_discount, "qwen3.7-max", usage),
     ]
     cases[-1]["expected_total"] = cases[-1]["expected_total"] * 0.5
-    cases[-1]["note"] = "§7.6-② 行为变更：discount 0.5 生效，费用减半（旧算法不读取 discount）"
+    cases[-1]["note"] = " 行为变更：discount 0.5 生效，费用减半（旧算法不读取 discount）"
 
-    # §7.6-③ schedule（峰谷/周末）：期望值按语义手算 ——
+    #  schedule（峰谷/周末）：期望值按语义手算 ——
     # 基础 comps: input 2.0 / output 4.0 / cache_read 0.4(=2.0×0.2) / cache_write 2.0(=2.0×1.0)。
     # schedule 只覆盖 input/output；cache 分量保持烘焙值。
     def sched_expected(input_p, output_p):
@@ -135,7 +135,7 @@ def main():
             ]}]}}},
     }
     # 2026-01-07 是周三；2026-01-03 是周六
-    # （§7.6 验收：同一模型 21:59 与 22:01 分别按峰/谷价 —— 21:59 仍在 08:00-22:00 峰窗内）
+    # （ 验收：同一模型 21:59 与 22:01 分别按峰/谷价 —— 21:59 仍在 08:00-22:00 峰窗内）
     for name, ts, ip, op, note in [
         ("sched-wed-2159-peak", "2026-01-07T21:59:00", 4.0, 16.0, "22:00 前一分钟仍在高峰窗口"),
         ("sched-wed-2201-valley", "2026-01-07T22:01:00", 1.0, 2.0, "22:00 后一分钟走谷价（跨天区间）"),
@@ -167,7 +167,7 @@ def main():
     c["note"] = "周日不命中窗口 → fallback 单价"
     cases.append(c)
 
-    # §7.6-④ context_tier（v1 range 多档映射）：v1 tiers 双档 0-256K / 256K-1M。
+    #  context_tier（v1 range 多档映射）：v1 tiers 双档 0-256K / 256K-1M。
     # usage: input 100K / cache_read 200K / cache_write 20K → context_tokens = 320K
     #   → 落在第二档（256K-1M），即方案验收"300K 上下文请求按第二档计价"。
     # 第二档单价 input 2.0 / output 8.0（cache 不在 override 内 → 保持第一档烘焙值 0.4 / 2.0）
@@ -183,7 +183,7 @@ def main():
     c["context_tokens"] = ctx_tokens
     c["expected_total"] = (usage["input"] * 2.0 + usage["output"] * 8.0
                            + usage["cache_read"] * 0.2 + usage["cache_write"] * 1.0) / 1_000_000
-    c["note"] = f"context_tokens={ctx_tokens} → 第二档单价（§7.6-④ 300K 验收）"
+    c["note"] = f"context_tokens={ctx_tokens} → 第二档单价（ 300K 验收）"
     cases.append(c)
 
     # 第一档：context 100K（input 100K / cache 0）→ 第一档单价（与旧 tiers[0] 行为一致）
@@ -209,7 +209,7 @@ def main():
     c["note"] = "v2 upto:null 无上限档命中"
     cases.append(c)
 
-    # §7.6-⑤ free_quota（v1 模型级字段，月度 tokens 额度冲抵）。
+    #  free_quota（v1 模型级字段，月度 tokens 额度冲抵）。
     # 基础 comps: input 2.0 / output 4.0 / cache_read 0.4 / cache_write 2.0；
     # req_tokens = input+cache_read+cache_write+output = 370K；ratio = remaining/req
     # 期望按 evaluate 的分量顺序逐项 ×ratio 求和（与双端实现位一致）。
@@ -241,7 +241,7 @@ def main():
         c["note"] = f"月免费额度 1M，已用 {cum} → 冲抵"
         cases.append(c)
 
-    # §7.4 cumulative_tier：月累计 tokens 阶梯（800K 已用 → 命中第一档 <=1M 的降档价）。
+    #  cumulative_tier：月累计 tokens 阶梯（800K 已用 → 命中第一档 <=1M 的降档价）。
     pricing_cum = {
         "ct": {"models": {"cum-model": {
             "components": {"input": 3.0, "output": 6.0, "cache_read": 0.6, "cache_write": 3.0},
@@ -264,7 +264,7 @@ def main():
     c["note"] = "月累计 1.2M 超出第一档 → 第二档（无覆盖，基础价）"
     cases.append(c)
     out = {
-        "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（§7.5）。"
+        "_readme": "共享 golden fixtures：pytest 与 cargo test 双端跑同一份（）。"
                    "期望值由重构前旧算法计算，固化零行为变更。由 scripts/gen_pricing_golden.py 生成。",
         "cases": cases,
     }

@@ -16,7 +16,7 @@
           </div>
         </div>
 
-        <!-- §10.2-7 骨架屏：首次统计加载未就绪时占位，避免 5s 轮询闪白 -->
+        <!--  骨架屏：首次统计加载未就绪时占位，避免 5s 轮询闪白 -->
         <div v-if="statsLoading && !stats.updatedAt" class="kpi-grid" aria-hidden="true">
           <div v-for="i in 5" :key="i" class="kpi skel">
             <span class="skel-line"></span><b class="skel-bar"></b><span class="skel-line short"></span>
@@ -55,7 +55,7 @@
           </div>
         </div>
 
-        <!-- §8.5 订阅制服务的额度卡（pricing=none 时费用卡隐藏，这里展示额度） -->
+        <!--  订阅制服务的额度卡（pricing=none 时费用卡隐藏，这里展示额度） -->
         <QuotaCard v-if="quotaVisible && quotaSnapshot" :snapshot="quotaSnapshot" />
 
         <!-- 性能条：耗时 / 首字 / 速度（近一段时间） -->
@@ -179,7 +179,7 @@
 </template>
 
 <script setup lang="ts">
-// §10.1 统计页视图：从 PanelApp 零行为变更迁出。
+//  统计页视图：从 PanelApp 零行为变更迁出。
 // 统计数据与轮询来自 stores/stats；服务运行态来自 stores/services。
 import { computed } from "vue";
 import { fmtCost, fmtNum, fmtPct } from "../api";

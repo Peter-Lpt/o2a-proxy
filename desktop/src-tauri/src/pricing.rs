@@ -1,4 +1,4 @@
-//! o2a-pricing：定价解析与求值的 Rust 镜像（优化方案 §7.5-2）。
+//! o2a-pricing：定价解析与求值的 Rust 镜像。
 //!
 //! 与 Python `o2a/pricing/` 同构：v1 pricing.json 在 loader 中归一化为
 //! v2 components（tiers[0] + 缓存回退比例 0.2/1.0 烘焙），覆盖链
@@ -7,7 +7,7 @@
 //! 双端一致性由共享 golden fixtures 保证：`pricing/golden/cases.json`
 //! 与 pytest 跑同一份文件（见下方 `golden_fixtures_parity` 测试）。
 
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, NaiveDateTime};
 use serde_json::Value;
 
 /// v1 缺省回退比例（与 Python schema.py 一致）
@@ -65,7 +65,7 @@ fn tier_to_comps(tier: &Value) -> Value {
     comps
 }
 
-/// v1 模型级字段 → modifiers（§7.6-②：discount；§7.6-④：多档 range → context_tier）。
+/// v1 模型级字段 → modifiers（：discount；：多档 range → context_tier）。
 fn v1_modifiers(entry: &Value) -> Vec<Value> {
     let mut modifiers = Vec::new();
     if let Some(tiers) = entry.get("tiers").and_then(|t| t.as_array()) {
@@ -108,7 +108,7 @@ fn v1_modifiers(entry: &Value) -> Vec<Value> {
             modifiers.push(serde_json::json!({"type": "discount", "factor": d, "note": note}));
         }
     }
-    // §7.6-②/⑤：v1 free_quota（模型级数字，按月 tokens 额度）接入，冲抵最后一步
+    // ：v1 free_quota（模型级数字，按月 tokens 额度）接入，冲抵最后一步
     if let Some(fq) = entry.get("free_quota").and_then(|v| v.as_f64()) {
         if fq > 0.0 {
             modifiers.push(serde_json::json!(
@@ -153,8 +153,40 @@ fn modifiers_of(entry: &Value) -> Vec<Value> {
 }
 
 /// 覆盖链解析：服务级 > 账号级（键序）> 模型级。未命中返回 None（cost 0）。
+#[allow(dead_code)]
 pub fn resolve_entry<'a>(pricing: &'a Value, model: &str, account_keys: &[String], service_id: &str) -> Option<&'a Value> {
+    resolve_entry_at(pricing, model, account_keys, service_id, None)
+}
+
+/// 带事件时间的覆盖链解析：优先 v3 rules，未配置/未命中回退 v1/v2 覆盖链。
+/// timestamp 为 Option<&str>（None 在 v3 规则下不命中任何历史区间）。
+pub fn resolve_entry_at<'a>(
+    pricing: &'a Value,
+    model: &str,
+    account_keys: &[String],
+    service_id: &str,
+    timestamp: Option<&str>,
+) -> Option<&'a Value> {
     let obj = pricing.as_object()?;
+    // 1) v3 规则：按事件时间 + 最具体 scope 选择
+    if let Some(rules) = obj.get("rules").and_then(|r| r.as_array()) {
+        if !rules.is_empty() {
+            if let Some(rule) = select_rule(rules, model, account_keys, service_id, timestamp) {
+                return Some(rule);
+            }
+            // 有 rules 但未命中：不允许用 v1/v2 冒充历史
+            return None;
+        }
+    }
+    resolve_v1_v2(obj, model, account_keys, service_id)
+}
+
+fn resolve_v1_v2<'a>(
+    obj: &'a serde_json::Map<String, Value>,
+    model: &str,
+    account_keys: &[String],
+    service_id: &str,
+) -> Option<&'a Value> {
     // 1) 服务级（v2 services 段）
     if !service_id.is_empty() {
         if let Some(entry) = obj
@@ -183,7 +215,7 @@ pub fn resolve_entry<'a>(pricing: &'a Value, model: &str, account_keys: &[String
     }
     // 3) 全局模型级（跳过 _* 与 accounts —— v1 provider 结构）
     for (pname, pdata) in obj {
-        if pname.starts_with('_') || pname == "accounts" || pname == "services" {
+        if pname.starts_with('_') || pname == "accounts" || pname == "services" || pname == "rules" {
             continue;
         }
         if let Some(entry) = pdata.get("models").and_then(|m| m.get(model)) {
@@ -193,6 +225,89 @@ pub fn resolve_entry<'a>(pricing: &'a Value, model: &str, account_keys: &[String
         }
     }
     None
+}
+
+fn parse_ts(s: &str) -> Option<NaiveDateTime> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.naive_utc());
+    }
+    if s.len() >= 19 {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(&s[..19], "%Y-%m-%dT%H:%M:%S") {
+            return Some(dt);
+        }
+    }
+    None
+}
+
+fn in_interval(ts: &str, eff_from: Option<&str>, eff_to: Option<&str>) -> bool {
+    if ts.len() < 19 {
+        return false;
+    }
+    let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&ts[..19], "%Y-%m-%dT%H:%M:%S") else {
+        return false;
+    };
+    if let Some(f) = eff_from {
+        let Some(fd) = parse_ts(f) else { return false };
+        if dt < fd {
+            return false;
+        }
+    }
+    if let Some(t) = eff_to {
+        let Some(td) = parse_ts(t) else { return false };
+        if dt >= td {
+            return false;
+        }
+    }
+    true
+}
+
+fn rule_matches(
+    rule: &Value,
+    model: &str,
+    account_keys: &[String],
+    service_id: &str,
+    timestamp: Option<&str>,
+) -> Option<(bool, bool, bool)> {
+    let scope = rule.get("scope").and_then(|s| s.as_object());
+    let r_model = rule.get("model").and_then(|v| v.as_str()).unwrap_or("*");
+    if r_model != "*" && r_model != model {
+        return None;
+    }
+    let svc = scope.and_then(|s| s.get("service")).and_then(|v| v.as_str()).unwrap_or("*");
+    let acc = scope.and_then(|s| s.get("account")).and_then(|v| v.as_str()).unwrap_or("*");
+    if svc != "*" && svc != service_id {
+        return None;
+    }
+    if acc != "*" && !account_keys.iter().any(|k| k == acc) {
+        return None;
+    }
+    let from = rule.get("effective_from").and_then(|v| v.as_str());
+    let to = rule.get("effective_to").and_then(|v| v.as_str());
+    let ts = timestamp.unwrap_or("");
+    if ts.is_empty() || !in_interval(ts, from, to) {
+        return None;
+    }
+    Some((svc != "*", acc != "*", r_model != "*"))
+}
+
+fn select_rule<'a>(
+    rules: &'a [Value],
+    model: &str,
+    account_keys: &[String],
+    service_id: &str,
+    timestamp: Option<&str>,
+) -> Option<&'a Value> {
+    let mut best = None;
+    let mut best_score = (false, false, false);
+    for rule in rules {
+        if let Some(score) = rule_matches(rule, model, account_keys, service_id, timestamp) {
+            if best.is_none() || score > best_score {
+                best = Some(rule);
+                best_score = score;
+            }
+        }
+    }
+    best
 }
 
 /// modifier 管道 + 求值。返回 total（breakdown 供后续面板展开用）。
@@ -312,7 +427,7 @@ pub fn evaluate(
                 }
             }
             "context_tier" => {
-                // §7.6-④：ctx.meta.context_tokens 命中第一档 value <= upto（upto=null 无上限）
+                // ：ctx.meta.context_tokens 命中第一档 value <= upto（upto=null 无上限）
                 let value = ctx
                     .and_then(|c| c.get("meta"))
                     .and_then(|m| m.get("context_tokens"))
@@ -352,7 +467,7 @@ pub fn evaluate(
                 }
             }
             "free_quota" => {
-                // §7.6-⑤：剩余额度冲抵 —— ratio = min(1, max(0, amount-cum)/req_tokens)
+                // ：剩余额度冲抵 —— ratio = min(1, max(0, amount-cum)/req_tokens)
                 // applied to 全部分量；cumulative 未知时不生效（与 Python 一致）
                 let used = ctx
                     .and_then(|c| c.get("cumulative"))
@@ -373,7 +488,7 @@ pub fn evaluate(
                 }
             }
             "cumulative_tier" => {
-                // §7.4 阶梯之二：按周期累计用量分档（ctx.cumulative.tokens）
+                //  阶梯之二：按周期累计用量分档（ctx.cumulative.tokens）
                 let value = ctx
                     .and_then(|c| c.get("cumulative"))
                     .and_then(|c| c.get("tokens"))
@@ -471,17 +586,33 @@ pub fn resolve_cost(
     service_id: &str,
     ctx: Option<&Value>,
 ) -> f64 {
-    match resolve_entry(pricing, model, account_keys, service_id) {
-        Some(entry) => evaluate(entry, input, read, write, output, 0, ctx),
-        None => 0.0,
+    let ts = ctx
+        .and_then(|c| c.get("timestamp"))
+        .and_then(|v| v.as_str());
+    if let Some(entry) = resolve_entry_at(pricing, model, account_keys, service_id, ts) {
+        return evaluate(entry, input, read, write, output, 0, ctx);
     }
+    // v3 有 rules 但未命中：与 Python 一致回退 v1/v2 当前价兜底
+    if let Some(obj) = pricing.as_object() {
+        if obj
+            .get("rules")
+            .and_then(|r| r.as_array())
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
+        {
+            if let Some(entry) = resolve_v1_v2(obj, model, account_keys, service_id) {
+                return evaluate(entry, input, read, write, output, 0, ctx);
+            }
+        }
+    }
+    0.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// §7.5-3：与 pytest 跑同一份共享 golden fixtures（pricing/golden/cases.json），
+    /// 与 pytest 跑同一份共享 golden fixtures（pricing/golden/cases.json），
     /// 固化 Python / Rust 双实现零漂移。
     #[test]
     fn golden_fixtures_parity() {
@@ -513,24 +644,63 @@ mod tests {
             let ts = case.get("timestamp").and_then(|v| v.as_str());
             let ct = case.get("context_tokens").and_then(|v| v.as_i64());
             let cum = case.get("cumulative").and_then(|v| v.as_f64());
-            let ctx = match (ts, ct, cum) {
-                (ts_opt, ct_opt, Some(c)) => {
+            let meta = case.get("meta").cloned().unwrap_or(Value::Null);
+            let ctx = match (ts, ct, cum, meta) {
+                (ts_opt, ct_opt, Some(c), meta_obj) => {
                     let mut ctx_obj = serde_json::json!({"cumulative": {"tokens": c}});
                     if let Some(t) = ts_opt {
                         ctx_obj["timestamp"] = serde_json::json!(t);
                     }
+                    let mut m = serde_json::Map::new();
                     if let Some(n) = ct_opt {
-                        ctx_obj["meta"] = serde_json::json!({"context_tokens": n});
+                        m.insert("context_tokens".to_string(), serde_json::json!(n));
+                    }
+                    if let Some(mo) = meta_obj.as_object() {
+                        for (k, v) in mo {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    if !m.is_empty() {
+                        ctx_obj["meta"] = serde_json::json!(m);
                     }
                     Some(ctx_obj)
                 }
-                (Some(ts), Some(ct), None) => Some(
-                    serde_json::json!({"timestamp": ts, "meta": {"context_tokens": ct}}),
-                ),
-                (Some(ts), None, None) => Some(serde_json::json!({"timestamp": ts})),
-                (None, Some(ct), None) => Some(serde_json::json!({"meta": {"context_tokens": ct}})),
-                (None, None, None) => None,
+                (Some(ts), Some(ct), None, meta_obj) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("context_tokens".to_string(), serde_json::json!(ct));
+                    if let Some(mo) = meta_obj.as_object() {
+                        for (k, v) in mo {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Some(serde_json::json!({"timestamp": ts, "meta": m}))
+                }
+                (Some(ts), None, None, meta_obj) => {
+                    if let Some(mo) = meta_obj.as_object() {
+                        Some(serde_json::json!({"timestamp": ts, "meta": mo}))
+                    } else {
+                        Some(serde_json::json!({"timestamp": ts}))
+                    }
+                }
+                (None, Some(ct), None, meta_obj) => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("context_tokens".to_string(), serde_json::json!(ct));
+                    if let Some(mo) = meta_obj.as_object() {
+                        for (k, v) in mo {
+                            m.insert(k.clone(), v.clone());
+                        }
+                    }
+                    Some(serde_json::json!({"meta": m}))
+                }
+                (None, None, None, meta_obj) => {
+                    if meta_obj.is_object() {
+                        Some(serde_json::json!({"meta": meta_obj}))
+                    } else {
+                        None
+                    }
+                }
             };
+            let sid = case.get("service_id").and_then(|v| v.as_str()).unwrap_or("");
             let total = resolve_cost(
                 &pricing,
                 model,
@@ -539,7 +709,7 @@ mod tests {
                 usage.get("cache_write").and_then(|v| v.as_i64()).unwrap_or(0),
                 usage.get("output").and_then(|v| v.as_i64()).unwrap_or(0),
                 &keys,
-                "",
+                sid,
                 ctx.as_ref(),
             );
             let expected = case

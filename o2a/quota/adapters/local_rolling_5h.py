@@ -1,4 +1,4 @@
-"""local-rolling-5h 适配器：5 小时滚动窗（Claude Pro/Max 式，§8.2）。
+"""local-rolling-5h 适配器：5 小时滚动窗（Claude Pro/Max 式，）。
 
 窗口起点 = 当前 5h 窗内最早一条记录（近似 provider 的滚动窗重置时刻）；
 limit 来自 accounts[].quota.limit（requests），未配置时只展示用量不显示百分比。

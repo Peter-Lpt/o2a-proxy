@@ -169,7 +169,7 @@ fn load_account_aliases(stats_dir: &Path) -> BTreeMap<String, String> {
 
 /// 参考 o2a/pricing（Python 同构模块）：按当前 pricing.json 重算单次请求费用。
 /// 历史记录写入时可能缺少 cost 或定价表后补，读取时统一重算，保证口径一致。
-/// §7：解析与求值委托 pricing 模块（v1 兼容映射在模块内，行为不变，
+/// ：解析与求值委托 pricing 模块（v1 兼容映射在模块内，行为不变，
 /// 与 Python 双端跑同一份 golden fixtures）。
 /// no_cost（订阅制，如 opencode token/code plan）时直接返回 0，不按 token 计价。
 fn recalc_cost(
@@ -184,6 +184,8 @@ fn recalc_cost(
     no_cost: bool,
     ts: &str,
     cum: f64,
+    service_id: &str,
+    batch: bool,
 ) -> f64 {
     if no_cost {
         return 0.0;
@@ -198,19 +200,25 @@ fn recalc_cost(
             }
         }
     }
-    // 历史正确性（§7.3）：schedule 判定用记录自身的 timestamp，改价不改写历史口径；
-    // context_tokens = 输入侧 prompt 总量（input+read+write，双端口径一致，§7-④）；
-    // cumulative = 本账号当月早于本记录的 tokens（free_quota 冲抵，§7-⑤）
+    // 历史正确性：schedule 判定用记录自身的 timestamp，改价不改写历史口径；
+    // context_tokens = 输入侧 prompt 总量（input+read+write，双端口径一致）；
+    // cumulative = 本账号当月早于本记录的 tokens（free_quota 冲抵）；
+    // batch = 记录写入时的批量价上下文（JSONL 快照字段 batch=true）
+    let mut meta_map = serde_json::Map::new();
+    meta_map.insert("context_tokens".to_string(), json!(input + read + write));
+    if batch {
+        meta_map.insert("batch".to_string(), json!(true));
+    }
     let ctx = if ts.is_empty() {
         None
     } else {
         Some(serde_json::json!({
             "timestamp": ts,
-            "meta": {"context_tokens": input + read + write},
+            "meta": meta_map,
             "cumulative": {"tokens": cum}
         }))
     };
-    crate::pricing::resolve_cost(pricing, model, input, read, write, output, &keys, "", ctx.as_ref())
+    crate::pricing::resolve_cost(pricing, model, input, read, write, output, &keys, service_id, ctx.as_ref())
 }
 
 /// 读取 config.json 的服务列表，返回（服务总数, 订阅制 pricing=none 服务名集合）。
@@ -223,7 +231,7 @@ fn load_services_pricing(stats_dir: &Path) -> (usize, BTreeSet<String>) {
         if let Some(services) = cfg.get("services").and_then(|s| s.as_array()) {
             for svc in services {
                 total += 1;
-                // §2.3：pricing 支持字符串 "none" 与对象 {"mode": "subscription"|"free"}
+                // ：pricing 支持字符串 "none" 与对象 {"mode": "subscription"|"free"}
                 let no_cost_svc = match svc.get("pricing") {
                     Some(Value::String(s)) => s == "none",
                     Some(Value::Object(o)) => o
@@ -244,7 +252,7 @@ fn load_services_pricing(stats_dir: &Path) -> (usize, BTreeSet<String>) {
     (total, no_cost)
 }
 
-/// 服务 id → 当前显示名映射（§2 服务身份 id 化）。
+/// 服务 id → 当前显示名映射（ 服务身份 id 化）。
 /// 带 service_id 的历史记录在读取层归一化为当前名，改名后统计不丢。
 fn load_service_id_names(stats_dir: &Path) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -274,7 +282,7 @@ fn show_cost(total: usize, no_cost: &BTreeSet<String>, service: &str) -> bool {
     }
 }
 
-/// §7-⑤ free_quota 月累计（按账号口径）：
+///  free_quota 月累计（按账号口径）：
 /// account → (ts 升序, prefix[i] = 前 i 条 tokens 之和)。
 /// 查询 before(account, ts) = ts 严格早于该记录的当月 tokens 总量，
 /// 与 Python 写入端 _month_cumulative_tokens 同口径（同秒不计、字典序比较）。
@@ -360,7 +368,7 @@ fn read_records(
                     rec["service"] = json!(name);
                 }
             }
-            // §6 别名：计价用上游名（记录层携带 upstream_model），展示用对外名
+            //  别名：计价用上游名（记录层携带 upstream_model），展示用对外名
             let model = rec["model"].as_str().unwrap_or("").to_string();
             let price_model = rec
                 .get("upstream_model")
@@ -382,9 +390,14 @@ fn read_records(
                 .filter(|m| date_str.len() >= 7 && &date_str[..7] == &m.month)
                 .map(|m| m.entries_before(&account, &ts))
                 .unwrap_or(0.0);
+            let sid = rec
+                .get("service_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let batch = rec.get("batch").and_then(|v| v.as_bool()).unwrap_or(false);
             rec["cost"] = json!(recalc_cost(
                 &price_model, input, read, write, output, pricing, &account, aliases, no_cost,
-                &ts, cum,
+                &ts, cum, sid, batch,
             ));
             rec
         })
@@ -611,7 +624,7 @@ fn day_to_series(dd: &Value) -> Value {
     v
 }
 
-/// §10.1 多槽短时缓存：替代原单槽实现（"全部"视图与各服务/各悬浮窗交替轮询
+///  多槽短时缓存：替代原单槽实现（"全部"视图与各服务/各悬浮窗交替轮询
 /// 时互相顶掉、命中率低）。HashMap<key, (Instant, Value)> + 条目数上限，
 /// 单条 TTL 不变；键含统计目录，避免不同目录/测试间串缓存。
 struct SlotCache {
@@ -742,7 +755,7 @@ fn get_stats_impl(
     // 逐日读取一次（按需），并按 service 过滤后缓存，供各聚合复用。
     // 模型过滤在记录层统一施加：KPI / 性能 / 图表序列 / 按模型 / 按服务 /
     // 同比等全部聚合都基于过滤后的记录，保证整页统计口径一致。
-    // §7-⑤：当月累计（free_quota 冲抵），仅当前月日期使用
+    // ：当月累计（free_quota 冲抵），仅当前月日期使用
     let month_cum = build_month_cum(dir, &month_prefix);
     let mut by_date: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     // 当前区间内出现过的模型全集（不受模型过滤影响），供前端下拉框使用
@@ -1035,7 +1048,7 @@ fn daily_series(by_date: &BTreeMap<String, Vec<Value>>, span: &(NaiveDate, Naive
     out
 }
 
-/// get_live 短时缓存（TTL 1.5s，多槽 §10.1）：面板与各悬浮窗每 3s 各读一次今日 jsonl，
+/// get_live 短时缓存（TTL 1.5s，多槽 ）：面板与各悬浮窗每 3s 各读一次今日 jsonl，
 /// 高频轮询下避免重复全量读取。
 static LIVE_CACHE: Mutex<Option<SlotCache>> = Mutex::new(None);
 
@@ -1089,7 +1102,7 @@ fn get_live_impl(dir: &Path, service: &str, service_id: &str, primary: &str) -> 
     }))
 }
 
-/// get_daily 短时缓存（TTL 2.5s，多槽 §10.1）：日历热力图轮询时避免重复全量读取
+/// get_daily 短时缓存（TTL 2.5s，多槽 ）：日历热力图轮询时避免重复全量读取
 static DAILY_CACHE: Mutex<Option<SlotCache>> = Mutex::new(None);
 
 /// 返回 [start, end] 区间内每日请求数（热力图用），含 0 值补全。
@@ -1481,7 +1494,7 @@ mod tests {
 
     #[test]
     fn service_id_record_matches_after_rename() {
-        // §2 id 化：带 service_id 的记录在读取层归一化为当前名 ——
+        //  id 化：带 service_id 的记录在读取层归一化为当前名 ——
         // 服务改名后（旧记录 service=old-name，config 里 comment=new-name），
         // 按当前名过滤仍能命中历史记录，byService 显示当前名。
         let dir = std::env::temp_dir().join(format!("o2a_svc_id_test_{}", std::process::id()));

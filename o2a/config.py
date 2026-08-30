@@ -43,7 +43,7 @@ class Account:
         self.openai_url = _normalize_openai_url(openai_url)
         self.anthropic_url = (anthropic_url or "").strip()
         self.api = (api or "").strip()
-        # §8 额度来源：auto（按端点域名嗅探，嗅探不到 → local）| openrouter |
+        #  额度来源：auto（按端点域名嗅探，嗅探不到 → local）| openrouter |
         # anthropic | codex | zen | local | manual | none
         self.quota_source = (quota_source or "auto").strip()
         # manual 适配器的手填额度（冷启动兜底）：{"limit": 200, "unit": "requests",
@@ -80,7 +80,7 @@ class Account:
 def new_service_id() -> str:
     """生成稳定服务 id：svc-<8 位十六进制随机>。
 
-    随机而非递增：多份配置合并 / 导入时无需全局协调（优化方案 §2.2）。"""
+    随机而非递增：多份配置合并 / 导入时无需全局协调。"""
     return "svc-" + secrets.token_hex(4)
 
 
@@ -124,7 +124,7 @@ class Service:
         self.api = (api or "").strip()
         self.upstream_api = (upstream_api or "openai-completions").strip()
         self.thinking_mode = (thinking_mode or "auto").strip() or "auto"
-        # 计价模式（§2.3）："" = 按 pricing.json 计价；"none" = 订阅制兼容别名；
+        # 计价模式（）："" = 按 pricing.json 计价；"none" = 订阅制兼容别名；
         # 对象形式 {"mode": "token"|"subscription"|"free", ...}
         if isinstance(pricing, dict):
             self.pricing = pricing
@@ -137,7 +137,7 @@ class Service:
         self.order = int(order) if order is not None else 0
         self.enabled = enabled is not False and enabled != "false"
         self.autostart = autostart is True or autostart == "true"
-        # §6 服务级模型白名单与别名映射：
+        #  服务级模型白名单与别名映射：
         # models：可见模型白名单（对外名）；空 = 不限制（历史行为，逐字节兼容）
         # models_map：{对外名: 上游名} 别名映射；命中后按上游名转发，统计仍记对外名
         # model_policy：白名单外请求处理 —— clamp 强转主模型（默认）/ reject 400 / passthrough 透传
@@ -215,10 +215,10 @@ _UPSTREAM_API_VALUES = ("openai-completions", "openai-responses")
 # - none：不透传（保持默认模型行为）
 _THINKING_MODES = ("auto", "passthrough", "effort", "enable_thinking", "none")
 
-# 服务级模型策略（§6 模型白名单）：白名单外的请求如何处理
+# 服务级模型策略（ 模型白名单）：白名单外的请求如何处理
 MODEL_POLICIES = ("clamp", "reject", "passthrough")
 
-# §2.3 pricing 字段升级："" | "none" | {"mode": "token"|"subscription"|"free", ...}
+#  pricing 字段升级："" | "none" | {"mode": "token"|"subscription"|"free", ...}
 PRICING_MODES = ("token", "subscription", "free")
 
 
@@ -227,7 +227,7 @@ def normalize_pricing_value(raw):
 
     - ""（缺省）→ token：按 pricing.json 计价（历史行为）
     - "none" → subscription 的兼容别名（历史行为，语义与现状逐字节一致）
-    - dict → mode 必填合法；可附 plan / quota_source 等（衔接 §7.2/§8）
+    - dict → mode 必填合法；可附 plan / quota_source 等（衔接 ）
     非法值回退 token 并警告。"""
     if isinstance(raw, dict):
         mode = raw.get("mode", "token")
@@ -306,7 +306,7 @@ def _save_service_id_registry(config_path, reg):
 
 
 def _ensure_service_ids(config_path, config):
-    """惰性写回：为缺失 id 的服务生成稳定 id 并写回 config.json（优化方案 §2.2）。
+    """惰性写回：为缺失 id 的服务生成稳定 id 并写回 config.json。
 
     生成前优先按显示名从登记表（service_ids.json，与桌面端共用）找回历史 id：
     config 被旧快照覆盖而丢 id 时身份不漂移，历史统计不失联。
@@ -386,7 +386,7 @@ def load_config():
         except (OSError, ValueError):
             config = {}
         if config:
-            # 惰性写回：为缺失 id 的服务生成稳定 id（§2 服务身份 id 化）
+            # 惰性写回：为缺失 id 的服务生成稳定 id（ 服务身份 id 化）
             _ensure_service_ids(config_path, config)
             # 全局缓存统计设置（供 get_stats / is_cache_stats_enabled 读取）
             os.environ.setdefault("CACHE_STATS_ENABLED",
@@ -453,7 +453,7 @@ def load_config():
                     client = "auto"
                 pricing = svc.get("pricing", "")
                 if isinstance(pricing, dict):
-                    # §2.3 对象形式：归一化校验（非法 mode 回退 token），原样保留写回
+                    #  对象形式：归一化校验（非法 mode 回退 token），原样保留写回
                     normalize_pricing_value(pricing)
                 elif pricing not in ("", "none"):
                     logger.warning(f"[config] 服务 {svc.get('comment')} 的 pricing '{pricing}' 非法，忽略（仅支持 none / 对象形式）")

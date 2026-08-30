@@ -1,7 +1,7 @@
 /**
- * 全局 UI 状态（§10.1 stores/config.ts 单一数据源方向的 UI 部分）。
+ * 全局 UI 状态（ stores/config.ts 单一数据源方向的 UI 部分）。
  *
- * toast（含动作按钮/手动关闭，§10.2-5）与确认弹层（confirmBox）在此集中管理，
+ * toast（含动作按钮/手动关闭，）与确认弹层（confirmBox）在此集中管理，
  * 供 PanelApp 与拆分后的各视图组件共享同一实例。
  */
 import { ref } from "vue";

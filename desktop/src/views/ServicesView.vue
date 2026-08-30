@@ -134,7 +134,7 @@
 </template>
 
 <script setup lang="ts">
-// §10.1 配置页视图：从 PanelApp 零行为变更迁出。
+//  配置页视图：从 PanelApp 零行为变更迁出。
 // 共享状态（cfg / 选中服务 / 运行态 / 模型缓存 / 草稿）来自 stores；
 // 保存 / 热重启 / 克隆 / 删除等编排动作经 emit 由 PanelApp 执行。
 import { computed, onMounted, ref } from "vue";

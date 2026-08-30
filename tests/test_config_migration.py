@@ -1,4 +1,4 @@
-"""配置迁移与 id 化回归测试（优化方案 §2 / §13 test_config_migration）。
+"""配置迁移与 id 化回归测试（优化方案  /  test_config_migration）。
 
 覆盖：
 - load_config 缺失 id 惰性生成并写回（含 .bak 备份与去重）
@@ -108,7 +108,7 @@ def test_enabled_string_false_rejected(tmp_path):
     assert load_config()[0].enabled is False
 
 
-# ---------- §2.3 pricing 字段升级 ----------
+# ----------  pricing 字段升级 ----------
 
 def test_pricing_string_none_maps_to_subscription(tmp_path):
     p = write_cfg(tmp_path, {**BASE_CFG, "services": [svc_min(1, pricing="none")]})

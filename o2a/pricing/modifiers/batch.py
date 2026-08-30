@@ -1,4 +1,4 @@
-"""batch modifier：批量折扣（pricing.json 中已存在但 v1 未读取的字段，§7.6-②）。
+"""batch modifier：批量折扣（pricing.json 中已存在但 v1 未读取的字段，）。
 
 用法：{"type": "batch", "factor": 0.5, "when": {"batch": true}}
 仅当 ctx.meta.batch 为真时生效（可选字段，缺省即生效）。

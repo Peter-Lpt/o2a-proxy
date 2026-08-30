@@ -1,4 +1,4 @@
-"""discount modifier：无条件折扣（pricing.json 中已存在但 v1 未读取的字段，§7.6-②）。
+"""discount modifier：无条件折扣（pricing.json 中已存在但 v1 未读取的字段，）。
 
 用法：{"type": "discount", "factor": 0.5, "note": "限时 5 折"}
 全部单价乘 factor（不改变计价结构，仅缩放 components）。

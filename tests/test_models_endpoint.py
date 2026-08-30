@@ -1,4 +1,4 @@
-"""服务级模型白名单 / 别名映射 / model_policy 单元测试（优化方案 §6 + §13）。
+"""服务级模型白名单 / 别名映射 / model_policy 单元测试（优化方案  + ）。
 
 覆盖：
 - _model_entries：白名单空（现状不变）/ 非空（全集 + default/required 标记 + 别名列入）

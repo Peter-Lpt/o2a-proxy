@@ -57,7 +57,7 @@
 </template>
 
 <script setup lang="ts">
-// §10.1 账号页视图：从 PanelApp 零行为变更迁出。
+//  账号页视图：从 PanelApp 零行为变更迁出。
 // 共享状态（cfg / toast / confirm）来自 stores；账号统计（accStats）由父组件
 // 心跳轮询后经 props 下发，本组件只读展示。
 import { computed, ref } from "vue";
@@ -171,7 +171,7 @@ function removeAccount(acc: any) {
       const idx = (cfg.accounts || []).indexOf(acc);
       cfg.accounts = cfg.accounts.filter((a: any) => a.id !== acc.id);
       if (editingAcc.value === acc.id) editingAcc.value = null;
-      // §10.2-5 撤销：仅内存态回滚（未保存不落盘）
+      //  撤销：仅内存态回滚（未保存不落盘）
       showToast(`已删除账号「${acc.name || acc.id}」，点击保存配置生效`, "success", {
         label: "撤销",
         fn: () => {

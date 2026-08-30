@@ -1,8 +1,7 @@
-"""定价 golden fixtures 回归（优化方案 §7.5 / §13 test_pricing）。
+"""定价 golden fixtures 回归。
 
-pytest 与 cargo test（desktop/src-tauri/src/pricing/）跑同一份
-pricing/golden/cases.json，期望值由重构前旧 _calc_cost 算法计算，
-固化"抽模块前后零行为变更"（§7.6-① 最高优先级验收项）。
+pytest 与 cargo test 跑同一份 pricing/golden/cases.json，
+期望值由重构前旧 _calc_cost 算法计算，固化抽模块前后零行为变更。
 
 运行方式：
     python -m pytest test_pricing_golden.py -v
@@ -33,17 +32,41 @@ def _run(case):
         case["pricing"], case["model"],
         usage["input"], usage["cache_read"], usage["cache_write"], usage["output"],
         account_keys=case.get("account_keys") or [],
+        service_id=case.get("service_id", ""),
         timestamp=case.get("timestamp"),
         context_tokens=case.get("context_tokens"),
         cumulative_tokens=case.get("cumulative"),
+        meta=case.get("meta"),
     )
     return result["total"]
+
+
+def _run_full(case):
+    """返回完整 CostResult（用于校验 complete/rule_id/source）。"""
+    usage = case["usage"]
+    return resolve_cost(
+        case["pricing"], case["model"],
+        usage["input"], usage["cache_read"], usage["cache_write"], usage["output"],
+        account_keys=case.get("account_keys") or [],
+        service_id=case.get("service_id", ""),
+        timestamp=case.get("timestamp"),
+        context_tokens=case.get("context_tokens"),
+        cumulative_tokens=case.get("cumulative"),
+        meta=case.get("meta"),
+    )
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
 def test_golden_case(case):
     # 1e-12 容差：双端同序浮点求值应逐位一致，容差仅防 JSON 往返噪声
     assert _run(case) == pytest.approx(case["expected_total"], abs=1e-12)
+    # 若夹具显式声明完整性/规则元数据，也一并校验
+    if "expected_complete" in case:
+        assert _run_full(case)["complete"] is case["expected_complete"]
+    if "expected_rule_id" in case:
+        assert _run_full(case).get("rule_id") == case["expected_rule_id"]
+    if "expected_source" in case:
+        assert _run_full(case).get("source") == case["expected_source"]
 
 
 def test_v1_behaviour_unchanged_cache_fallback():

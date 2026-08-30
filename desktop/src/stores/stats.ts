@@ -1,5 +1,5 @@
 /**
- * 统计域状态与轮询逻辑（§10.1 stores 拆分）。
+ * 统计域状态与轮询逻辑（ stores 拆分）。
  * stats / liveRecords 为引擎统计的响应式镜像；区间（range）与偏好持久化、
  * 模型过滤、额度卡可见性在此集中，PanelApp 心跳只负责触发。
  */
@@ -24,14 +24,14 @@ export const liveRecords = ref<any[]>([]);
 type RangeKey = "today" | "yesterday" | "week" | "lastweek" | "month" | "lastmonth" | "custom";
 // 区间档位（历史档由日历点选自定义区间替代，仅今日/本月暴露为主档）
 // 区间档位：下拉可选档 = 主档 + 快捷预设（近7天/近30天）；lastweek/lastmonth
-// 仅保留 label 兼容（原 rangeOptions 死代码，§10.2-2 统一取值集合）
+// 仅保留 label 兼容（原 rangeOptions 死代码， 统一取值集合）
 export const rangeOptions: { value: RangeKey; label: string }[] = [
   { value: "today", label: "今日" },
   { value: "yesterday", label: "昨日" },
   { value: "week", label: "本周" },
   { value: "month", label: "本月" },
 ];
-// 持久化偏好（§10.2-2）：下拉全集 today/yesterday/week/month/7d/30d 都可记忆，
+// 持久化偏好（）：下拉全集 today/yesterday/week/month/7d/30d 都可记忆，
 // 重启后按同一语义恢复（7d/30d 重算相对日期）；自定义区间不记忆（原行为）
 export function readRangePref(): { range: RangeKey; preset: string | null } {
   try {
@@ -107,7 +107,7 @@ export async function loadStats() {
   if (quotaVisible.value) loadQuota();
 }
 
-// ---------- §8.5 订阅额度展示（订阅制服务：费用卡位置展示额度卡；§2.3 对象形式兼容） ----------
+// ----------  订阅额度展示（订阅制服务：费用卡位置展示额度卡； 对象形式兼容） ----------
 export const quotaVisible = computed(() => {
   if (selected.value === ALL) return false;
   const p: any = activeSvc.value?.pricing;
@@ -121,7 +121,7 @@ export async function loadQuota() {
   try {
     quotaSnapshot.value = await api.getQuota(acc);
   } catch {
-    // 引擎未运行 / 端口不可达：隐藏额度卡，不影响统计页其余渲染（§8.4-3）
+    // 引擎未运行 / 端口不可达：隐藏额度卡，不影响统计页其余渲染（）
     quotaSnapshot.value = null;
   }
 }
@@ -144,7 +144,7 @@ export function setRange(r: RangeKey) {
   loadStats();
 }
 
-// 时间区间下拉的当前值（§10.2-1 修复）：主档直接映射；预设（近7天/近30天）保持
+// 时间区间下拉的当前值（ 修复）：主档直接映射；预设（近7天/近30天）保持
 // 预设键显示"近 7 天"而非跳成"自定义"；仅日历手选的区间才显示"自定义"
 export const rangeSelectValue = computed(() => {
   if (presetKey.value) return presetKey.value;

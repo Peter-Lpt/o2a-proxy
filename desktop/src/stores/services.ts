@@ -1,5 +1,5 @@
 /**
- * 服务域状态与逻辑（§10.1 stores 拆分）。
+ * 服务域状态与逻辑（ stores 拆分）。
  *
  * 从 PanelApp 零行为变更迁出：服务列表/选中态/运行态映射/模型缓存读取/
  * comment 草稿与别名映射草稿/下拉选项常量/入口出口提示。
@@ -98,7 +98,7 @@ export const fetchedModels = computed<string[]>(() => {
   return modelCache.get(`${baseUrl}\n${apiKey}`)?.models || [];
 });
 
-// ---------- §6 白名单 / 别名 / 策略 ----------
+// ----------  白名单 / 别名 / 策略 ----------
 
 export const policyOptions = [
   { value: "clamp", label: "clamp（白名单外强转主模型，默认）" },
@@ -146,7 +146,7 @@ export function commitModelsMap(): boolean {
   return true;
 }
 
-// ---------- comment 改名草稿（§3.3） ----------
+// ---------- comment 改名草稿（） ----------
 
 export const draftComment = ref("");
 export const commentErr = ref("");

@@ -41,7 +41,7 @@
     <div v-if="open" class="sb-mask" data-tauri-drag-region="false" @mousedown="close"></div>
 
     <div v-if="open" class="sb-menu" :style="menuStyle" role="listbox">
-      <!-- §10.2-6：非 custom 模式同样提供搜索（模型一多不用滚动查找） -->
+      <!-- ：非 custom 模式同样提供搜索（模型一多不用滚动查找） -->
       <div v-if="!allowCustom && (opts.length > 8 || query)" class="sb-search">
         <input
           ref="searchEl"

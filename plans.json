@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "_meta": {
+    "note": "套餐目录（方案 §4.5）。services[].pricing.plan 引用这里的套餐名；额度适配器与 /quota 返回统一快照。"
+  },
+  "plans": {
+    "glm-coding-plan": {
+      "mode": "subscription",
+      "currency": "CNY",
+      "version": 1,
+      "windows": [
+        {"kind": "session", "period": "rolling-5h", "unit": "requests"},
+        {"kind": "weekly", "period": "week", "unit": "tokens"}
+      ],
+      "included": {"requests": 500, "tokens": 10000000},
+      "overage": {
+        "default": {"unit": "tokens", "input": 8, "output": 24}
+      },
+      "free_tier": {"tokens": 100000}
+    },
+    "opencode-go": {
+      "mode": "subscription",
+      "currency": "USD",
+      "version": 1,
+      "windows": [
+        {"kind": "monthly", "period": "month", "unit": "requests"},
+        {"kind": "monthly", "period": "month", "unit": "tokens"}
+      ],
+      "included": {"requests": 10000, "tokens": 50000000},
+      "overage": {
+        "default": {"unit": "tokens", "input": 3, "output": 15}
+      }
+    }
+  }
+}

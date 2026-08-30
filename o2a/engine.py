@@ -188,17 +188,19 @@ async def record_stats(service: Service, model: str, usage: dict,
         total_seconds = time.time() - req_start
         if total_seconds > 0:
             meta["output_tokens_per_sec"] = output_tokens / total_seconds
-    # §6 别名：统计按对外名记录（用户认知的名字）；上游名随记录带给计价端
+    # 别名：统计按对外名记录（用户认知的名字）；上游名随记录带给计价端
     display_model = service.reverse_models_map.get(model, model)
     upstream_model = model if display_model != model else None
+    # batch：服务级 pricing 对象可声明 {"mode":"token","batch":true}，批量价生效
+    batch = bool((service.pricing_extra or {}).get("batch"))
     await asyncio.to_thread(
         _stats_for(service).record, display_model, usage or {},
-        error=error, meta=meta, upstream_model=upstream_model
+        error=error, meta=meta, upstream_model=upstream_model, batch=batch
     )
 
 
 def _stats_for(service: Service):
-    """返回该服务的统计实例；非 token 计价（订阅制/免费，§2.3）时不记录价格。"""
+    """返回该服务的统计实例；非 token 计价（订阅制/免费）时不记录价格。"""
     return get_stats(service.name, service.account.id, no_cost=service.pricing_mode != "token",
                      service_id=service.id)
 
@@ -1356,14 +1358,19 @@ async def handle_request(request: web.Request):
     service = request.app["service"]
     if not _check_auth(request, service):
         return auth_error_response()
-    # §9.2 热重载触发：POST /_reload（需接入凭证；引擎收到后异步重载）
+    # 热重载触发：POST /_reload（需接入凭证；引擎收到后异步重载）
     if request.method == "POST" and request.path == "/_reload":
         trigger = request.app.get("_trigger_reload")
         if trigger is None:
             return json_response({"error": "reload not supported"})
         trigger()
         return json_response({"status": "reloading"})
-    # §9.3 重载期间请求明确 503 + Retry-After（/health 保持探活）
+    # 价格热加载：显式清除定价缓存，下次读取按新 pricing.json 重算
+    if request.method == "POST" and request.path == "/pricing-reload":
+        from .stats import clear_pricing_cache
+        clear_pricing_cache()
+        return json_response({"status": "pricing reloaded"})
+    # 重载期间请求明确 503 + Retry-After（/health 保持探活）
     if _reloading_flag() and request.path not in _AUTH_EXEMPT_PATHS:
         resp = json_response({"error": {"type": "api_error",
                                         "message": "service is reloading, retry shortly"}},
@@ -1396,7 +1403,7 @@ async def handle_request(request: web.Request):
     if service.client == "auto" and not service.api:
         service = service.with_mode(mode)
 
-    # §6 模型白名单 / 别名映射（所有分派模式统一施加）
+    #  模型白名单 / 别名映射（所有分派模式统一施加）
     policy_err = _apply_model_policy(service, payload)
     if policy_err is not None:
         return policy_err
@@ -1468,14 +1475,30 @@ async def handle_request(request: web.Request):
 
 
 # ---------------------------------------------------------------------------
-# 额度快照（§8）：/quota 端点的引擎侧实现（TTL 60s 缓存，适配器失败自动降级）
+# 额度快照：/quota 端点的引擎侧实现（TTL 60s 缓存，适配器失败自动降级）
 # ---------------------------------------------------------------------------
 
 _quota_cache = None
 
 
+def _plan_for_account(account_id: str):
+    """按账号在 config 服务中引用的 pricing.plan 查找套餐定义。"""
+    from .pricing import get_plan
+    services = load_config()
+    for svc in services:
+        if svc.account.id != account_id:
+            continue
+        plan_name = (svc.pricing_extra or {}).get("plan")
+        if plan_name:
+            return str(plan_name), get_plan(str(plan_name))
+    return None, None
+
+
 def _quota_snapshot(account_id: str):
-    """组装 QuotaContext 并取某账号的额度快照（放线程池执行，不阻塞事件循环）。"""
+    """组装 QuotaContext 并取某账号的额度快照（放线程池执行，不阻塞事件循环）。
+
+    若账号关联 services[].pricing.plan，则把套餐目录中的 plan 信息补进快照，
+    让前端 QuotaCard 能显示套餐名 / included / overage / free_tier。"""
     global _quota_cache
     from .quota import QuotaContext, get_snapshot
     from .quota.base import TTLCache
@@ -1493,6 +1516,15 @@ def _quota_snapshot(account_id: str):
     except Exception as e:  # 双保险：注册表内部已降级，这里兜住意外
         logger.warning(f"[quota] snapshot failed for {account_id}: {e}")
         snapshot = None
+    # 把套餐目录接到额度快照（pricing_extra.plan 真正参与解析）
+    plan_name, plan = _plan_for_account(account_id)
+    if snapshot is not None and plan is not None:
+        snapshot = dict(snapshot)
+        snapshot["plan"] = {**plan, "name": plan_name}
+        snapshot["planName"] = plan_name
+        if not snapshot.get("windows"):
+            from .pricing import plan_windows_to_snapshot
+            snapshot["windows"] = plan_windows_to_snapshot(plan)
     return snapshot
 
 
@@ -1515,7 +1547,7 @@ def _model_entry(service: Service) -> dict:
 
 
 def _model_entries(service: Service) -> list:
-    """/v1/models 输出全集（§6.2 矩阵）。
+    """/v1/models 输出全集（ 矩阵）。
 
     白名单为空 → 维持现状单条；非空 → 白名单全集（别名键作为对外名一并列入，
     上游名不暴露），主模型带 default=true，required 仅在 override_model=true
@@ -1541,7 +1573,7 @@ def _model_entries(service: Service) -> list:
 
 
 def _apply_model_policy(service: Service, payload: dict):
-    """§6 白名单与别名映射（转换/透传前施加）。返回 400 Response 或 None。
+    """ 白名单与别名映射（转换/透传前施加）。返回 400 Response 或 None。
 
     - 白名单（对外名）非空时：白名单外请求按 model_policy 处理
       clamp=强转主模型（默认，最安全）/ reject=400 列出可用模型 / passthrough=照旧
@@ -1598,12 +1630,37 @@ async def handle_get(request: web.Request, service: Service):
                 lambda: get_stats(service.name, service_id=service.id).get_summary(period))
         return json_response(summary)
     if path == "/quota":
-        # §8.4-4 端隔离：额度只存在引擎这一份实现，Rust 端仅转发与缓存。
+        # 端隔离：额度只存在引擎这一份实现，Rust 端仅转发与缓存。
         # 失败降级与 stale 标记在 quota.registry 内完成，绝不阻塞主流程。
         if not is_cache_stats_enabled():
             return json_response({"error": "cache stats is disabled"})
         account_id = request.query.get("account") or service.account.id
         return json_response(await asyncio.to_thread(_quota_snapshot, account_id))
+    if path == "/pricing-meta":
+        # 暴露价格目录指纹与规则概览，供前端/审计展示
+        import hashlib
+        from .pricing import load_plans, pricing_fingerprint
+        from .base import PROJECT_ROOT
+
+        pricing_path = os.path.join(PROJECT_ROOT, "pricing.json")
+        try:
+            with open(pricing_path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            raw = {}
+        rules = raw.get("rules") or []
+        plans = load_plans()
+        return json_response({
+            "fingerprint": pricing_fingerprint(raw),
+            "version": raw.get("version") or raw.get("_meta", {}).get("schema", "v2"),
+            "currency": raw.get("currency") or raw.get("_meta", {}).get("currency") or "CNY",
+            "rules": len(rules),
+            "plans": sorted((plans.get("plans") or {}).keys()),
+            "plans_fingerprint": hashlib.sha256(
+                json.dumps(plans, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        })
     if path == "/health":
         return json_response({"status": "ok"})
     if path == "/status":
@@ -1657,7 +1714,7 @@ async def serve(service_filter: str = None) -> int:
     )
     session = aiohttp.ClientSession(connector=connector)
 
-    # §9.2 热加载：runners 按 id 索引；重载期间新请求返回 503 + Retry-After
+    #  热加载：runners 按 id 索引；重载期间新请求返回 503 + Retry-After
     state = {"session": session, "runners": {}, "filter": service_filter}
     runners = state["runners"]
     try:
@@ -1718,7 +1775,7 @@ async def _start_service_app(state, svc: Service) -> web.AppRunner:
 
 
 def diff_services(old: dict, new: dict):
-    """按 id diff（§9.2）：返回 (start_ids, stop_ids, swap_ids)。
+    """按 id diff（）：返回 (start_ids, stop_ids, swap_ids)。
 
     - start：新增，或 host/port 变化（需换端口绑定 → 先起新后停旧）
     - stop：被删除，或 host/port 变化的旧实例
@@ -1741,7 +1798,7 @@ def diff_services(old: dict, new: dict):
 
 
 async def _do_reload(state):
-    """重载入口：并发去重 + 失败回滚（§9.3 绝不留半加载状态）。"""
+    """重载入口：并发去重 + 失败回滚（ 绝不留半加载状态）。"""
     if globals().get("_O2A_RELOADING"):
         return
     globals()["_O2A_RELOADING"] = True

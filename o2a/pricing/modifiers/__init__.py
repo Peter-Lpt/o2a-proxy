@@ -1,4 +1,4 @@
-"""modifier 注册表：每种价格方案一个文件、注册一行，主流程零改动（§7.4）。
+"""modifier 注册表：每种价格方案一个文件、注册一行，主流程零改动（）。
 
 modifier 签名（Py/Rs 同构）：
     apply(components: dict, ctx: UsageContext) -> (new_components, applied_notes)
@@ -22,7 +22,7 @@ _REGISTRY = {
     "context_tier": apply_context_tier,
     "free_quota": apply_free_quota,
     "cumulative_tier": apply_cumulative_tier,
-    # overage / subscription：随 §2.3 pricing 对象配置升级接入
+    # overage / subscription：随  pricing 对象配置升级接入
 }
 
 

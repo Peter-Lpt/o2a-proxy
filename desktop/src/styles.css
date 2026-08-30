@@ -34,7 +34,7 @@
   --chart-bar: rgba(79, 140, 255, 0.5);
   --chart-line: #34d399;
   --chart-line-glow: rgba(52, 211, 153, 0.22);
-  /* §10.5 design tokens：新组件优先使用；旧样式渐进迁移 */
+  /*  design tokens：新组件优先使用；旧样式渐进迁移 */
   --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-6: 24px;
   --r-sm: 6px; --r-md: 8px; --r-lg: 12px; --r-xl: 14px;
   --fs-xs: 10px; --fs-sm: 11px; --fs-md: 12px; --fs-lg: 13.5px;
@@ -228,7 +228,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .float-btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-dim); }
 
 /* ---------- 服务标签 ---------- */
-/* §5.2A 服务栏一行布局：左侧标签/提示区（flex:1），右侧切换按钮同行右置 */
+/*  服务栏一行布局：左侧标签/提示区（flex:1），右侧切换按钮同行右置 */
 .svc-bar { position: relative; padding: 0 14px 9px; display: flex; align-items: center; gap: 6px; }
 .svc-tabs-zone { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; overflow: hidden; }
 .svc-toggle { flex: none; }
@@ -293,7 +293,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .svc-tab .power:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
 
-/* ---------- §5.2A 标签栏 ↔ 排序列表切换动效 ---------- */
+/* ----------  标签栏 ↔ 排序列表切换动效 ---------- */
 /* 标签栏 ↔ 提示行交叉淡切 */
 .swapfade-enter-active, .swapfade-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
 .swapfade-enter-from { opacity: 0; transform: translateY(-3px); }
@@ -637,11 +637,11 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
 .model-hint { font-size: 10.5px; color: var(--muted-2); margin-top: 2px; line-height: 1.5; }
 .model-hint.err { color: var(--red); }
-/* 行内校验错误（表单字段下方红字，§10.2-3 行内校验） */
+/* 行内校验错误（表单字段下方红字， 行内校验） */
 .field-err { color: var(--red); font-size: 10.5px; line-height: 1.5; margin: 2px 0 0 1px; }
-/* 有未保存改动时保存按钮高亮（§5.2D 脏状态） */
+/* 有未保存改动时保存按钮高亮（ 脏状态） */
 .btn.attn { border-color: var(--amber); color: var(--amber); box-shadow: 0 0 0 3px var(--amber-dim); }
-/* §10.2-7 骨架屏（统计加载占位） */
+/*  骨架屏（统计加载占位） */
 .skel .skel-line { display: block; height: 9px; width: 55%; border-radius: 5px; background: linear-gradient(90deg, var(--border-soft) 25%, var(--border) 50%, var(--border-soft) 75%); background-size: 200% 100%; animation: skel 1.2s ease infinite; }
 .skel .skel-line.short { width: 35%; }
 .skel .skel-bar { display: block; height: 15px; width: 75%; margin: 5px 0; border-radius: 5px; background: linear-gradient(90deg, var(--border-soft) 25%, var(--border) 50%, var(--border-soft) 75%); background-size: 200% 100%; animation: skel 1.2s ease infinite; }
@@ -692,7 +692,7 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
   border-color: rgba(248, 113, 113, 0.45);
   color: var(--red);
 }
-/* §10.2-5 Toast 动作按钮（撤销/打开配置）与手动关闭 */
+/*  Toast 动作按钮（撤销/打开配置）与手动关闭 */
 .toast .toast-msg { flex: 1; }
 .toast { display: flex; align-items: center; gap: 9px; max-width: 86%; }
 .toast .toast-act {

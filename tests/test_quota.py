@@ -1,10 +1,11 @@
-"""额度适配器单元测试（优化方案 §8 / §13 test_quota）。
+"""额度适配器单元测试。
 
 覆盖：
 - QuotaSnapshot 归一化结构（adapterId/scope/source/windows/plan/stale）
 - local-rolling-5h 窗口边界（5h 内计入 / 5h 外不计）
 - local 日/周/月窗口
 - manual 手填额度（plan_config 来源）
+- declarative / opencode-go / zai / OpenRouter credits
 - 注册表隔离：auto 域名嗅探、显式名、未注册名回退 local
 - 失败降级：适配器抛错 → local 兜底标 stale，绝不外泄异常
 - TTL 缓存命中与 stale 降级
@@ -28,6 +29,10 @@ from o2a.quota.registry import get_snapshot, registered_adapters
 from o2a.quota.adapters._stats_util import iter_records
 from o2a.quota.adapters.local import LocalQuotaAdapter
 from o2a.quota.adapters.local_rolling_5h import LocalRolling5hAdapter
+from o2a.quota.adapters.declarative import DeclarativeQuotaAdapter
+from o2a.quota.adapters.opencode_go import OpenCodeGoAdapter
+from o2a.quota.adapters.zai import ZaiAdapter
+from o2a.quota.adapters.openrouter import OpenRouterAdapter
 
 
 def make_account(**kw):
@@ -150,7 +155,97 @@ def test_no_source_means_no_quota():
     assert resolve_adapter_name(acc) == "local"
 
 
-# ---------- 失败降级（§8.4-3 失败隔离） ----------
+# ---------- 验证性适配器（declarative / opencode-go / zai / credits） ----------
+
+def test_declarative_adapter(tmp_path):
+    ctx = QuotaContext(
+        stats_dir=str(tmp_path / "stats"),
+        account=make_account(quota_source="declarative", quota={
+            "plan": "glm-coding-plan",
+            "windows": [{"kind": "month", "period": "month", "unit": "requests", "limit": 200}],
+        }),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = DeclarativeQuotaAdapter().fetch(ctx)
+    assert snap["adapterId"] == "declarative"
+    assert snap["source"] == "plan_config"
+    assert snap["plan"]["name"] == "glm-coding-plan"
+    assert snap["windows"][0]["limit"] == 200
+
+
+class _FakeResp:
+    def __init__(self, data, status=200):
+        self.data = data
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def json(self, **kw):
+        return self.data
+
+
+class _FakeSession:
+    def __init__(self, data):
+        self.data = data
+
+    def get(self, url, **kw):
+        return _FakeResp(self.data)
+
+
+def test_opencode_go_adapter_mock():
+    import asyncio
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(quota_source="opencode-go", quota={"url": "https://api.opencode.ai"}),
+        session=_FakeSession({"data": {"usage": 1.25, "limit": 100}}),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = asyncio.run(OpenCodeGoAdapter().fetch(ctx))
+    assert snap["adapterId"] == "opencode-go"
+    assert snap["windows"][0]["used"] == 1.25
+    assert snap["windows"][0]["limit"] == 100
+
+
+def test_zai_adapter_mock():
+    import asyncio
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(quota_source="zai", quota={"url": "https://open.bigmodel.cn/api/paas/v4"}),
+        session=_FakeSession({"data": {"used_quota": 5, "total_quota": 20}}),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = asyncio.run(ZaiAdapter().fetch(ctx))
+    assert snap["adapterId"] == "zai"
+    assert snap["windows"][0]["limit"] == 20
+
+
+def test_openrouter_credits_adapter_mock():
+    import asyncio
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(quota_source="openrouter",
+                             quota={"mode": "credits", "url": "https://openrouter.ai"}),
+        session=_FakeSession({"data": {"used_credits": 7, "total_credits": 50}}),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = asyncio.run(OpenRouterAdapter().fetch(ctx))
+    assert snap["adapterId"] == "openrouter"
+    assert snap["windows"][0]["used"] == 7
+    assert snap["windows"][0]["limit"] == 50
+
+
+def test_registry_new_adapter_names():
+    assert "declarative" in registered_adapters()
+    assert "opencode-go" in registered_adapters()
+    assert "zai" in registered_adapters()
+    assert resolve_adapter_name(make_account(quota_source="glm-coding-plan")) == "zai"
+
+
+# ---------- 失败降级 ----------
 
 def test_upstream_failure_degrades_to_local(tmp_path, monkeypatch):
     ctx = QuotaContext(stats_dir=str(tmp_path / "stats"), account=make_account())
@@ -186,7 +281,7 @@ def test_iter_records_filters_account(tmp_path):
                              datetime(2026, 1, 1))) == []
 
 
-# ---------- /quota 端点（§8.4-4 端隔离） ----------
+# ---------- /quota 端点 ----------
 
 def test_quota_endpoint(tmp_path, monkeypatch):
     import asyncio
