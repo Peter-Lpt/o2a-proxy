@@ -369,7 +369,7 @@ o2a-proxy/
 ├── config.example.json      # 配置模板
 ├── pricing.json             # 模型定价
 ├── requirements.txt         # Python 依赖
-├── scripts/                 # shell 脚本（start-proxy / cache-stats / cache-summary）
+├── scripts/                 # shell 脚本（start-proxy / cache-summary）
 ├── tests/                   # pytest 测试（conftest.py 注入项目根）
 ├── desktop/                 # Tauri 2 + Vue 3 桌面客户端
 │   ├── src-tauri/           # Rust 后端（托盘 / 进程管理 / 统计聚合）

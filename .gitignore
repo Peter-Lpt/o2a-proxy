@@ -2,6 +2,11 @@
 config.json
 auth.json
 
+# 本地运行时映射/备份（不入库）
+config.json.bak
+*.bak
+service_ids.json
+
 # IDE / tool settings
 .claude/
 .codex/

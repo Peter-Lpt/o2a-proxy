@@ -109,7 +109,7 @@
 
 - **Python 逻辑收拢为 `o2a/` 包**：`engine.py`（原 `proxy_async.py`）、`convert.py`（协议转换）、`config.py`（账号/服务/配置）、`stats.py`（缓存统计与计费）、`base.py`（日志/常量/项目根定位）
 - **根目录兼容 shim**：`proxy.py` / `proxy_async.py` 改为 re-export 兼容层——桌面端路径探测（`find_root`）、绿色版组装、旧导入方式（`import proxy` / `import proxy_async`）全部不受影响；新增 `python -m o2a` 入口
-- **脚本收拢**：`start-proxy.sh` / `cache-stats.sh` / `cache-summary.sh` 移入 `scripts/`
+- **脚本收拢**：`start-proxy.sh` / `cache-summary.sh` 移入 `scripts/`（`cache-stats.py` 保留在根目录）
 - **测试收拢**：三个 `test_*.py` 移入 `tests/`（新增 `conftest.py` 注入项目根；CI 与 pytest 双路径均可运行）
 - **运行时数据分离**：统计默认目录由 `cache_stats/` 改为 `<项目根>/data/cache_stats`；运行日志收拢到 `logs/`（均为运行时生成，已入 .gitignore）
 - **.gitignore 修正**：`o2a-proxy.exe` → `o2a-desktop.exe`，新增 `data/`、`logs/`、`.pi-subagents/`、`.pytest_cache/`、`vite-dev.*.log`
