@@ -9,7 +9,14 @@ import { ALL, selected } from "./config";
 import { activeSvc } from "./services";
 
 export const stats = reactive<any>({});
-export const statsService = computed(() => (selected.value === ALL ? "" : selected.value));  // 当前服务（id 直传后端）
+// 统计查询用显示名（comment）而不是内存里的 id：
+// config 被外部修正/恢复 id 后，面板内存可能还持有旧 id（如 svc-0783f757），
+// 直接传 id 会导致后端按 id 查不到数据；comment 能命中 JSONL 的 service 字段，
+// 后端读取层还会按当前 config 把 service_id 归一化为 comment，改名也不丢。
+export const statsService = computed(() => {
+  if (selected.value === ALL) return "";
+  return activeSvc.value?.comment || selected.value;
+});
 // 当前所选服务集合是否展示费用（订阅制如 opencode token/code plan 不计价）
 export const showCost = computed(() => stats.showCost !== false);
 export const liveRecords = ref<any[]>([]);

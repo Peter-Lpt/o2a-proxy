@@ -92,11 +92,14 @@
               <MultiSelect v-model="activeSvcModels" :options="fetchedModels" :locked="activeSvc?.model || ''" :disabled="activeSvcRunning" />
             </label>
             <label>白名单外请求 model_policy
-              <SelectBox v-model="activeSvc.model_policy" :options="policyOptions" :disabled="activeSvcRunning" />
+              <SelectBox v-model="activeSvc.model_policy" :options="policyOptions" placeholder="clamp（默认）" :disabled="activeSvcRunning" />
             </label>
-            <label>别名映射 models_map <span class="fc-sub" style="font-weight:400">（每行一条：对外名=上游名，统计记对外名）</span>
-              <textarea v-model="modelsMapDraft" rows="2" spellcheck="false" :disabled="activeSvcRunning"
-                        placeholder="claude-sonnet-4=deepseek-v4-flash" @change="commitModelsMap"></textarea>
+            <label>别名映射 models_map <span class="fc-sub" style="font-weight:400">（统计记对外名，实际转发用上游名）</span>
+              <div class="map-editor">
+                <textarea v-model="modelsMapDraft" rows="3" spellcheck="false" :disabled="activeSvcRunning"
+                          placeholder="claude-sonnet-4=deepseek-v4-flash" @change="commitModelsMap"></textarea>
+                <div class="map-editor-tip">每行一条：对外名=上游名，例如 claude-sonnet-4=deepseek-v4-flash</div>
+              </div>
             </label>
             <div class="grid2">
               <label>监听端口 listen_address <input v-model="activeSvc.listen_address" type="number" min="1" max="65535" :disabled="activeSvcRunning" /></label>
@@ -247,3 +250,35 @@ const portSummary = computed(() => {
   return Math.min(...n) === Math.max(...n) ? String(n[0]) : `${Math.min(...n)}–${Math.max(...n)}`;
 });
 </script>
+<style scoped>
+.map-editor {
+  width: 100%;
+}
+.map-editor textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text);
+  outline: none;
+  resize: vertical;
+  min-height: 64px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.map-editor textarea:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.15);
+}
+.map-editor-tip {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--muted-2);
+  line-height: 1.5;
+}
+</style>

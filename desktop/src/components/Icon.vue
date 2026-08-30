@@ -102,6 +102,14 @@
       <line x1="12" y1="5" x2="12" y2="19" />
       <polyline points="19 12 12 19 5 12" />
     </template>
+    <template v-else-if="name === 'grip'">
+      <circle cx="9" cy="6" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="6" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="9" cy="18" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="15" cy="18" r="1.6" fill="currentColor" stroke="none" />
+    </template>
   </svg>
 </template>
 

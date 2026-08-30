@@ -41,8 +41,11 @@ export function ensureSvcIds(c: any) {
 }
 
 // ---------- §5.2D 脏状态 ----------
-let cfgSnapshot = "";
+// 快照用 ref 保存：snapCfg() 后即使 cfg 本身没有再次变化，dirty 也会因
+// 快照依赖变化而重新计算，避免“加载/弃改后仍误报未保存”的过期脏状态。
+// 初始快照直接取当前空 cfg，避免配置尚未加载时被误判为“有未保存改动”。
+const cfgSnapshot = ref(JSON.stringify(cfg));
 export function snapCfg() {
-  cfgSnapshot = JSON.stringify(cfg);
+  cfgSnapshot.value = JSON.stringify(cfg);
 }
-export const dirty = computed(() => JSON.stringify(cfg) !== cfgSnapshot);
+export const dirty = computed(() => JSON.stringify(cfg) !== cfgSnapshot.value);

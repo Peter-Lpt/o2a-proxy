@@ -228,19 +228,32 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .float-btn:hover { color: var(--blue); border-color: var(--blue); background: var(--blue-dim); }
 
 /* ---------- 服务标签 ---------- */
-.svc-bar { position: relative; padding: 0 14px 9px; }
+/* §5.2A 服务栏一行布局：左侧标签/提示区（flex:1），右侧切换按钮同行右置 */
+.svc-bar { position: relative; padding: 0 14px 9px; display: flex; align-items: center; gap: 6px; }
+.svc-tabs-zone { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; overflow: hidden; }
+.svc-toggle { flex: none; }
+/* 列表模式下标签栏位置显示操作提示（与按钮同行） */
+.svc-mode-hint {
+  flex: 1; min-width: 0;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 10.5px; color: var(--muted-2);
+  white-space: nowrap; overflow: hidden;
+  padding-left: 2px;
+  user-select: none;
+}
 /* 溢出渐隐遮罩：提示两侧还有更多服务（可拖拽 / 滚轮横向滚动） */
 .tab-edge {
   position: absolute;
   top: 0;
-  bottom: 9px;
+  bottom: 0;
   width: 20px;
   pointer-events: none;
   z-index: 1;
 }
-.tab-edge.left { left: 14px; background: linear-gradient(90deg, var(--bg), transparent); }
-.tab-edge.right { right: 14px; background: linear-gradient(270deg, var(--bg), transparent); }
+.tab-edge.left { left: 0; background: linear-gradient(90deg, var(--bg), transparent); }
+.tab-edge.right { right: 0; background: linear-gradient(270deg, var(--bg), transparent); }
 .svc-tabs {
+  flex: 1; min-width: 0;
   display: flex; gap: 6px; overflow-x: auto;
   padding-bottom: 4px;
   user-select: none; cursor: grab;
@@ -279,6 +292,19 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   background: rgba(255, 255, 255, 0.05);
 }
 .svc-tab .power:hover { background: rgba(255, 255, 255, 0.12); opacity: 1; }
+
+/* ---------- §5.2A 标签栏 ↔ 排序列表切换动效 ---------- */
+/* 标签栏 ↔ 提示行交叉淡切 */
+.swapfade-enter-active, .swapfade-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
+.swapfade-enter-from { opacity: 0; transform: translateY(-3px); }
+.swapfade-leave-to { opacity: 0; transform: translateY(3px); }
+/* 列表卡片高度展开/收起（grid rows 0fr→1fr 动画，无需 JS 测高） */
+.slv-roll { display: grid; grid-template-rows: 1fr; opacity: 1; }
+.slv-roll-clip { overflow: hidden; min-height: 0; }
+.slvroll-enter-active, .slvroll-leave-active {
+  transition: grid-template-rows 0.26s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.2s ease;
+}
+.slvroll-enter-from, .slvroll-leave-to { grid-template-rows: 0fr; opacity: 0; }
 
 /* ---------- 状态信号条 ---------- */
 .bar {
@@ -621,7 +647,14 @@ form input[type="checkbox"], .acc-edit input[type="checkbox"] { accent-color: va
 .skel .skel-bar { display: block; height: 15px; width: 75%; margin: 5px 0; border-radius: 5px; background: linear-gradient(90deg, var(--border-soft) 25%, var(--border) 50%, var(--border-soft) 75%); background-size: 200% 100%; animation: skel 1.2s ease infinite; }
 .skel .skel-bar.wide { height: 90px; width: 100%; }
 @keyframes skel { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-.form-actions { display: flex; gap: 8px; margin-top: 12px; }
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.form-actions .btn { white-space: nowrap; }
 .hint { font-size: 10.5px; color: var(--muted-2); margin-top: 12px; line-height: 1.6; }
 .cfg-lock {
   display: flex; align-items: center; gap: 10px; justify-content: space-between;

@@ -89,6 +89,8 @@ pnpm tauri dev      # 开发运行（托盘在系统托盘区）
 pnpm tauri build    # 打包（Windows NSIS/MSI、macOS dmg）
 ```
 
+> **同时运行两个实例**：已移除单实例限制，可同时启动正式版 `o2a-desktop.exe` 与开发版 `pnpm tauri dev`，方便一边使用一边改代码。在 `desktop/` 下执行 `pnpm dev:dual` 可一键先启动正式版、再启动开发版。两个实例共用同一份 `config.json` / 统计数据，代理端口也相同，实际使用时只让其中一个实例启动代理，避免端口冲突。
+
 客户端自动定位项目根目录（含 `proxy.py` 的目录），Python 路径可用 `O2A_PYTHON` 环境变量指定。
 
 ### 3. 配置 Claude Code

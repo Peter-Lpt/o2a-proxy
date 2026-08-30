@@ -26,6 +26,7 @@ vite-dev.*.log
 # 绿色版可执行文件与打包产物（构建产物，随源码重新打包）
 o2a-proxy.exe
 o2a-desktop.exe
+o2a-desktop-new.exe
 o2a-desktop.exe.bak
 mac/
 

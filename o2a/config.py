@@ -283,9 +283,33 @@ def _resolve_api_key(auth, acc_id, acc_name, embedded):
     return embedded
 
 
+def _service_id_registry_path(config_path):
+    """服务 id 登记表：与 config.json 同目录（service_ids.json），comment → id。"""
+    return os.path.join(os.path.dirname(config_path), "service_ids.json")
+
+
+def _load_service_id_registry(config_path):
+    try:
+        with open(_service_id_registry_path(config_path), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_service_id_registry(config_path, reg):
+    try:
+        with open(_service_id_registry_path(config_path), "w", encoding="utf-8") as f:
+            json.dump(reg, f, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
 def _ensure_service_ids(config_path, config):
     """惰性写回：为缺失 id 的服务生成稳定 id 并写回 config.json（优化方案 §2.2）。
 
+    生成前优先按显示名从登记表（service_ids.json，与桌面端共用）找回历史 id：
+    config 被旧快照覆盖而丢 id 时身份不漂移，历史统计不失联。
     仅在解析成功且确有缺失时写一次；格式化采用 2 空格缩进 + ensure_ascii=False。
     写回前备份为 config.json.bak（同目录，覆盖旧备份）。
     """
@@ -307,16 +331,28 @@ def _ensure_service_ids(config_path, config):
     if not missing:
         return
     assigned = set()
+    reg = _load_service_id_registry(config_path)
+    reg_changed = False
     for svc in services:
         if not isinstance(svc, dict):
             continue
+        comment = str(svc.get("comment") or "")
         sid = str(svc.get("id") or "").strip()
         if not sid or sid in assigned:
-            sid = new_service_id()
-            while sid in assigned:
+            # 优先按显示名从登记表找回同一 id，找不到才重新生成
+            sid = str(reg.get(comment) or "")
+            if not sid or sid in assigned:
                 sid = new_service_id()
+                while sid in assigned:
+                    sid = new_service_id()
             svc["id"] = sid
+            reg_changed = True
         assigned.add(sid)
+        if comment and str(reg.get(comment) or "") != sid:
+            reg[comment] = sid
+            reg_changed = True
+    if reg_changed:
+        _save_service_id_registry(config_path, reg)
     backup = config_path + ".bak"
     try:
         if os.path.exists(config_path):

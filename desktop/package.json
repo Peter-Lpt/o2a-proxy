@@ -6,6 +6,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:tauri": "tauri dev",
+    "dev:dual": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-dual.ps1",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -312,7 +312,7 @@ onBeforeUnmount(() => {
   background: var(--bg);
   border: 1px solid var(--border-soft);
   border-radius: 8px;
-  padding: 6px 28px 6px 9px;
+  padding: 6px 9px;
   font-size: 12px;
   color: var(--text);
   position: relative;
@@ -323,13 +323,15 @@ onBeforeUnmount(() => {
   border-color: var(--blue);
 }
 .sb-md .sb-btn {
-  padding: 7px 28px 7px 9px;
+  padding: 7px 9px;
 }
 .sb-sm .sb-btn {
-  padding: 3px 24px 3px 8px;
+  padding: 3px 8px;
   font-size: 11px;
 }
 .sb-label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

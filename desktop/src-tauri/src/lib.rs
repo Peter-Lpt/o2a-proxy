@@ -396,7 +396,109 @@ fn resolve_python(state: State<'_, AppState>) -> String {
 
 #[tauri::command]
 fn read_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    read_config_value(&state)
+    let mut cfg = read_config_value(&state)?;
+    ensure_service_ids_with_registry(&state, &mut cfg);
+    Ok(cfg)
+}
+
+/// 服务 id 登记表（comment → id），与 config.json 同目录（service_ids.json）。
+/// config 被旧快照覆盖保存而丢失 id 时，按显示名找回**同一个** id，
+/// 而不是重新随机生成 —— 否则每次覆盖保存都会让全部服务换身份，历史统计失联。
+fn service_id_map_path(state: &AppState) -> PathBuf {
+    let mut p = config_path(state);
+    p.set_file_name("service_ids.json");
+    p
+}
+
+fn read_service_id_map(state: &AppState) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(service_id_map_path(state))
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn write_service_id_map(state: &AppState, map: &serde_json::Map<String, serde_json::Value>) {
+    if let Ok(s) = serde_json::to_string_pretty(map) {
+        let _ = std::fs::write(service_id_map_path(state), s);
+    }
+}
+
+fn new_random_service_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let mut x = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    // splitmix64 终混
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = x;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    format!("svc-{:08x}", (z & 0xFFFF_FFFF) as u32)
+}
+
+/// 缺失/重复 id 的补齐：优先按显示名从登记表找回，找不到才生成新 id；
+/// 最终 (comment, id) 对齐回登记表（有变化才写盘）。与引擎侧 o2a/config.py 共用同一份登记表。
+fn ensure_service_ids_with_registry(state: &AppState, cfg: &mut serde_json::Value) {
+    let Some(services) = cfg.get_mut("services").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    let mut registry = read_service_id_map(state);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut changed = false;
+    for s in services.iter_mut() {
+        let comment = s
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let id = s
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !id.is_empty() && !seen.contains(&id) {
+            seen.insert(id);
+            continue;
+        }
+        // 缺失或重复：先按显示名找回，登记 id 未被占用才可用
+        let recovered = registry
+            .get(&comment)
+            .and_then(|v| v.as_str())
+            .filter(|x| !x.is_empty() && !seen.contains(*x))
+            .map(|x| x.to_string());
+        let new_id = recovered.unwrap_or_else(|| {
+            let mut id = new_random_service_id();
+            while seen.contains(&id) {
+                id = new_random_service_id();
+            }
+            id
+        });
+        seen.insert(new_id.clone());
+        if let Some(o) = s.as_object_mut() {
+            o.insert("id".to_string(), serde_json::json!(new_id));
+        }
+        changed = true;
+    }
+    // (comment, id) 对齐回登记表；改名后旧键保留（回滚旧快照时仍可找回）
+    for s in services.iter() {
+        let comment = s.get("comment").and_then(|v| v.as_str()).unwrap_or("");
+        let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if comment.is_empty() || id.is_empty() {
+            continue;
+        }
+        if registry.get(comment).and_then(|v| v.as_str()) != Some(id) {
+            registry.insert(comment.to_string(), serde_json::json!(id));
+            changed = true;
+        }
+    }
+    if changed {
+        write_service_id_map(state, &registry);
+    }
 }
 
 /// 将 cfg 中 accounts[].api_key 抽取到 auth 映射（按账号 id），并从 cfg 移除。
@@ -444,6 +546,10 @@ fn split_account_keys(
 
 #[tauri::command]
 fn save_config(state: State<'_, AppState>, mut cfg: serde_json::Value) -> Result<(), String> {
+    // 服务 id 稳定化：保存前补齐缺失/重复 id，并把 (comment, id) 对齐到
+    // service_ids.json 登记表。避免面板内存/旧快照保存时把“临时生成的 id”写入
+    // config 却不同步登记表，导致下次 id 丢失后引擎又随机生成新 id、历史统计失联。
+    ensure_service_ids_with_registry(&state, &mut cfg);
     // Key 分流：accounts[].api_key → auth.json；config.json 保持不含 Key（新版本默认）
     let mut auth_obj = read_auth(&state)
         .as_object()
@@ -773,15 +879,29 @@ async fn get_stats(
         let state = app.state::<AppState>();
         let svc_name = resolve_service_name(&state, &service);
         let r = range.as_deref().unwrap_or("today");
-        stats::get_stats(
+        let out = stats::get_stats(
             &stats_dir(&state),
             &svc_name,
+            &service,
             &primary_service(&state),
             r,
             start.as_deref(),
             end.as_deref(),
             model.as_deref().unwrap_or(""),
-        )
+        );
+        // §临时诊断：定位“选中服务无数据”——打印运行时查询三要素（用后即删）
+        if let Ok(ref v) = out {
+            eprintln!(
+                "[stats-diag] raw={:?} resolved={:?} range={:?} dir={} today.requests={} month.requests={}",
+                service,
+                svc_name,
+                r,
+                stats_dir(&state).display(),
+                v["today"]["requests"],
+                v["month"]["requests"]
+            );
+        }
+        out
     })
     .await
     .map_err(|e| e.to_string())?
@@ -797,7 +917,7 @@ async fn get_daily(
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let svc_name = resolve_service_name(&state, &service);
-        stats::get_daily(&stats_dir(&state), &svc_name, &primary_service(&state), &start, &end)
+        stats::get_daily(&stats_dir(&state), &svc_name, &service, &primary_service(&state), &start, &end)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -808,7 +928,7 @@ async fn get_live(app: tauri::AppHandle, service: String) -> Result<serde_json::
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         let svc_name = resolve_service_name(&state, &service);
-        stats::get_live(&stats_dir(&state), &svc_name, &primary_service(&state))
+        stats::get_live(&stats_dir(&state), &svc_name, &service, &primary_service(&state))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1423,10 +1543,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_dialog::init())
-        // 单实例：重复启动时唤起已有实例（显示面板），避免多开残留进程
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            let _ = toggle_panel(app.clone());
-        }))
         .invoke_handler(tauri::generate_handler![
             resolve_root,
             resolve_python,

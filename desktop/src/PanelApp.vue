@@ -19,39 +19,52 @@
     </header>
 
     <div class="svc-bar">
-      <div class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel" @scroll="onTabsScroll">
-        <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selectAll">
-          <span class="dot" :class="{ on: anyRunning, busy: anyBusy }"></span>全部
-        </button>
-        <button
-          v-for="s in serviceList"
-          :key="s.id || s.comment"
-          class="svc-tab"
-          :class="{ active: selected === (s.id || s.comment) }"
-          @click="selectService(s)"
-          :title="s.comment + ' · ' + (s.client || 'auto') + ' · :' + (s.listen_address ?? '?')"
-        >
-          <span class="dot" :class="{ on: runningMap[s.id], busy: busyMap[s.id] }"></span>{{ s.comment }}
-          <span class="power" @click.stop="toggleSvc(s.id)" :title="runningMap[s.id] ? '停止' : '启动'">
-            <Icon :name="runningMap[s.id] ? 'stop' : 'play'" :size="10" />
+      <div class="svc-tabs-zone">
+        <Transition name="swapfade">
+          <div v-if="!useListView" class="svc-tabs" ref="svcTabs" @mousedown="onTabsDown" @wheel.prevent="onTabsWheel" @scroll="onTabsScroll">
+            <button class="svc-tab" :class="{ active: selected === '__all__' }" @click="selectAll">
+              <span class="dot" :class="{ on: anyRunning, busy: anyBusy }"></span>全部
+            </button>
+            <button
+              v-for="s in serviceList"
+              :key="s.id || s.comment"
+              class="svc-tab"
+              :class="{ active: selected === (s.id || s.comment) }"
+              @click="selectService(s)"
+              :title="s.comment + ' · ' + (s.client || 'auto') + ' · :' + (s.listen_address ?? '?')"
+            >
+              <span class="dot" :class="{ on: runningMap[s.id], busy: busyMap[s.id] }"></span>{{ s.comment }}
+              <span class="power" @click.stop="toggleSvc(s.id)" :title="runningMap[s.id] ? '停止' : '启动'">
+                <Icon :name="runningMap[s.id] ? 'stop' : 'play'" :size="10" />
+              </span>
+            </button>
+          </div>
+          <span v-else class="svc-mode-hint" aria-hidden="true">
+            <Icon name="grip" :size="11" />拖动调整服务顺序 · 松手自动保存
           </span>
-        </button>
+        </Transition>
+        <span v-if="tabEdgeL && !useListView" class="tab-edge left" aria-hidden="true"></span>
+        <span v-if="tabEdgeR && !useListView" class="tab-edge right" aria-hidden="true"></span>
       </div>
-      <span v-if="tabEdgeL" class="tab-edge left" aria-hidden="true"></span>
-      <span v-if="tabEdgeR" class="tab-edge right" aria-hidden="true"></span>
-      <button class="icon-btn" :class="{ active: useListView }" style="flex:none"
-              :title="useListView ? '切换为标签栏' : '切换为服务列表（搜索/排序/批量）'"
+      <button class="icon-btn svc-toggle" :class="{ active: useListView }"
+              :title="useListView ? '切换为标签栏' : '切换为服务列表（拖动排序）'"
               @click="toggleListView">
         <Icon :name="useListView ? 'panel' : 'chevron-down'" :size="12" />
       </button>
     </div>
 
-    <!-- §5.2A 服务列表视图：服务 >6 自动启用，或手动切换 -->
-    <div v-if="useListView" class="card slv-card">
-      <ServiceListView ref="listViewRef" :services="listRows" @open="openServiceFromList" @toggle="toggleSvc"
-                       @clone="cloneById" @remove="removeById" @batch-start="batchStart"
-                       @batch-stop="batchStop" @batch-remove="batchRemove" @usage="loadListUsage" />
-    </div>
+    <!-- §5.2A 服务列表视图：服务 >6 自动启用，或手动切换；拖动行 ⠿ 调整顺序（松手自动保存） -->
+    <Transition name="slvroll">
+      <div v-if="useListView" class="slv-roll">
+        <div class="slv-roll-clip">
+          <div class="card slv-card">
+            <ServiceListView ref="listViewRef" :services="listRows" @open="openServiceFromList" @toggle="toggleSvc"
+                             @clone="cloneById" @remove="removeById"
+                             @reorder="reorderServices" @reorder-end="onReorderEnd" />
+          </div>
+        </div>
+      </div>
+    </Transition>
 
     <div v-if="!anyRunning" class="bar off-bar">
       <span class="dot off"></span>
@@ -120,6 +133,7 @@ import ConfirmDialog from "./components/ConfirmDialog.vue";
 import Icon from "./components/Icon.vue";
 import ServiceListView, { type ServiceRow } from "./components/ServiceListView.vue";
 import AccountsView from "./views/AccountsView.vue";
+import ServicesView from "./views/ServicesView.vue";
 import { applyTheme, getTheme, toggleTheme, watchSystemTheme, type Theme } from "./theme";
 import {
   MODEL_CACHE_TTL,
@@ -452,7 +466,7 @@ function removeById(id: string) {
   if (s) removeSvc(s);
 }
 
-// ---------- §5.2A 服务列表视图（>6 服务自动启用，或手动切换） ----------
+// ---------- §5.2A 服务列表视图（>6 服务自动启用，或手动切换；拖动行 ⠿ 调整顺序） ----------
 const LIST_PREF_KEY = "o2a.panel.listView";
 const listMode = ref(localStorage.getItem(LIST_PREF_KEY) === "1");
 const useListView = computed(() => listMode.value || serviceList.value.length > 6);
@@ -485,47 +499,30 @@ function openServiceFromList(id: string) {
     page.value = "config";
   }
 }
-function batchStart(ids: string[]) {
-  ids.forEach((id) => api.startService(id).catch((e) => showToast(`启动失败 ${id}: ${e}`, "error")));
-  setTimeout(() => loadStatus(), 1500);
-}
-function batchStop(ids: string[]) {
-  ids.forEach((id) => api.stopService(id).catch(() => {}));
-  setTimeout(() => loadStatus(), 800);
-}
-function batchRemove(ids: string[]) {
-  askConfirm(
-    "批量删除服务",
-    `确定删除 ${ids.length} 个服务？\n保存配置后生效。`,
-    () => {
-      const idSet = new Set(ids);
-      const removed = (cfg.services || []).filter((x: any) => idSet.has(x.id || x.comment));
-      for (const id of ids) api.stopService(id).catch(() => {});
-      cfg.services = cfg.services.filter((x: any) => !idSet.has(x.id || x.comment));
-      // §10.2-5 批量撤销：整体恢复（未保存不落盘）
-      showToast(`已删除 ${ids.length} 个服务，点击保存生效`, "success", {
-        label: "撤销",
-        fn: () => {
-          for (const s of removed) {
-            if (!(cfg.services || []).includes(s)) (cfg.services || []).push(s);
-          }
-          showToast(`已恢复 ${removed.length} 个服务`, "success");
-        },
-      });
-    },
-    "删除"
+// ---------- §5.2A 拖动排序：按列表新顺序重排 cfg.services ----------
+// 拖动过程中仅内存态重排（对象引用不变，选中态不受影响）；松手后 onReorderEnd
+// 直接复用 saveConfig 完整管线落盘（草稿提交 → 校验 → 写入 → 热加载 → 快照复位），
+// 顺序属于配置本体，无需再到配置页手动保存。
+function reorderServices(ids: string[]) {
+  const byKey = new Map<string, any>(
+    (cfg.services || []).map((s: any) => [s.id || s.comment, s])
   );
+  const next: any[] = [];
+  for (const k of ids) {
+    const s = byKey.get(k);
+    if (s) {
+      next.push(s);
+      byKey.delete(k);
+    }
+  }
+  // 兜底：不在列表 id 集合里的服务保持原相对顺序追加
+  for (const s of cfg.services || []) {
+    if (byKey.has(s.id || s.comment)) next.push(s);
+  }
+  cfg.services = next;
 }
-// 今日用量按需拉取（列表打开/手动刷新时一次，不进轮询）
-function loadListUsage(ids: string[], done: (u: Record<string, { requests: number; cost: number }>) => void) {
-  Promise.all(ids.map((id) => api.getStats(id).catch(() => null))).then((res) => {
-    const out: Record<string, { requests: number; cost: number }> = {};
-    ids.forEach((id, i) => {
-      const r: any = res[i];
-      if (r) out[id] = { requests: Number(r.today?.requests || 0), cost: Number(r.today?.cost || 0) };
-    });
-    done(out);
-  });
+function onReorderEnd() {
+  void saveConfig();
 }
 
 // ---------- comment 改名 draft 提交（§3.3） ----------
@@ -611,16 +608,33 @@ async function loadConfig() {
 
 // 配置位置应用/恢复后（ServicesView）重新加载配置与状态
 async function toggleSvc(id: string) {
-  if (!(id in runningMap.value)) {
+  const svc = (cfg.services || []).find((s: any) => (s.id || s.comment) === id);
+  if (!svc) {
+    showToast("服务不存在或尚未添加", "error");
+    return;
+  }
+  // 状态还没拉回来时先刷新一次，避免“服务尚未保存”误报
+  if (!(status.services || []).length) {
+    await loadStatus();
+  }
+  // 兼容 id/name/port 三种身份：有些旧配置里服务没有 id，后端状态会按 name 返回
+  const st = (status.services || []).find(
+    (s: any) =>
+      (s.id && s.id === id) ||
+      (s.name && s.name === svc.comment) ||
+      (s.port && String(s.port) === String(svc.listen_address))
+  );
+  const key = st?.id || st?.name || (st?.port != null ? String(st.port) : id);
+  if (!st || !key || !(key in runningMap.value)) {
     showToast("该服务尚未保存，请先保存配置", "error");
     return;
   }
-  const label = serviceList.value.find((s: any) => (s.id || s.comment) === id)?.comment || id;
+  const label = svc.comment || key;
   try {
-    await api.toggleService(id);
+    await api.toggleService(key);
     await loadStatus();
     offError.value = "";
-    showToast(label + (runningMap.value[id] ? " 已启动" : " 已停止"), "success");
+    showToast(label + (runningMap.value[key] ? " 已启动" : " 已停止"), "success");
   } catch (e: any) {
     showToast("操作失败: " + e, "error");
     offError.value = String(e);
@@ -632,11 +646,43 @@ async function onLocationReload() {
   await loadStatus();
 }
 
+// 引擎/桌面端读取 config.json 后可能会补齐/修正服务 id（例如 engine _ensure_service_ids
+// 把缺失 id 写入磁盘）。面板内存里的 cfg 不会自动感知，导致 stats/启停仍用旧 id。
+// 这里用 status（来自磁盘 config）把同 comment/端口的服务 id 回写到 cfg，自动愈合。
+function syncServiceIdsFromStatus() {
+  // 记录同步前是否干净：自动回写 id 是后台自愈，不应让“未保存”误报；
+  // 但若用户已有未保存改动，则不能覆盖快照把用户的修改误标为已保存。
+  const wasClean = !dirty.value;
+  const statusServices: any[] = (status as any).services || [];
+  let healed = false;
+  for (const ss of statusServices) {
+    if (!ss.id) continue;
+    const svc = (cfg.services || []).find(
+      (s: any) =>
+        (ss.name && ss.name === s.comment) ||
+        (ss.port && String(ss.port) === String(s.listen_address))
+    );
+    if (svc && svc.id !== ss.id) {
+      svc.id = ss.id;
+      healed = true;
+    }
+  }
+  if (healed && wasClean) {
+    snapCfg(); // 自愈 id 视为配置已同步，不进入脏状态
+  }
+  if (healed && selected.value !== ALL) {
+    const cur = selectedSvc.value;
+    const next = (cfg.services || []).find((s: any) => s.comment === cur?.comment);
+    if (next) selected.value = String(next.id || next.comment);
+  }
+}
+
 async function loadStatus() {
   try {
     const s = await api.getStatus();
     Object.keys(status).forEach((k) => delete (status as any)[k]);
     Object.assign(status, s);
+    syncServiceIdsFromStatus();
   } catch (e: any) {
     showToast("读取状态失败: " + e, "error");
   }
@@ -933,14 +979,19 @@ async function saveConfig() {
 watch(selected, (v) => {
   if (v === ALL) {
     selectedSvc.value = null;
-  } else if (
-    !selectedSvc.value ||
-    !(cfg.services || []).includes(selectedSvc.value) ||
-    (selectedSvc.value.id || selectedSvc.value.comment) !== v
-  ) {
+  } else {
     // id 优先（稳定身份），comment 兼容兜底
-    selectedSvc.value =
-      (cfg.services || []).find((s: any) => (s.id || s.comment) === v) || selectedSvc.value;
+    const next =
+      (cfg.services || []).find((s: any) => (s.id || s.comment) === v) || null;
+    if (next) {
+      selectedSvc.value = next;
+    } else if ((cfg.services || []).length) {
+      // 选中值失效时自动落到第一个服务，避免配置页空白/“尚未配置服务”
+      selectedSvc.value = (cfg.services || [])[0];
+      selected.value = selectedSvc.value.id || selectedSvc.value.comment;
+    } else {
+      selectedSvc.value = null;
+    }
   }
   modelFilter.value = "";
   loadStats();
@@ -1033,13 +1084,13 @@ function onVisibilityChange() {
   onPanelVisible(!document.hidden);
 }
 
-// ---------- §10.4 键盘流：Ctrl+K 服务搜索跳转；Esc 关面板 ----------
+// ---------- §10.4 键盘流：Ctrl+K 打开服务列表快速跳转；Esc 关面板 ----------
 const listViewRef = ref<InstanceType<typeof ServiceListView> | null>(null);
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     if (!listMode.value) toggleListView();
-    nextTick(() => listViewRef.value?.focusSearch());
+    nextTick(() => listViewRef.value?.focusList());
   } else if (e.key === "Escape") {
     if (confirmBox.value || toastAction.value) return; // 弹层优先自行处理
     api.hidePanel().catch(() => {});
