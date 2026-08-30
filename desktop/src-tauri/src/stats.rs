@@ -19,8 +19,12 @@ struct Agg {
     total_duration_ms: f64,
     first_token_samples: i64,
     total_first_token_ms: f64,
+    // 输出速度聚合：记录条数/旧算术和保留用于兼容；平均速度改为
+    // 加权口径：总输出 token / 总生成秒数，避免瞬时极值把平均数拉爆。
     token_speed_samples: i64,
     total_speed: f64,
+    token_speed_output: f64,
+    token_speed_seconds: f64,
 }
 
 impl Agg {
@@ -45,6 +49,23 @@ impl Agg {
         if let Some(s) = rec["output_tokens_per_sec"].as_f64() {
             self.token_speed_samples += 1;
             self.total_speed += s;
+            let output = rec["output_tokens"].as_f64().unwrap_or(0.0);
+            let duration_ms = rec["duration_ms"].as_f64().unwrap_or(0.0);
+            let first_ms = rec["first_token_ms"].as_f64().unwrap_or(0.0);
+            // 与 Python record_stats 的口径保持一致：
+            // 流式请求 = (duration_ms - first_token_ms) / 1000，
+            // 非流式/无首字 = duration_ms / 1000。
+            let seconds = if duration_ms > first_ms && first_ms > 0.0 {
+                (duration_ms - first_ms) / 1000.0
+            } else if duration_ms > 0.0 {
+                duration_ms / 1000.0
+            } else if s > 0.0 {
+                output / s
+            } else {
+                0.0
+            };
+            self.token_speed_output += output;
+            self.token_speed_seconds += seconds;
         }
     }
 
@@ -61,6 +82,8 @@ impl Agg {
         self.total_first_token_ms += other.total_first_token_ms;
         self.token_speed_samples += other.token_speed_samples;
         self.total_speed += other.total_speed;
+        self.token_speed_output += other.token_speed_output;
+        self.token_speed_seconds += other.token_speed_seconds;
     }
 
     fn to_json(&self) -> Value {
@@ -78,7 +101,14 @@ impl Agg {
             "coverage": if denom_cov > 0 { self.read as f64 / denom_cov as f64 } else { 0.0 },
             "avgDurationMs": if self.requests > 0 { (self.total_duration_ms / self.requests as f64 * 10.0).round() / 10.0 } else { 0.0 },
             "avgFirstTokenMs": if self.first_token_samples > 0 { (self.total_first_token_ms / self.first_token_samples as f64).round() } else { 0.0 },
-            "avgTokensPerSec": if self.token_speed_samples > 0 { (self.total_speed / self.token_speed_samples as f64 * 10.0).round() / 10.0 } else { 0.0 },
+            "firstTokenSamples": self.first_token_samples,
+            "totalFirstTokenMs": self.total_first_token_ms,
+            "avgTokensPerSec": if self.token_speed_seconds > 0.0 { (self.token_speed_output / self.token_speed_seconds * 10.0).round() / 10.0 } else { 0.0 },
+            // 内部聚合用字段：跨天/跨月汇总时保留加权口径的分子分母
+            "tokenSpeedSamples": self.token_speed_samples,
+            "tokenSpeedTotal": self.total_speed,
+            "tokenSpeedOutput": self.token_speed_output,
+            "tokenSpeedSeconds": self.token_speed_seconds,
         })
     }
 }
@@ -562,10 +592,12 @@ fn agg_from_json(v: &Value) -> Agg {
         output: v["output"].as_i64().unwrap_or(0),
         cost: v["cost"].as_f64().unwrap_or(0.0),
         total_duration_ms: v["avgDurationMs"].as_f64().unwrap_or(0.0) * v["requests"].as_f64().unwrap_or(0.0),
-        first_token_samples: 0,
-        total_first_token_ms: 0.0,
-        token_speed_samples: 0,
-        total_speed: 0.0,
+        first_token_samples: v["firstTokenSamples"].as_i64().unwrap_or(0),
+        total_first_token_ms: v["totalFirstTokenMs"].as_f64().unwrap_or(0.0),
+        token_speed_samples: v["tokenSpeedSamples"].as_i64().unwrap_or(0),
+        total_speed: v["tokenSpeedTotal"].as_f64().unwrap_or(0.0),
+        token_speed_output: v["tokenSpeedOutput"].as_f64().unwrap_or(0.0),
+        token_speed_seconds: v["tokenSpeedSeconds"].as_f64().unwrap_or(0.0),
     }
 }
 

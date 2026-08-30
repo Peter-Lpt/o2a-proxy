@@ -26,6 +26,10 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+# 端到端测试使用本地 mock 上游（瞬时返回），不要向真实 data/cache_stats 写统计，
+# 否则会出现 112297 tok/s 这类毫无意义的瞬时极值并污染面板平均速度。
+os.environ["CACHE_STATS_ENABLED"] = "false"
+
 import proxy_async
 from proxy import Account, Service
 
