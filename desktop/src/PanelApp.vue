@@ -106,7 +106,7 @@
     </main>
 
     <footer class="foot">
-      <span>o2a-proxy · v0.1.0</span>
+      <span>o2a-proxy · v0.3.0</span>
       <button class="link-btn" @click="quitApp">退出应用</button>
     </footer>
     <div id="toast" class="toast" :class="{ show: !!toast, [toastType]: !!toast }">

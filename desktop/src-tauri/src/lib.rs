@@ -328,9 +328,13 @@ pub(crate) fn port_open(host: &str, port: u16) -> bool {
 }
 
 /// 探测某服务端点的 /status，返回任务状态（active 等）。失败返回 None。
-fn fetch_task_status(host: &str, port: u16) -> Option<serde_json::Value> {
+fn fetch_task_status(host: &str, port: u16, token: &str) -> Option<serde_json::Value> {
     let url = format!("http://{host}:{port}/status");
-    let resp = ureq::get(&url).timeout(Duration::from_millis(800)).call().ok()?;
+    let mut req = ureq::get(&url).timeout(Duration::from_millis(800));
+    if !token.is_empty() {
+        req = req.set("Authorization", &format!("Bearer {token}"));
+    }
+    let resp = req.call().ok()?;
     let body = resp.into_string().ok()?;
     serde_json::from_str(&body).ok()
 }
@@ -579,8 +583,6 @@ fn rebuild_tray_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
         .and_then(|s| s.as_array())
         .cloned()
         .unwrap_or_default();
-    let top_token = String::new();
-
     let panel_i = MenuItem::with_id(app, "panel", "打开面板", true, None::<&str>)?;
     let float_i = MenuItem::with_id(app, "float", "悬浮看板", true, None::<&str>)?;
     let start_all_i = MenuItem::with_id(app, "start_all", "启动全部代理", true, None::<&str>)?;
@@ -717,6 +719,11 @@ async fn get_status(app: tauri::AppHandle) -> Result<serde_json::Value, String> 
 
 fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
     let cfg = read_config_value(state)?;
+    let top_token = cfg
+        .get("auth_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let services = cfg.get("services").cloned().unwrap_or_else(|| serde_json::json!([]));
     let mut children = state.children.lock().unwrap();
     let mut out = Vec::new();
@@ -777,7 +784,15 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
             });
             // 服务在跑时探 /status 拿实时任务状态（active/last_finish 等）
             if running && port > 0 {
-                if let Some(task) = fetch_task_status(&host, port) {
+                let mut token = s
+                    .get("auth_token")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if token.is_empty() {
+                    token = top_token.clone();
+                }
+                if let Some(task) = fetch_task_status(&host, port, &token) {
                     svc["task"] = task;
                 }
             }
