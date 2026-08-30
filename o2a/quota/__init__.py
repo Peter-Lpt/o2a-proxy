@@ -13,12 +13,13 @@
 """
 
 from .base import QuotaContext, QuotaError, TTLCache
-from .registry import get_snapshot, resolve_adapter_name
+from .registry import get_snapshot, get_snapshot_async, resolve_adapter_name
 
 __all__ = [
     "QuotaContext",
     "QuotaError",
     "TTLCache",
     "get_snapshot",
+    "get_snapshot_async",
     "resolve_adapter_name",
 ]

@@ -13,8 +13,8 @@
 
     <div v-for="(w, i) in windows" :key="i" class="quota-window">
       <div class="quota-row">
-        <span class="quota-kind">{{ kindLabel(w.kind) }}</span>
-        <span class="quota-pct" :class="pctClass(w)">{{ w.pct != null ? Math.round(w.pct) + "%" : "" }}</span>
+        <span class="quota-kind">{{ kindLabel(w) }}</span>
+        <span class="quota-pct" :class="pctClass(w)">{{ pctText(w) }}</span>
       </div>
       <div class="quota-bar">
         <div class="quota-bar-in" :class="pctClass(w)" :style="{ width: barWidth(w) }"></div>
@@ -46,6 +46,7 @@ interface QuotaWindow {
   limit: number | null;
   reset_at: string | null;
   pct: number | null;
+  value_label?: string;
 }
 interface QuotaSnapshot {
   adapterId: string;
@@ -67,14 +68,31 @@ const snap = computed<QuotaSnapshot>(() =>
 );
 const windows = computed(() => snap.value.windows);
 
-function kindLabel(kind: string): string {
-  return { rolling: "5h 窗口", day: "今日", week: "本周", month: "本月" }[kind] || kind;
+function kindLabel(w: QuotaWindow): string {
+  return {
+    rolling: "5h 滚动",
+    weekly: "本周",
+    monthly: "本月",
+    day: "今日",
+    week: "本周",
+    month: "本月",
+    credits: "余额",
+  }[w.kind] || w.kind;
 }
 function unitLabel(unit: string): string {
-  return { requests: "次", tokens: "tokens", usd: "USD" }[unit] || unit;
+  return { requests: "次", tokens: "tokens", percent: "%", usd: "USD" }[unit] || unit;
+}
+function pctText(w: QuotaWindow): string {
+  if (w.pct == null) return w.value_label || "";
+  return Math.round(w.pct) + "%";
 }
 function usedText(w: QuotaWindow): string {
+  if (w.value_label) return w.unit === "usd" && w.kind === "credits" ? `${w.value_label} 可用` : w.value_label;
   const used = fmtN(w.used);
+  if (w.unit === "percent") {
+    if (w.limit != null) return `${fmtN(w.used)}% / ${fmtN(w.limit)}%`;
+    return `已用 ${used}%`;
+  }
   if (w.limit != null) return `${used} / ${fmtN(w.limit)} ${unitLabel(w.unit)}`;
   return `已用 ${used} ${unitLabel(w.unit)}`;
 }

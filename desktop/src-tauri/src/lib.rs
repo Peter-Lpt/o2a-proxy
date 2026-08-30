@@ -904,18 +904,6 @@ async fn get_stats(
             end.as_deref(),
             model.as_deref().unwrap_or(""),
         );
-        // ：定位“选中服务无数据”——打印运行时查询三要素（用后即删）
-        if let Ok(ref v) = out {
-            eprintln!(
-                "[stats-diag] raw={:?} resolved={:?} range={:?} dir={} today.requests={} month.requests={}",
-                service,
-                svc_name,
-                r,
-                stats_dir(&state).display(),
-                v["today"]["requests"],
-                v["month"]["requests"]
-            );
-        }
         out
     })
     .await
@@ -1008,17 +996,24 @@ fn quota_cache_set(key: &str, value: serde_json::Value) {
 
 /// 取某账号的额度快照：找该账号绑定的运行中服务的端口 → 引擎 GET /quota。
 /// 无运行中的引擎 → 返回错误（前端隐藏额度卡，不影响其他渲染）。
-fn get_quota_impl(state: &AppState, account: &str) -> Result<serde_json::Value, String> {
+fn get_quota_impl(state: &AppState, account: &str, force: bool) -> Result<serde_json::Value, String> {
     if account.is_empty() {
         return Err("账号未指定".into());
     }
-    if let Some(v) = quota_cache_get(account) {
-        return Ok(v);
+    if !force {
+        if let Some(v) = quota_cache_get(account) {
+            return Ok(v);
+        }
     }
     let cfg = read_config_value(state)?;
+    let top_token = cfg
+        .get("auth_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     let services = cfg.get("services").and_then(|s| s.as_array()).cloned().unwrap_or_default();
     // 目标账号绑定的服务优先，其次任意运行中的服务（引擎进程可查任意账号）
-    let mut candidates: Vec<(String, u16)> = Vec::new();
+    let mut candidates: Vec<(String, u16, String)> = Vec::new();
     for s in &services {
         let acc = s.get("account").and_then(|v| v.as_str()).unwrap_or("");
         let sid = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
@@ -1036,18 +1031,29 @@ fn get_quota_impl(state: &AppState, account: &str) -> Result<serde_json::Value, 
         if port == 0 {
             continue;
         }
+        let mut token = s
+            .get("auth_token")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if token.is_empty() {
+            token = top_token.clone();
+        }
         if bound {
-            candidates.insert(0, (host, port));
+            candidates.insert(0, (host, port, token));
         } else {
-            candidates.push((host, port));
+            candidates.push((host, port, token));
         }
     }
-    for (host, port) in candidates {
+    for (host, port, token) in candidates {
         if !crate::port_open(&host, port) {
             continue;
         }
         let url = format!("http://{host}:{port}/quota?account={account}");
-        let req = ureq::get(&url).timeout(Duration::from_secs(2));
+        let mut req = ureq::get(&url).timeout(Duration::from_secs(2));
+        if !token.is_empty() {
+            req = req.set("Authorization", &format!("Bearer {token}"));
+        }
         if let Ok(resp) = req.call() {
             if let Ok(s) = resp.into_string() {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
@@ -1067,10 +1073,10 @@ fn get_quota_impl(state: &AppState, account: &str) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-async fn get_quota(app: tauri::AppHandle, account: String) -> Result<serde_json::Value, String> {
+async fn get_quota(app: tauri::AppHandle, account: String, force: bool) -> Result<serde_json::Value, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        get_quota_impl(&state, &account)
+        get_quota_impl(&state, &account, force)
     })
     .await
     .map_err(|e| e.to_string())?

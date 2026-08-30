@@ -5,7 +5,7 @@
  */
 import { computed, reactive, ref } from "vue";
 import { api } from "../api";
-import { ALL, selected } from "./config";
+import { ALL, cfg, selected } from "./config";
 import { activeSvc } from "./services";
 
 export const stats = reactive<any>({});
@@ -108,18 +108,60 @@ export async function loadStats() {
 }
 
 // ----------  订阅额度展示（订阅制服务：费用卡位置展示额度卡； 对象形式兼容） ----------
-export const quotaVisible = computed(() => {
-  if (selected.value === ALL) return false;
-  const p: any = activeSvc.value?.pricing;
+function isSubscriptionSvc(s: any): boolean {
+  const p: any = s?.pricing;
   if (p === "none") return true;
   return !!p && typeof p === "object" && p.mode === "subscription";
+}
+export const quotaVisible = computed(() => {
+  const svcs = (cfg.services || []) as any[];
+  if (selected.value === ALL) return svcs.some(isSubscriptionSvc);
+  return isSubscriptionSvc(activeSvc.value);
 });
 export const quotaSnapshot = ref<any>(null);
-export async function loadQuota() {
+// 全部视图下所有订阅账号的额度快照（“一个位置”集中展示）
+export const quotaSnapshots = ref<any[]>([]);
+
+function accountName(id: string): string {
+  const acc = (cfg.accounts || []).find((a: any) => a.id === id);
+  return acc?.name || acc?.id || id;
+}
+
+export async function loadQuota(force = false) {
+  if (selected.value === ALL) {
+    const accs = Array.from(
+      new Set((cfg.services || [])
+        .filter(isSubscriptionSvc)
+        .map((s: any) => s.account)
+        .filter(Boolean))
+    ) as string[];
+    if (!accs.length) {
+      quotaSnapshot.value = null;
+      quotaSnapshots.value = [];
+      return;
+    }
+    const results = await Promise.allSettled(
+      accs.map(async (id: string) => {
+        try {
+          const snap = await api.getQuota(id, force);
+          return { account: id, accountName: accountName(id), ...(snap || {}) };
+        } catch {
+          return null;
+        }
+      })
+    );
+    quotaSnapshots.value = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === "fulfilled" && !!r.value)
+      .map((r) => r.value)
+      // 失败降级后的快照也保留；完全失败时前端隐藏该项
+      .filter((s: any) => !s.error);
+    return;
+  }
+
   const acc = activeSvc.value?.account;
   if (!acc) return;
   try {
-    quotaSnapshot.value = await api.getQuota(acc);
+    quotaSnapshot.value = await api.getQuota(acc, force);
   } catch {
     // 引擎未运行 / 端口不可达：隐藏额度卡，不影响统计页其余渲染（）
     quotaSnapshot.value = null;
@@ -214,5 +256,3 @@ export function onCalQuick(key: string) {
 function onQuickRange(key: string) {
   onCalQuick(key);
 }
-
-

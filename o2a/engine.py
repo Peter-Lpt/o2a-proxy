@@ -1494,13 +1494,13 @@ def _plan_for_account(account_id: str):
     return None, None
 
 
-def _quota_snapshot(account_id: str):
-    """组装 QuotaContext 并取某账号的额度快照（放线程池执行，不阻塞事件循环）。
+async def _quota_snapshot(account_id: str, session=None):
+    """组装 QuotaContext 并取某账号的额度快照（事件循环内执行，使用共享 aiohttp session）。
 
     若账号关联 services[].pricing.plan，则把套餐目录中的 plan 信息补进快照，
     让前端 QuotaCard 能显示套餐名 / included / overage / free_tier。"""
     global _quota_cache
-    from .quota import QuotaContext, get_snapshot
+    from .quota import QuotaContext, get_snapshot_async
     from .quota.base import TTLCache
 
     services = load_config()
@@ -1508,11 +1508,11 @@ def _quota_snapshot(account_id: str):
     if acc is None:
         return {"error": f"account not found: {account_id}"}
     stats_dir = os.environ.get("CACHE_STATS_DIR", "data/cache_stats")
-    ctx = QuotaContext(stats_dir=stats_dir, account=acc)
+    ctx = QuotaContext(stats_dir=stats_dir, account=acc, session=session)
     if _quota_cache is None:
         _quota_cache = TTLCache(60)
     try:
-        snapshot = get_snapshot(acc, ctx, ttl_cache=_quota_cache)
+        snapshot = await get_snapshot_async(acc, ctx, ttl_cache=_quota_cache)
     except Exception as e:  # 双保险：注册表内部已降级，这里兜住意外
         logger.warning(f"[quota] snapshot failed for {account_id}: {e}")
         snapshot = None
@@ -1635,7 +1635,7 @@ async def handle_get(request: web.Request, service: Service):
         if not is_cache_stats_enabled():
             return json_response({"error": "cache stats is disabled"})
         account_id = request.query.get("account") or service.account.id
-        return json_response(await asyncio.to_thread(_quota_snapshot, account_id))
+        return json_response(await _quota_snapshot(account_id, request.app.get("session")))
     if path == "/pricing-meta":
         # 暴露价格目录指纹与规则概览，供前端/审计展示
         import hashlib

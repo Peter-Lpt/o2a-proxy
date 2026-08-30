@@ -32,6 +32,7 @@ from o2a.quota.adapters.local_rolling_5h import LocalRolling5hAdapter
 from o2a.quota.adapters.declarative import DeclarativeQuotaAdapter
 from o2a.quota.adapters.opencode_go import OpenCodeGoAdapter
 from o2a.quota.adapters.zai import ZaiAdapter
+from o2a.quota.adapters.codex import OpenAICodexAdapter
 from o2a.quota.adapters.openrouter import OpenRouterAdapter
 
 
@@ -143,8 +144,9 @@ def test_registry_auto_sniff():
 
 
 def test_registry_reserved_names_fallback():
-    for src in ("anthropic", "codex", "zen", "unknown-thing"):
+    for src in ("anthropic", "zen", "unknown-thing"):
         assert resolve_adapter_name(make_account(quota_source=src)) == "local"
+    assert "codex" in registered_adapters()
     assert "manual" in registered_adapters()
     assert "openrouter" in registered_adapters()
 
@@ -291,6 +293,7 @@ def test_quota_endpoint(tmp_path, monkeypatch):
 
     stats_dir = str(tmp_path / "stats")
     monkeypatch.setenv("CACHE_STATS_DIR", stats_dir)
+    monkeypatch.setenv("CACHE_STATS_ENABLED", "true")
     write_jsonl(stats_dir, [rec("2026-01-10T10:00:00")])
 
     cfg = {"services": [{
@@ -326,3 +329,122 @@ def test_quota_endpoint(tmp_path, monkeypatch):
             await client.close()
 
     asyncio.run(main())
+
+
+# ---------- OpenCode Go SSR / Codex (ChatGPT) 订阅额度 ----------
+
+def test_opencode_go_ssr_adapter_mock():
+    import asyncio
+    html = """
+    <div data-slot="usage-item">
+      <div data-slot="usage-label">Rolling Usage</div>
+      <div data-slot="usage-value"><!--$-->6<!--/--></div>
+      <div data-slot="reset-time">Resets in 2 hours 29 minutes</div>
+    </div>
+    <div data-slot="usage-item">
+      <div data-slot="usage-label">Weekly Usage</div>
+      <div data-slot="usage-value"><!--$-->42<!--/--></div>
+      <div data-slot="reset-time">Resets in 5 days</div>
+    </div>
+    """
+    class _FakeTextResp:
+        def __init__(self, text, status=200):
+            self.text_data = text
+            self.status = status
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *exc):
+            return False
+        async def text(self):
+            return self.text_data
+    class _FakeTextSession:
+        def __init__(self, text):
+            self.text = text
+        def get(self, url, **kw):
+            return _FakeTextResp(self.text)
+
+    import asyncio
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(quota_source="opencode-go",
+                             quota={"cookie": "auth=x", "workspace_id": "wrk_1",
+                                    "url": "https://api.opencode.ai"}),
+        session=_FakeTextSession(html),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = asyncio.run(OpenCodeGoAdapter().fetch(ctx))
+    assert snap["adapterId"] == "opencode-go"
+    assert [w["kind"] for w in snap["windows"]] == ["rolling", "weekly"]
+    assert snap["windows"][0]["pct"] == 6.0
+    assert snap["windows"][0]["reset_at"] == "2026-01-10T14:29:00"
+
+
+def test_opencode_go_parse_ssr_reset_chinese():
+    from o2a.quota.adapters.opencode_go import _parse_ssr_windows
+    html = """
+    <div data-slot="usage-item">
+      <div data-slot="usage-label">每月用量</div>
+      <div data-slot="usage-value"><!--$-->77<!--/--></div>
+      <div data-slot="reset-time">重置于 1 天 2 小时</div>
+    </div>
+    """
+    windows = _parse_ssr_windows(html, datetime(2026, 1, 10, 12, 0, 0))
+    assert windows[0]["kind"] == "monthly"
+    assert windows[0]["used"] == 77
+    assert windows[0]["reset_at"] == "2026-01-11T14:00:00"
+
+
+def test_codex_adapter_mock():
+    import asyncio
+    data = {
+        "plan_type": "ChatGPT Plus",
+        "rate_limit": {
+            "primary_window": {"used_percent": 12, "limit_window_seconds": 18000, "reset_at": 1736514000},
+            "secondary_window": {"used_percent": 3, "limit_window_seconds": 604800, "reset_at": 1736960400},
+            "limit_reached": False,
+        },
+        "credits": {"has_credits": True, "balance": 9.5, "unlimited": False},
+    }
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(quota_source="codex", quota={"access_token": "tok"}),
+        session=_FakeSession(data),
+        now_fn=lambda: datetime(2026, 1, 10, 12, 0, 0),
+    )
+    snap = asyncio.run(OpenAICodexAdapter().fetch(ctx))
+    kinds = [w["kind"] for w in snap["windows"]]
+    assert "rolling" in kinds
+    assert "weekly" in kinds
+    assert "credits" in kinds
+    rolling = snap["windows"][kinds.index("rolling")]
+    assert rolling["pct"] == 12.0
+    assert snap["plan"]["name"] == "ChatGPT Plus"
+
+
+def test_registry_codex_aliases():
+    assert "codex" in registered_adapters()
+    assert resolve_adapter_name(make_account(quota_source="gpt")) == "codex"
+    assert resolve_adapter_name(make_account(quota_source="openai-codex")) == "codex"
+    assert resolve_adapter_name(make_account(openai_url="https://chatgpt.com/backend-api")) == "codex"
+
+
+def test_opencode_go_gateway_usage_v2_mock():
+    import asyncio
+    data = {
+        "usage": {
+            "rolling": {"status": "ok", "percent": 10, "resetsAt": "2026-08-30T15:57:12.109Z"},
+            "weekly": {"status": "ok", "percent": 73, "resetsAt": "2026-08-31T00:00:00.109Z"},
+            "monthly": {"status": "ok", "percent": 45, "resetsAt": "2026-09-18T13:58:17.109Z"},
+        }
+    }
+    ctx = QuotaContext(
+        stats_dir="/tmp/none",
+        account=make_account(openai_url="https://opencode.ai/zen/go/v1",
+                             quota_source="opencode-go"),
+        session=_FakeSession(data),
+        now_fn=lambda: datetime(2026, 8, 30, 12, 0, 0),
+    )
+    snap = asyncio.run(OpenCodeGoAdapter().fetch(ctx))
+    assert [w["kind"] for w in snap["windows"]] == ["rolling", "weekly", "monthly"]
+    assert snap["windows"][0]["pct"] == 10.0
+    assert snap["windows"][0]["reset_at"] is not None

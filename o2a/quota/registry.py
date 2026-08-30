@@ -1,9 +1,10 @@
 """额度适配器注册表 + auto 域名嗅探。
 
 选择逻辑：accounts[].quota_source
-- auto：按 openai_url 域名嗅探（openrouter.ai → openrouter；嗅探不到 → local）
+- auto：按 openai_url 域名嗅探（openrouter.ai → openrouter；opencode.ai → opencode-go；
+  chatgpt.com → codex；嗅探不到 → local）
 - 显式名：openrouter / local / local-rolling-5h / manual / declarative /
-  opencode-go / zai / none
+  opencode-go / zai / codex / none
 - 未注册的显式名 → 预留名，回退 local
 
 失败隔离：fetch 抛错/超时 → 上层 get_snapshot 降级 local 并标 stale。
@@ -20,6 +21,7 @@ from .adapters.openrouter import OpenRouterAdapter
 from .adapters.declarative import DeclarativeQuotaAdapter
 from .adapters.opencode_go import OpenCodeGoAdapter
 from .adapters.zai import ZaiAdapter
+from .adapters.codex import OpenAICodexAdapter
 from .base import UPSTREAM_TIMEOUT_S, QuotaAdapter, QuotaContext, QuotaError, make_snapshot
 
 _ADAPTERS = {}
@@ -37,11 +39,14 @@ register(OpenRouterAdapter())
 register(DeclarativeQuotaAdapter())
 register(OpenCodeGoAdapter())
 register(ZaiAdapter())
+register(OpenAICodexAdapter())
 
 # 域名嗅探表：子串 → 适配器名（auto 用）
 _SNIFF = [
     ("openrouter.ai", "openrouter"),
     ("opencode.ai", "opencode-go"),
+    ("chatgpt.com", "codex"),
+    ("openai.com", "codex"),
     ("bigmodel.cn", "zai"),
     ("z.ai", "zai"),
 ]
@@ -52,10 +57,15 @@ _ALIASES = {
     "glm": "zai",
     "codex_zen": "zai",
     "opencode_go": "opencode-go",
+    "openai-codex": "codex",
+    "openai_codex": "codex",
+    "gpt": "codex",
+    "chatgpt": "codex",
+    "openai": "codex",
 }
 
 # 预留显式名（尚未实现 → 回退 local）
-_RESERVED = {"anthropic", "codex", "openai_codex", "zen", "generic"}
+_RESERVED = {"anthropic", "zen", "generic"}
 
 
 def resolve_adapter_name(account) -> str:

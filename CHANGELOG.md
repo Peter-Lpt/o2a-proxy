@@ -19,6 +19,10 @@
   `services[].pricing.plan` 在 `/quota` 快照中补全套餐名、额度与超额定义。
 - **P3 第三方适配**：新增 `declarative`、`opencode-go`、`zai`（含 `glm-coding-plan` 别名）
   与 OpenRouter credits 模式；失败降级 local 并标 stale；mock 单测覆盖。
+- **订阅消耗展示**：OpenCode Go 适配器升级为 Cookie + 工作区页（rolling/weekly/monthly），
+   新增 ChatGPT / Codex 订阅适配器（chatgpt.com wham/usage + OAuth token/refresh）；引擎 /quota
+   真正接入 aiohttp session，provider 适配器不再因缺 session 静默降级；桌面「全部」视图新增
+   「订阅额度」网格，所有订阅账号用量集中一处显示，单服务保持原额度卡；额度卡支持展开/收缩与手动刷新（带加载动画），上下边距调整；Rust `/quota` 转发补接入凭证，移除 `[stats-diag]` 调试日志。
 - **双端一致性**：`pricing/golden/cases.json` 新增 v3 历史规则、scope 精确优先、batch、
   完整性用例；pytest 与 cargo test 全绿。
 

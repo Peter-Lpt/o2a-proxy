@@ -325,6 +325,59 @@ experimental_bearer_token = "qs-cc"
 
 **查找优先级：** `pricing.json["accounts"][账号 id/name][模型]` > 全局按模型名（provider 段）。未配置时价格为 0，与旧行为一致。计费同时生效于代理引擎与桌面统计面板（历史记录读取时按当前定价重算）。
 
+### 订阅额度（OpenCode Go / ChatGPT Codex / GLM / OpenRouter）
+
+订阅制服务（`services[].pricing` 为 `"none"` 或 `{"mode": "subscription"}`）不按 token 计费，
+统计页费用卡自动隐藏，并改为在 **同一处** 展示该账号的订阅消耗 / 余量：
+
+- 单个服务选中时：服务所属账号的额度卡直接显示在 KPI 下方；
+- 「全部」视图时：所有订阅账号的额度卡集中成一张「订阅额度」网格，不再需要逐个服务切换。
+
+额度数据由引擎 `GET /quota?account=<账号id>` 统一提供，支持以下适配器：
+
+| 适配器 | 自动识别 / 显式 `quota_source` | 取数方式 | 展示窗口 |
+|---|---|---|---|
+| `opencode-go` | 域名 `opencode.ai` / `opencode-go` | 账号端点 `{base}/usage`（实际网关返回 rolling/weekly/monthly）；Cookie + 工作区页兜底 | rolling / weekly / monthly |
+| `codex` | 域名 `chatgpt.com` / `codex`、`gpt`、`openai-codex` | `chatgpt.com/backend-api/wham/usage`（OAuth） | 5h 滚动 / 每周 / 余额 |
+| `zai` | 域名 `bigmodel.cn`、`z.ai` / `glm-coding-plan` | 供应商 balance / plan 接口 | 余额 |
+| `openrouter` | 域名 `openrouter.ai` / `openrouter` | `/api/v1/key` 或 credits | 余额 |
+| `local` / `local-rolling-5h` | 默认 / 任意 | 本地 JSONL 聚合 | 请求数 / token 窗口 |
+
+OpenCode Go 与 ChatGPT/Codex 都是订阅 OAuth 会话，平台没有公开的“API Key → 用量”接口。
+可在账号配置里提供额度源（手动编辑 `config.json` 的 `accounts[].quota`）：
+
+```json
+{
+  "accounts": [
+    {
+      "id": "acc-ocgo",
+      "name": "OpenCode Go",
+      "openai_url": "https://opencode.ai/zen/go/v1",
+      "quota_source": "opencode-go",
+      "quota": {
+        "cookie": "auth=fe26...; oc_locale=zh",
+        "workspace_id": "wrk_0123...",
+        "url": "https://api.opencode.ai"
+      }
+    },
+    {
+      "id": "acc-chatgpt",
+      "name": "ChatGPT Codex",
+      "openai_url": "https://chatgpt.com/backend-api",
+      "quota_source": "codex",
+      "quota": {
+        "token_file": "~/.codex/auth.json"
+      }
+    }
+  ]
+}
+```
+
+`codex` 适配器还可直接使用 `quota.access_token` / `quota.refresh_token`；`token_file` 支持
+Codex CLI（`~/.codex/auth.json`）、pi（`~/.pi/agent/auth.json`）与 OpenCode
+（`~/.local/share/opencode/auth.json`）三种常见的 OAuth 存储结构。额度查询失败会自动降级为
+本地统计并标记 `stale`，不影响统计页与代理主流程。
+
 ### 转换矩阵（client × 账号端点）
 
 | client | 账号只有 OpenAI 端点 | 账号只有 Anthropic 端点 | 双协议端点 |

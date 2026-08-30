@@ -56,7 +56,43 @@
         </div>
 
         <!--  订阅制服务的额度卡（pricing=none 时费用卡隐藏，这里展示额度） -->
-        <QuotaCard v-if="quotaVisible && quotaSnapshot" :snapshot="quotaSnapshot" />
+        <div v-if="quotaVisible && selected === ALL" class="quota-grid">
+          <div class="quota-head-row">
+            <button type="button" class="quota-grid-head" :class="{ open: quotaOpen }" @click="quotaOpen = !quotaOpen">
+              <span class="quota-grid-title">订阅额度</span>
+              <span class="quota-grid-sub">订阅制账号的用量 / 余量集中展示</span>
+              <Icon name="chevron-down" :size="12" class="quota-caret" />
+            </button>
+            <button type="button" class="icon-btn quota-refresh" :class="{ spinning: quotaRefreshing }" :disabled="quotaRefreshing" title="刷新订阅额度" @click="refreshQuota">
+              <Icon name="refresh" :size="12" />
+            </button>
+          </div>
+          <template v-if="quotaOpen">
+            <div v-if="quotaSnapshots.length" class="quota-grid-body">
+              <div v-for="snap in quotaSnapshots" :key="snap.account || snap.accountName" class="quota-grid-item">
+                <div class="quota-account">{{ snap.accountName }}</div>
+                <QuotaCard :snapshot="snap" />
+              </div>
+            </div>
+            <div v-else class="quota-empty">暂无额度数据</div>
+          </template>
+        </div>
+        <div v-else-if="quotaVisible" class="quota-single-wrap">
+          <div class="quota-head-row">
+            <button type="button" class="quota-grid-head" :class="{ open: quotaOpen }" @click="quotaOpen = !quotaOpen">
+              <span class="quota-grid-title">订阅额度</span>
+              <span class="quota-grid-sub">当前账号用量</span>
+              <Icon name="chevron-down" :size="12" class="quota-caret" />
+            </button>
+            <button type="button" class="icon-btn quota-refresh" :class="{ spinning: quotaRefreshing }" :disabled="quotaRefreshing" title="刷新订阅额度" @click="refreshQuota">
+              <Icon name="refresh" :size="12" />
+            </button>
+          </div>
+          <template v-if="quotaOpen">
+            <QuotaCard v-if="quotaSnapshot" :snapshot="quotaSnapshot" />
+            <div v-else class="quota-empty">订阅额度不可用</div>
+          </template>
+        </div>
 
         <!-- 性能条：耗时 / 首字 / 速度（近一段时间） -->
         <div class="perf-row">
@@ -181,7 +217,7 @@
 <script setup lang="ts">
 //  统计页视图：从 PanelApp 零行为变更迁出。
 // 统计数据与轮询来自 stores/stats；服务运行态来自 stores/services。
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { fmtCost, fmtNum, fmtPct } from "../api";
 import { hitTier } from "../format";
 import { cfg, selected, ALL } from "../stores/config";
@@ -191,8 +227,10 @@ import {
   chartResetKey,
   liveRecords,
   loadStats,
+  loadQuota,
   modelFilter,
   quotaSnapshot,
+  quotaSnapshots,
   quotaVisible,
   range,
   rangeLabel,
@@ -214,6 +252,19 @@ import LineChart from "../components/LineChart.vue";
 import QuotaCard from "../components/QuotaCard.vue";
 import SelectBox from "../components/SelectBox.vue";
 import Spark from "../components/Spark.vue";
+
+const quotaOpen = ref(true);
+const quotaRefreshing = ref(false);
+
+async function refreshQuota() {
+  if (quotaRefreshing.value) return;
+  quotaRefreshing.value = true;
+  try {
+    await loadQuota(true);
+  } finally {
+    quotaRefreshing.value = false;
+  }
+}
 
 defineProps<{ theme: string }>();
 defineEmits<{
@@ -449,3 +500,93 @@ const liveSum = computed(() => {
 
 
 </script>
+
+
+<style scoped>
+.quota-grid {
+  margin: 10px 0 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+.quota-head-row {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.quota-grid-head {
+  flex: 1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.quota-grid-head:hover {
+  opacity: 0.82;
+}
+.quota-grid-title {
+  font-weight: 600;
+}
+.quota-grid-sub {
+  color: var(--muted-2);
+  font-size: 10.5px;
+}
+.quota-caret {
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.quota-grid-head.open .quota-caret {
+  transform: rotate(180deg);
+}
+.quota-refresh {
+  flex: none;
+}
+.quota-grid-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.quota-account {
+  font-size: 11px;
+  color: var(--muted);
+  padding-left: 2px;
+}
+.quota-grid-body {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  margin-top: 2px;
+}
+.quota-empty {
+  grid-column: 1 / -1;
+  background: var(--bg);
+  border: 1px dashed var(--border-soft);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--muted-2);
+  margin-top: 2px;
+}
+.quota-single-wrap {
+  margin: 10px 0 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+@media (max-width: 720px) {
+  .quota-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

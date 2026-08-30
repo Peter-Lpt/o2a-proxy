@@ -104,7 +104,8 @@ const accStatsText = (acc: any) => {
   if (!st) return "今日 —";
   const svcN = (cfg.services || []).filter((s: any) => s.account === acc.id).length;
   // 账号下存在按量计费服务才显示费用（订阅制账号只显示请求数）
-  const showFee = (cfg.services || []).some((s: any) => s.account === acc.id && s.pricing !== "none");
+  const noCost = (p: any) => p === "none" || (typeof p === "object" && (p?.mode === "subscription" || p?.mode === "free"));
+  const showFee = (cfg.services || []).some((s: any) => s.account === acc.id && !noCost(s.pricing));
   if (!showFee) return `服务×${svcN} · 今日 ${fmtNum(st.today.requests)} 次`;
   return `服务×${svcN} · 今日 ¥${fmtCost(st.today.cost)} / ${fmtNum(st.today.requests)} 次 · 本月 ¥${fmtCost(st.month.cost)}`;
 };
