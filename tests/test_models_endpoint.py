@@ -58,6 +58,39 @@ def test_models_whitelist_override_marks_main_required():
     assert other["required"] is False
 
 
+def test_models_whitelist_missing_main_gets_appended():
+    """白名单未含主模型：主模型仍出现在 /v1/models（置于首条，default=true）。"""
+    svc = make_service(override_model=False,
+                       models=["qwen3.8-flash", "glm-flash"])
+    entries = _model_entries(svc)
+    ids = [e["id"] for e in entries]
+    assert ids[0] == "deepseek-v4-flash"
+    assert "qwen3.8-flash" in ids and "glm-flash" in ids
+    main = next(e for e in entries if e["id"] == "deepseek-v4-flash")
+    assert main["default"] is True and main["required"] is False
+    qwen = next(e for e in entries if e["id"] == "qwen3.8-flash")
+    assert qwen["default"] is False
+
+
+def test_models_whitelist_missing_main_required_when_override():
+    svc = make_service(override_model=True, models=["qwen3.8-flash"])
+    entries = _model_entries(svc)
+    main = next(e for e in entries if e["id"] == "deepseek-v4-flash")
+    other = next(e for e in entries if e["id"] == "qwen3.8-flash")
+    assert main["required"] is True and main["default"] is True
+    assert other["required"] is False
+
+
+def test_models_main_aliased_target_not_exposed():
+    """主模型已是别名目标（models_map 值）：别名即对外名，不重复暴露上游名。"""
+    svc = make_service(models=["claude-sonnet-4"],
+                       models_map={"claude-sonnet-4": "deepseek-v4-flash"})
+    entries = _model_entries(svc)
+    ids = [e["id"] for e in entries]
+    assert "claude-sonnet-4" in ids
+    assert "deepseek-v4-flash" not in ids
+
+
 def test_models_alias_keys_listed_upstream_hidden():
     svc = make_service(models=["deepseek-v4-flash"],
                        models_map={"claude-sonnet-4": "deepseek-v4-flash"})
@@ -93,6 +126,21 @@ def test_reject_returns_400_with_available_models():
     body = str(resp.body)
     assert "deepseek-v4-flash" in body
     assert payload["model"] == "gpt-99"  # 不改写
+
+
+def test_reject_policy_never_rejects_main_model():
+    """reject 策略下主模型即使不在白名单也恒放行（/models 已列出 default）。"""
+    svc = make_service(models=["qwen3.8-flash"], model_policy="reject")
+    payload = {"model": "deepseek-v4-flash"}  # 主模型
+    assert _apply_model_policy(svc, payload) is None
+    assert payload["model"] == "deepseek-v4-flash"  # 不改写
+
+
+def test_clamp_keeps_main_model_request():
+    svc = make_service(models=["qwen3.8-flash"])  # 默认 clamp
+    payload = {"model": "deepseek-v4-flash"}
+    assert _apply_model_policy(svc, payload) is None
+    assert payload["model"] == "deepseek-v4-flash"
 
 
 def test_passthrough_policy_keeps_request():

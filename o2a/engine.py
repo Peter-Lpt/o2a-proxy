@@ -1550,14 +1550,18 @@ def _model_entries(service: Service) -> list:
     """/v1/models 输出全集（ 矩阵）。
 
     白名单为空 → 维持现状单条；非空 → 白名单全集（别名键作为对外名一并列入，
-    上游名不暴露），主模型带 default=true，required 仅在 override_model=true
-    且为主模型时标记。"""
+    上游名不暴露），主模型恒在列——白名单未含时补入首条（default=true），
+    已作为别名目标（models_map 值）时不重复暴露上游名；required 仅在
+    override_model=true 且为主模型时标记。"""
     names = list(service.models)
     for k in service.models_map:
         if k not in names:
             names.append(k)
     if not names:
         return [_model_entry(service)]
+    main = service.model
+    if main and main not in names and main not in set(service.models_map.values()):
+        names.insert(0, main)
     out = []
     for m in names:
         out.append({
@@ -1579,10 +1583,14 @@ def _apply_model_policy(service: Service, payload: dict):
       clamp=强转主模型（默认，最安全）/ reject=400 列出可用模型 / passthrough=照旧
     - 别名命中（对外名 → 上游名）：重写 payload["model"] 供转发；
       统计在 record_stats 里反查对外名，按用户认知的名字记录
+    - 主模型恒放行：白名单非空但未含主模型时（/models 已将主模型列为 default），
+      任何策略都不拒掉/改写对主模型的请求
     - 白名单为空：仅做别名映射，其余逐字节兼容现状
     """
     req = payload.get("model")
     allowed = set(service.models) | set(service.models_map.keys())
+    if allowed:
+        allowed.add(service.model)
     if req and req in service.models_map:
         # 别名命中（白名单内外均映射）
         if not allowed or req in allowed:

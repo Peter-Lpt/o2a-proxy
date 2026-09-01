@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **/v1/models 主模型恒在列**：白名单（`models`/`models_map`）未含主模型时，`/v1/models` 仍返回主模型并置首
+  （`default=true`，`required` 随 `override_model`），已作为别名目标时不重复暴露上游名；
+  `model_policy` 任何策略（含 `reject`）均恒放行对主模型的请求。
+
 ### 价格架构完善
 
 - **费用结果增强**：`CostResult` 增加 `complete/currency/rule_id/source/updated_at/approximate`
