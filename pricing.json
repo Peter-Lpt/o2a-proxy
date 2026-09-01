@@ -17,7 +17,7 @@
         "ttl": "不确定，系统定期清理"
       }
     },
-    "last_updated": "2026-08-17",
+    "last_updated": "2026-08-28",
     "sources": {
       "qianwen_pricing_api": "https://platform-home.qianwenai.com/data/api.json?product=AliyunDeliveryService&action=GetSeriesModel",
       "qianwen_model_page": "https://www.qianwenai.com/models/{model-id}",
@@ -59,6 +59,38 @@
     "source": "https://help.aliyun.com/zh/model-studio/billing-for-model-studio",
     "cache_source": "https://help.aliyun.com/zh/model-studio/context-cache",
     "models": {
+      "qwen3.8-flash": {
+        "category": "text",
+        "tiers": [
+          { "range": "unlimited", "input": 0.8, "output": 2.7, "cache_hit": 0.1, "cache_miss": 1.25 }
+        ],
+        "cache": true,
+        "batch": true,
+        "free_quota": 1000000,
+        "source": "https://www.qianwenai.com/models/qwen3.8-flash#overview",
+        "modifiers": [
+          {
+            "type": "batch",
+            "factor": 0.5,
+            "when": {
+              "batch": true
+            },
+            "note": "Batch File 限时5折：输入 0.4 / 输出 1.35（缓存价不打折）"
+          }
+        ],
+        "context_length": "1M",
+        "max_input": "991K",
+        "max_output": "131K",
+        "thinking": {
+          "max_input": "983K",
+          "max_output": "131K",
+          "max_chain_of_thought": "262K"
+        },
+        "rate_limit": {
+          "tpm": "5M"
+        },
+        "cache_note": "显式缓存创建 1.25 / 显式缓存命中 0.1；隐式缓存命中按 cache_hit 计"
+      },
       "qwen3.7-max": {
         "category": "text",
         "tiers": [
@@ -278,15 +310,58 @@
         "category": "third-party",
         "source": "https://www.qianwenai.com/models/deepseek-v4-flash-0731#overview",
         "tiers": [
-          {
-            "range": "unlimited",
-            "input": 1.5,
-            "output": 4.5,
-            "cache_hit": 0.15
-          }
+          { "range": "unlimited", "input": 1.5, "output": 4.5, "cache_hit": 0.15 }
         ],
         "cache": true,
-        "peak_note": "统一按错峰（闲时）价计费：输入 1.5 / 输出 4.5 / 缓存命中 0.15（官方错峰时段为东八区 22:00-次日 08:00，当前模型不做忙时计费）"
+        "modifiers": [
+          {
+            "type": "schedule",
+            "note": "按东八区时段计价（timestamp 缺失时回退错峰价）",
+            "windows": [
+              {
+                "from": "22:00",
+                "to": "08:00",
+                "override": {
+                  "input": 1.5,
+                  "output": 4.5,
+                  "cache_read": 0.15,
+                  "cache_write": 1.5
+                },
+                "note": "错峰价（东八区 22:00-次日 08:00）"
+              },
+              {
+                "from": "08:00",
+                "to": "22:00",
+                "override": {
+                  "input": 3.0,
+                  "output": 9.0,
+                  "cache_read": 0.3,
+                  "cache_write": 3.0
+                },
+                "note": "忙时价（东八区 08:00-22:00）"
+              }
+            ]
+          }
+        ],
+        "context_length": "1M",
+        "max_input": "1M",
+        "max_output": "393K",
+        "rate_limit": {
+          "tpm": "1M",
+          "rpm": "15K"
+        },
+        "batch": false,
+        "batch_note": "页面未公布 Batch File / Batch Chat 折扣价，暂不启用批量价"
+      },
+      "ZHIPU/GLM-5.3-Flash": {
+        "category": "third-party",
+        "source": "https://www.qianwenai.com/models/ZHIPU%2FGLM-5.3-Flash",
+        "tiers": [
+          { "range": "unlimited", "input": 0.8, "output": 2.8, "cache_hit": 0.23 }
+        ],
+        "cache": true,
+        "discount": 0.5,
+        "discount_note": "限时 5 折"
       }
     }
   },

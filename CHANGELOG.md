@@ -13,6 +13,9 @@
 
 ### 价格架构完善
 
+- **GLM-5.3-Flash 定价**：`pricing.json` dashscope 段新增 `ZHIPU/GLM-5.3-Flash`
+  （输入 0.8 / 输出 2.8 / 缓存命中 0.23 元/M，限时 5 折），来源 `qianwenai.com` 模型页。
+
 - **费用结果增强**：`CostResult` 增加 `complete/currency/rule_id/source/updated_at/approximate`
   （Python 内部 API 返回；UI 默认不切换 `—`，避免存量回归）；`CacheStats._calc_cost` 与 Rust
   `recalc_cost` 均传入 `service_id`，服务级定价真正生效；`pricing_extra.batch` 注入
