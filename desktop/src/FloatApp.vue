@@ -51,7 +51,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { emit, listen } from "@tauri-apps/api/event";
 import { api, fmtNum, fmtPct } from "./api";
-import { hitTier } from "./format";
+import { hitTier, todayLiveRecords } from "./format";
 import Icon from "./components/Icon.vue";
 import SelectBox from "./components/SelectBox.vue";
 import Spark from "./components/Spark.vue";
@@ -222,8 +222,8 @@ const numHitTitle = computed(() =>
 
 const hitCls = computed(() => hitTier(min1.value.hitRate, false));
 
-// getLive 返回最新在前；取最近 40 条并反转为时间正序（旧→新，最新在右）
-const pending = computed(() => (records.value || []).slice(0, 40).reverse());
+// getLive 返回最新在前；先按当天过滤 + 时间倒序，再取最近 40 条反转为时间正序（旧→新，最新在右）
+const pending = computed(() => todayLiveRecords(records.value, 40).reverse());
 const spark = computed(() => pending.value.map((r: any) => Number(r.cache_hit_rate || 0)));
 const sparkRange = computed(() => {
   if (!pending.value.length) return ["", ""];
@@ -232,50 +232,33 @@ const sparkRange = computed(() => {
   return [first, last];
 });
 
-// 严格按完整时间戳倒序（最新在前）：时间戳是 0 填充的 ISO 字符串
-// （YYYY-MM-DDTHH:mm:ss），字典序即时间序，跨天、跨引擎都正确；
-// 不用 Date.parse，避免解析差异/NaN 时退化为原数组顺序导致旧记录排前。
-function cmpTsDesc(a: string, b: string): number {
-  if (a === b) return 0;
-  if (!a) return 1;
-  if (!b) return -1;
-  return a > b ? -1 : 1;
-}
-const liveFeed = computed(() => {
-  const today = new Date();
-  const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
-  const sorted = [...(records.value || [])].sort((a: any, b: any) =>
-    cmpTsDesc(String(a.timestamp || ""), String(b.timestamp || ""))
-  );
-  return sorted
-    .slice(0, 24)
-    .map((r: any) => {
-      const rate = Number(r.cache_hit_rate || 0);
-      const isErr = !!r.error || r.status === "error";
-      const ts = String(r.timestamp || "");
-      // 非当天的记录带日期前缀，避免把昨天的"16:10"读成今天的时间
-      const isToday = ts.slice(0, 10) === todayStr;
-      const time = isToday ? ts.slice(11, 19) : `${ts.slice(5, 10)} ${ts.slice(11, 16)}`;
-      return {
-        key: `${ts}_${r.service}_${r.output_tokens}_${r.error || ""}`,
-        time,
-        service: r.service || "",
-        total:
-          Number(r.input_tokens || 0) +
-          Number(r.cache_read_tokens || 0) +
-          Number(r.cache_write_tokens || 0),
-        cacheRead: Number(r.cache_read_tokens || 0),
-        output: Number(r.output_tokens || 0),
-        hitPct: (rate * 100).toFixed(0),
-        hitCls: hitTier(rate, true),
-        isErr,
-        err: isErr ? String(r.error || r.status || "error") : "",
-        duration: Number(r.duration_ms || 0),
-        firstToken: Number(r.first_token_ms || 0),
-        speed: Number(r.output_tokens_per_sec || 0),
-      };
-    });
-});
+// 严格按当天 + 完整时间戳倒序（最新在前）：跨天残留的旧记录不展示，
+// 时间列因此恒为 HH:mm:ss，不会被误读成当天时刻。
+const liveFeed = computed(() =>
+  todayLiveRecords(records.value, 24).map((r: any) => {
+    const rate = Number(r.cache_hit_rate || 0);
+    const isErr = !!r.error || r.status === "error";
+    const ts = String(r.timestamp || "");
+    return {
+      key: `${ts}_${r.service}_${r.output_tokens}_${r.error || ""}`,
+      time: ts.slice(11, 19),
+      service: r.service || "",
+      total:
+        Number(r.input_tokens || 0) +
+        Number(r.cache_read_tokens || 0) +
+        Number(r.cache_write_tokens || 0),
+      cacheRead: Number(r.cache_read_tokens || 0),
+      output: Number(r.output_tokens || 0),
+      hitPct: (rate * 100).toFixed(0),
+      hitCls: hitTier(rate, true),
+      isErr,
+      err: isErr ? String(r.error || r.status || "error") : "",
+      duration: Number(r.duration_ms || 0),
+      firstToken: Number(r.first_token_ms || 0),
+      speed: Number(r.output_tokens_per_sec || 0),
+    };
+  })
+);
 
 async function refresh() {
   try {

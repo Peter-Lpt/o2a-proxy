@@ -7,6 +7,12 @@
 
 ### 修复
 
+- **实时列表只显示当天记录**：悬浮窗列表与应用内「实时调用」不再出现昨天的错误条目。
+  新增 `desktop/src/format.ts` 统一口径 `todayLiveRecords()`（按 `timestamp` 日期段过滤当天
+  + 完整 ISO 时间戳字符串倒序，最新在前），悬浮窗列表/迷你走势与面板 `livePool`（列表、
+  走势、近5min 汇总）全部同源；后端 `get_live` 额外按 `timestamp` 日期过滤，防当天 jsonl
+  残留跨天写入的旧记录（轮询暂停/缓存残留时也不会串日）。时间列恒为 `HH:mm:ss`，
+  移除原先「非当天加 MM-DD 前缀」的兼容分支。
 - **/v1/models 主模型恒在列**：白名单（`models`/`models_map`）未含主模型时，`/v1/models` 仍返回主模型并置首
   （`default=true`，`required` 随 `override_model`），已作为别名目标时不重复暴露上游名；
   `model_policy` 任何策略（含 `reject`）均恒放行对主模型的请求。

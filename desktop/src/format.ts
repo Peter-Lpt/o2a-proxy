@@ -23,6 +23,44 @@ export function fmtCost(c: number | undefined | null): string {
   return v.toFixed(4);
 }
 
+// ---------- 实时列表（悬浮窗 / 面板实时调用）共用口径 ----------
+// 记录时间戳是引擎按本地时间写的 0 填充 ISO 串（YYYY-MM-DDTHH:mm:ss，无时区偏移），
+// 字典序即时间序；不用 Date/Date.parse 解析，避免 WebView 差异与 NaN 退化。
+
+/** 当天日期（本地时区）YYYY-MM-DD。 */
+export function todayStr(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** 记录是否属于当天（跨天残留的旧记录一律判 false）。 */
+export function isTodayRecord(rec: any, today: string = todayStr()): boolean {
+  return String(rec?.timestamp || "").slice(0, 10) === today;
+}
+
+/** 完整时间戳倒序比较（最新在前；空时间戳排最后）。 */
+export function cmpTsDesc(a: any, b: any): number {
+  const sa = String(a?.timestamp || "");
+  const sb = String(b?.timestamp || "");
+  if (sa === sb) return 0;
+  if (!sa) return 1;
+  if (!sb) return -1;
+  return sa > sb ? -1 : 1;
+}
+
+/**
+ * 实时列表统一口径：只保留当天记录，按时间倒序（最新在前）。
+ * limit > 0 时截断。后端 get_live 已按当天文件读取，这里再按 timestamp
+ * 兜底过滤，防止轮询暂停/缓存残留把昨天的记录显示成今天的。
+ */
+export function todayLiveRecords(records: any[], limit = 0): any[] {
+  const today = todayStr();
+  const out = (records || [])
+    .filter((r: any) => isTodayRecord(r, today))
+    .sort(cmpTsDesc);
+  return limit > 0 ? out.slice(0, limit) : out;
+}
+
 export type HitTier = "good" | "mid" | "bad" | "";
 
 /**

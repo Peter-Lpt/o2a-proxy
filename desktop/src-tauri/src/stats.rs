@@ -1116,11 +1116,16 @@ fn get_live_impl(dir: &Path, service: &str, service_id: &str, primary: &str) -> 
     let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
     let month_cum = build_month_cum(dir, &today_str[..7]);
     // 按完整时间戳降序取最近 80 条：时间戳是 0 填充 ISO 字符串，字典序即时间序，
-    // 不依赖 jsonl 行顺序（写进程时钟抖动/交错时依然严格按时间排序）
+    // 不依赖 jsonl 行顺序（写进程时钟抖动/交错时依然严格按时间排序）；
+    // 再按 timestamp 的日期段过滤：当天文件里可能残留跨天写入的旧时间戳记录
+    // （写进程跨午夜/系统时钟回拨），实时列表只应展示当天。
     let mut records: Vec<Value> =
         read_records(&dir, &today_str, &pricing, &aliases, &no_cost_services, Some(&month_cum))
             .into_iter()
-            .filter(|r| matches_service(r, service, service_id, primary))
+            .filter(|r| {
+                r["timestamp"].as_str().unwrap_or("").starts_with(&today_str)
+                    && matches_service(r, service, service_id, primary)
+            })
             .collect();
     records.sort_by(|a, b| {
         let ta = a["timestamp"].as_str().unwrap_or("");
@@ -1426,6 +1431,50 @@ mod tests {
         assert_eq!(n["today"]["requests"], 0);
         assert_eq!(n["rangeAgg"]["requests"], 0);
         assert_eq!(n["models"].as_array().unwrap().len(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_live_keeps_only_today_records_sorted_desc() {
+        // 实时列表口径：当天 jsonl 里残留的旧时间戳记录不返回（跨午夜写入/
+        // 时钟回拨），返回项严格按时间戳倒序（最新在前），不依赖文件行序。
+        let dir = std::env::temp_dir().join(format!("o2a_live_today_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("cache_stats")).unwrap();
+
+        let now = chrono::Local::now();
+        let today = now.format("%Y-%m-%d").to_string();
+        let yesterday = (now - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        let rec = |ts: &str| {
+            json!({
+                "timestamp": ts,
+                "service": "svc1",
+                "model": "m1",
+                "input_tokens": 100,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "output_tokens": 50,
+                "cost": 0.01
+            })
+        };
+        // 行序故意打乱：旧→新，且首条是昨天的时间戳
+        fs::write(
+            dir.join("cache_stats").join(format!("{today}.jsonl")),
+            format!(
+                "{}\n{}\n{}\n",
+                serde_json::to_string(&rec(&format!("{yesterday}T23:59:59"))).unwrap(),
+                serde_json::to_string(&rec(&format!("{today}T09:00:00"))).unwrap(),
+                serde_json::to_string(&rec(&format!("{today}T10:30:00"))).unwrap(),
+            ),
+        )
+        .unwrap();
+
+        let live = get_live(&dir.join("cache_stats"), "svc1", "", "svc1").unwrap();
+        let arr = live["records"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "昨天的记录不应出现在实时列表");
+        assert_eq!(arr[0]["timestamp"], format!("{today}T10:30:00"));
+        assert_eq!(arr[1]["timestamp"], format!("{today}T09:00:00"));
 
         let _ = fs::remove_dir_all(&dir);
     }

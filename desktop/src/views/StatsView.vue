@@ -219,7 +219,7 @@
 // 统计数据与轮询来自 stores/stats；服务运行态来自 stores/services。
 import { computed, ref } from "vue";
 import { fmtCost, fmtNum, fmtPct } from "../api";
-import { hitTier } from "../format";
+import { hitTier, todayLiveRecords } from "../format";
 import { cfg, selected, ALL } from "../stores/config";
 import { anyRunning, serviceList } from "../stores/services";
 import {
@@ -429,28 +429,21 @@ const chartHit = computed(() => chartData.value.hit);
 
 // 实时调用同样跟随模型过滤：选中模型后，实时列表 / 迷你走势 / 近5min汇总
 // 只统计该模型的请求（记录自带 model 字段，客户端过滤即可）。
-const livePool = computed(() =>
-  !modelFilter.value
-    ? liveRecords.value
-    : liveRecords.value.filter((r: any) => r.model === modelFilter.value)
-);
+// livePool 统一口径：只保留当天记录并按完整时间戳倒序（最新在前），
+// 跨天残留的旧记录不会出现在实时列表 / 走势 / 汇总任一处。
+const livePool = computed(() => {
+  const today = todayLiveRecords(liveRecords.value);
+  return !modelFilter.value
+    ? today
+    : today.filter((r: any) => r.model === modelFilter.value);
+});
 
 const liveSpark = computed(() =>
   livePool.value.slice(-40).map((r: any) => Number(r.cache_hit_rate || 0))
 );
 const liveFeed = computed(() => {
-  // 严格按完整时间戳倒序（最新在前）：时间戳是 0 填充的 ISO 字符串
-  // （YYYY-MM-DDTHH:mm:ss），字典序即时间序，跨天/跨引擎都正确；
-  // 不用 Date.parse，避免解析差异/NaN 时退化为原数组顺序导致旧记录排前。
-  const sorted = [...livePool.value].sort((a, b) => {
-    const sa = String(a.timestamp || "");
-    const sb = String(b.timestamp || "");
-    if (sa === sb) return 0;
-    if (!sa) return 1;
-    if (!sb) return -1;
-    return sa > sb ? -1 : 1;
-  });
-  return sorted.slice(0, 30).map((r: any) => {
+  // livePool 已按时间倒序，直接取最近 30 条
+  return livePool.value.slice(0, 30).map((r: any) => {
     const rate = Number(r.cache_hit_rate || 0);
     const isErr = !!r.error || r.status === "error";
     return {
