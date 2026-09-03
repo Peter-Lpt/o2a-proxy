@@ -110,7 +110,8 @@ pub fn responses_to_chat(req: &Value, service: &Service) -> Value {
         return Value::Object(chat);
     }
 
-    let raw_input = req_obj.get("input").unwrap();
+    // input 为 falsy 的分支已在上方 return；此处必有 input
+    let raw_input = input_val.expect("input 为 truthy 已在上方判定");
     let items: Vec<Value> = match raw_input {
         Value::String(s) => vec![json!({"role": "user", "content": s})],
         Value::Array(arr) => arr.clone(),
@@ -603,7 +604,10 @@ impl ResponsesStreamTranslator {
                     if !args.is_empty() {
                         self.ensure_created(&mut events);
                         self.deliver_tool(idx, &mut events);
-                        let state = self.tool_states.get_mut(&idx).unwrap();
+                        let state = self
+                            .tool_states
+                            .get_mut(&idx)
+                            .expect("tool state 由 ensure_created 建立");
                         state.arguments.push_str(args);
                         let (item_id, output_index) =
                             (state.item_id.clone(), state.output_index);

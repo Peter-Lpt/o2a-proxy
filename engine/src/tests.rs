@@ -214,9 +214,8 @@ async fn status_shape_and_task_state() {
 
     // 任务状态语义经 /status 可见
     {
-        let mut t = st.task.lock().unwrap();
-        t.begin();
-        t.finish(false);
+        st.task_begin();
+        st.task_finish(false);
     }
     let (_, body) = get(port, "/status", None).await;
     assert_eq!(body["active_streams"], 1);

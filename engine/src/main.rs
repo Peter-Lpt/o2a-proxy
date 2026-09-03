@@ -14,6 +14,7 @@ mod direct;
 mod handlers;
 mod proxy;
 mod reload;
+mod sse_pump;
 mod state;
 mod stats_sink;
 #[cfg(test)]

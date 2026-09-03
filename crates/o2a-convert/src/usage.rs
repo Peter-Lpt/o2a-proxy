@@ -97,11 +97,10 @@ fn key_in<'a>(m: Option<&'a Map<String, Value>>, k: &str) -> Option<&'a Value> {
 
 /// Chat usage → Responses API usage 格式（对齐 `_chat_usage_to_responses`）。
 pub fn chat_usage_to_responses(usage: Option<&Value>) -> Value {
-    let usage = match usage {
-        Some(v) if v.is_object() => v,
-        _ => return empty_responses_usage(0, 0, 0, 0),
+    // 非 falsy 分支已在上方 return；此处必有对象形态的 usage
+    let Some(u) = usage.and_then(|v| v.as_object()) else {
+        return empty_responses_usage(0, 0, 0, 0);
     };
-    let u = usage.as_object().unwrap();
     // usage.get("prompt_tokens", usage.get("input_tokens", 0))：键存在即命中
     let prompt = match key(u, "prompt_tokens") {
         Some(v) => coerce_int(v, 0),

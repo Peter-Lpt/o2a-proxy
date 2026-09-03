@@ -11,17 +11,19 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::Body;
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use o2a_config::Service;
-use o2a_convert::{chat_to_responses_json, convert_usage, ResponsesStreamTranslator, sse_event};
+use o2a_convert::{chat_to_responses_json, convert_usage, ResponsesStreamTranslator};
 
 use crate::handlers::openai_error_response;
-use crate::proxy::{build_target, stats_meta, upstream_headers, STREAM_TIMEOUT};
+use crate::proxy::{build_target, stats_meta, upstream_headers};
+use crate::sse_pump::{
+    next_chunk, raw_line, send_stream_error, sse_response, sse_send, split_line, PumpOutcome, SseTx,
+};
 use crate::state::{classify, py_truthy, ServiceState};
 
 /// Python truthiness 局部实现（bool(req.get("input")) 等）。
@@ -165,8 +167,7 @@ pub async fn passthrough(
                 .and_then(|m| m.get("tool_calls"))
                 .and_then(|v| v.as_array())
                 .is_some_and(|a| !a.is_empty());
-            let mut t = st.task.lock().unwrap();
-            t.finish(classify(fr, has_tool));
+            st.task_finish(classify(fr, has_tool));
         }
         tracing::info!("[passthrough] completed bytes={}", raw.len());
         return (
@@ -186,13 +187,12 @@ pub async fn passthrough(
 
     tokio::spawn(async move {
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.begin();
+            task_st.task_begin();
         }
         let mut latest_usage: Option<Value> = None;
         let mut finish_reason: Option<String> = None;
         let mut first_chunk_ts: Option<Instant> = None;
-        pump_passthrough(
+        let _ = pump_passthrough(
             up,
             &tx,
             responses_usage,
@@ -220,72 +220,42 @@ pub async fn passthrough(
         );
         // responses_usage 的任务状态在 response.completed 事件内判定（对齐 Python）
         if !responses_usage {
-            let mut t = task_st.task.lock().unwrap();
-            t.finish(classify(finish_reason.as_deref(), false));
+            task_st.task_finish(classify(finish_reason.as_deref(), false));
         }
-        let mut t = task_st.task.lock().unwrap();
-        t.end();
+        task_st.task_end();
     });
 
     sse_response(rx)
 }
 
-/// passthrough 泵：逐行转发 + 旁路提取。返回 ()（统计语义在调用方 finally 处理）。
+/// passthrough 泵：逐行转发 + 旁路提取。结束语义由调用方统一收尾
+/// （ClientGone / Error / Done 三路都记统计），映射为 Completed/ClientGone。
 async fn pump_passthrough(
     mut up: reqwest::Response,
-    tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    tx: &SseTx,
     responses_usage: bool,
     latest_usage: &mut Option<Value>,
     finish_reason: &mut Option<String>,
     first_chunk_ts: &mut Option<Instant>,
     task_st: &Arc<ServiceState>,
-) {
+) -> PumpOutcome {
     let mut line_buf: Vec<u8> = Vec::new();
-    macro_rules! write_raw {
-        ($line:expr) => {
-            let mut out = $line.to_vec();
-            out.push(b'\n');
-            if tx.send(Ok(axum::body::Bytes::from(out))).await.is_err() {
-                return; // ClientGone：静默退出，取消上游
-            }
-        };
-    }
     loop {
-        let chunk = match tokio::time::timeout(STREAM_TIMEOUT, up.chunk()).await {
-            Err(_) => {
-                let msg = "upstream read timeout".to_string();
+        let chunk = match next_chunk(&mut up).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return PumpOutcome::Completed,
+            Err(msg) => {
                 tracing::error!("[passthrough] stream error: {msg}");
-                let _ = tx
-                    .send(Ok(axum::body::Bytes::from(sse_event(&json!({
-                        "type": "error",
-                        "error": {"type": "api_error", "message": msg},
-                    })))))
-                    .await;
-                return;
-            }
-            Ok(Ok(None)) => return,
-            Ok(Ok(Some(bytes))) => bytes,
-            Ok(Err(e)) => {
-                let msg = e.to_string();
-                tracing::error!("[passthrough] stream error: {msg}");
-                let _ = tx
-                    .send(Ok(axum::body::Bytes::from(sse_event(&json!({
-                        "type": "error",
-                        "error": {"type": "api_error", "message": msg},
-                    })))))
-                    .await;
-                return;
+                send_stream_error(tx, &msg).await;
+                return PumpOutcome::Error(msg);
             }
         };
         line_buf.extend_from_slice(&chunk);
-        while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = line_buf.drain(..=pos).collect();
-            line.pop(); // \n
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
+        while let Some(line) = split_line(&mut line_buf) {
             // 逐行原样转发（含非 data 行），对齐 Python stream_write(resp, line)
-            write_raw!(&line);
+            if !raw_line(tx, &line).await {
+                return PumpOutcome::ClientGone; // 客户端断连：静默退出，取消上游
+            }
             let Ok(line) = std::str::from_utf8(&line) else { continue };
             let line = line.trim();
             if !line.starts_with("data:") {
@@ -307,7 +277,7 @@ async fn pump_passthrough(
                 if chunk.get("type").and_then(|v| v.as_str()) == Some("response.completed") {
                     let resp = chunk.get("response").cloned().unwrap_or(json!({}));
                     let u = resp.get("usage").cloned().unwrap_or(Value::Null);
-                    if u.is_object() && !u.as_object().unwrap().is_empty() {
+                    if u.as_object().is_some_and(|o| !o.is_empty()) {
                         *latest_usage = Some(convert_usage(Some(&u)));
                     }
                     // 任务状态：output 无 function_call 视为最终答复
@@ -316,12 +286,11 @@ async fn pump_passthrough(
                         .and_then(|v| v.as_array())
                         .map(|a| a.iter().any(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call")))
                         .unwrap_or(false);
-                    let mut t = task_st.task.lock().unwrap();
-                    t.finish(classify(None, has_tool));
+                    task_st.task_finish(classify(None, has_tool));
                 }
             } else {
                 if let Some(u) = chunk.get("usage") {
-                    if u.is_object() && !u.as_object().unwrap().is_empty() {
+                    if u.as_object().is_some_and(|o| !o.is_empty()) {
                         *latest_usage = Some(convert_usage(Some(u)));
                     }
                 }
@@ -338,20 +307,6 @@ async fn pump_passthrough(
             }
         }
     }
-}
-
-fn sse_response(rx: mpsc::Receiver<Result<axum::body::Bytes, std::io::Error>>) -> Response {
-    let stream_body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8")),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-            (header::HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no")),
-        ],
-        stream_body,
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -428,8 +383,7 @@ pub async fn openai_stream(
 
     tokio::spawn(async move {
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.begin();
+            task_st.task_begin();
         }
         let mut translator = is_responses.then(|| ResponsesStreamTranslator::new(&model_c));
         let mut latest_usage: Option<Value> = None;
@@ -437,7 +391,7 @@ pub async fn openai_stream(
         let mut first_chunk_ts: Option<Instant> = None;
         let mut had_tool = false;
 
-        let client_gone = pump_openai(
+        pump_openai(
             up,
             &tx,
             is_responses,
@@ -465,24 +419,20 @@ pub async fn openai_stream(
             stats_meta(req_start, first_chunk_ts, out_tokens),
         );
         if !is_responses {
-            let mut t = task_st.task.lock().unwrap();
-            t.finish(classify(finish_reason.as_deref(), false));
+            task_st.task_finish(classify(finish_reason.as_deref(), false));
         }
-        let mut t = task_st.task.lock().unwrap();
-        t.end();
-        let _ = client_gone;
+        task_st.task_end();
     });
 
     sse_response(rx)
 }
 
 /// openai_stream 泵：Responses 入走翻译器 / Chat 入逐行透传。
-/// 返回是否客户端断连（统计语义在调用方 finally 统一处理）。
-/// 参数与 Python 循环内局部变量一一对应，聚合结构体反而增加间接层。
+/// 结束语义在调用方 finally 统一处理（三路都记统计），仅 ClientGone 需感知。
 #[allow(clippy::too_many_arguments)]
 async fn pump_openai(
     mut up: reqwest::Response,
-    tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    tx: &SseTx,
     is_responses: bool,
     mut translator: Option<&mut ResponsesStreamTranslator>,
     latest_usage: &mut Option<Value>,
@@ -490,33 +440,12 @@ async fn pump_openai(
     first_chunk_ts: &mut Option<Instant>,
     had_tool: &mut bool,
     task_st: &Arc<ServiceState>,
-) -> bool {
-    async fn try_send(
-        tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
-        ev: &Value,
-    ) -> bool {
-        tx.send(Ok(axum::body::Bytes::from(sse_event(ev))))
-            .await
-            .is_ok()
-    }
-    async fn send_error(tx: &mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>, msg: &str) {
-        let _ = try_send(
-            tx,
-            &json!({"type": "error", "error": {"type": "api_error", "message": msg}}),
-        )
-        .await;
-    }
-
+) -> PumpOutcome {
     let mut line_buf: Vec<u8> = Vec::new();
     loop {
-        let chunk = match tokio::time::timeout(STREAM_TIMEOUT, up.chunk()).await {
-            Err(_) => {
-                let msg = "upstream read timeout".to_string();
-                tracing::error!("[codex] stream error: {msg}");
-                send_error(tx, &msg).await;
-                return false;
-            }
-            Ok(Ok(None)) => {
+        let chunk = match next_chunk(&mut up).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
                 // EOF 兜底：补发剩余事件 + response.completed，避免客户端挂起
                 if let Some(tr) = translator {
                     for ev in tr.finish() {
@@ -525,39 +454,29 @@ async fn pump_openai(
                         {
                             *had_tool = true;
                         }
-                        if !try_send(tx, &ev).await {
-                            return true;
+                        if !sse_send(tx, &ev).await {
+                            return PumpOutcome::ClientGone;
                         }
                     }
-                    let mut t = task_st.task.lock().unwrap();
-                    t.finish(classify(None, *had_tool));
+                    task_st.task_finish(classify(None, *had_tool));
                 }
-                return false;
+                return PumpOutcome::Completed;
             }
-            Ok(Ok(Some(bytes))) => bytes,
-            Ok(Err(e)) => {
-                let msg = e.to_string();
+            Err(msg) => {
                 tracing::error!("[codex] stream error: {msg}");
-                send_error(tx, &msg).await;
-                return false;
+                send_stream_error(tx, &msg).await;
+                return PumpOutcome::Error(msg);
             }
         };
         line_buf.extend_from_slice(&chunk);
-        while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = line_buf.drain(..=pos).collect();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
+        while let Some(line) = split_line(&mut line_buf) {
             let Ok(line) = std::str::from_utf8(&line) else { continue };
             let line = line.trim();
             if !is_responses {
                 // Chat 直通：原样转发每行（含非 data 行，对齐 Python stream_write(resp, line)），
                 // 仅旁路抓 usage / finish_reason
-                let mut out = line.as_bytes().to_vec();
-                out.push(b'\n');
-                if tx.send(Ok(axum::body::Bytes::from(out))).await.is_err() {
-                    return true;
+                if !raw_line(tx, line.as_bytes()).await {
+                    return PumpOutcome::ClientGone;
                 }
                 if !line.starts_with("data:") {
                     continue;
@@ -571,7 +490,7 @@ async fn pump_openai(
                 }
                 if let Ok(chunk) = serde_json::from_str::<Value>(data) {
                     if let Some(u) = chunk.get("usage") {
-                        if u.is_object() && !u.as_object().unwrap().is_empty() {
+                        if u.as_object().is_some_and(|o| !o.is_empty()) {
                             *latest_usage = Some(convert_usage(Some(u)));
                         }
                     }
@@ -603,20 +522,19 @@ async fn pump_openai(
                     {
                         *had_tool = true;
                     }
-                    if !try_send(tx, &ev).await {
-                        return true;
+                    if !sse_send(tx, &ev).await {
+                        return PumpOutcome::ClientGone;
                     }
                 }
-                let mut t = task_st.task.lock().unwrap();
-                t.finish(classify(None, *had_tool));
-                return false;
+                task_st.task_finish(classify(None, *had_tool));
+                return PumpOutcome::Completed;
             }
             if data.is_empty() {
                 continue;
             }
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue };
             if let Some(u) = chunk.get("usage") {
-                if u.is_object() && !u.as_object().unwrap().is_empty() {
+                if u.as_object().is_some_and(|o| !o.is_empty()) {
                     *latest_usage = Some(convert_usage(Some(u)));
                 }
             }
@@ -629,8 +547,7 @@ async fn pump_openai(
                             .any(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call"))
                     })
                     .unwrap_or(false);
-                let mut t = task_st.task.lock().unwrap();
-                t.finish(classify(None, has_tool));
+                task_st.task_finish(classify(None, has_tool));
             }
             for ev in tr.translate(&chunk) {
                 if ev.get("type").and_then(|v| v.as_str()) == Some("response.output_item.added")
@@ -638,8 +555,8 @@ async fn pump_openai(
                 {
                     *had_tool = true;
                 }
-                if !try_send(tx, &ev).await {
-                    return true;
+                if !sse_send(tx, &ev).await {
+                    return PumpOutcome::ClientGone;
                 }
             }
         }
@@ -731,8 +648,7 @@ pub async fn openai_non_stream(
                     .and_then(|m| m.get("tool_calls"))
                     .and_then(|v| v.as_array())
                     .is_some_and(|a| !a.is_empty());
-                let mut t = st.task.lock().unwrap();
-                t.finish(classify(fr, has_tool));
+                st.task_finish(classify(fr, has_tool));
                 return (
                     StatusCode::OK,
                     [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],
@@ -753,8 +669,7 @@ pub async fn openai_non_stream(
                 .and_then(|v| v.as_array())
                 .map(|a| a.iter().any(|i| i.get("type").and_then(|t| t.as_str()) == Some("function_call")))
                 .unwrap_or(false);
-            let mut t = st.task.lock().unwrap();
-            t.finish(classify(None, has_tool));
+            st.task_finish(classify(None, has_tool));
             (
                 StatusCode::OK,
                 [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))],

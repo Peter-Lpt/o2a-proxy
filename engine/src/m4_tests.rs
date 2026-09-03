@@ -427,9 +427,9 @@ async fn direct_stream_passthrough_and_usage_capture() {
     assert_eq!(usage["input_tokens"], 100);
     assert_eq!(usage["output_tokens"], 5);
     // 任务状态：end_turn → final
-    let snap = st.task.lock().unwrap();
+    let snap = st.task_snapshot();
     assert_eq!(snap.last_finish, "final");
-    assert!(!snap.active());
+    assert!(!snap.active);
 }
 
 // ---------------------------------------------------------------------------

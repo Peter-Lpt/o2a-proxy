@@ -9,17 +9,19 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::Body;
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use o2a_config::Service;
-use o2a_convert::{anthropic_stop_reason, sse_event, ChunkTranslator};
+use o2a_convert::{anthropic_stop_reason, ChunkTranslator};
 
 use crate::handlers::error_response;
 use crate::proxy::{build_target, upstream_headers, StatsMeta, STREAM_TIMEOUT};
+use crate::sse_pump::{
+    next_chunk, send_stream_error, sse_response, sse_send, split_line, PumpOutcome, SseTx,
+};
 use crate::state::{classify, ServiceState};
 
 /// 请求截止：总超时按"距请求开始的耗时"判定（对齐 Python `req_elapsed > STREAM_TIMEOUT`），
@@ -47,16 +49,6 @@ impl Clock {
     fn meta(&self, output_tokens: i64) -> StatsMeta {
         crate::proxy::stats_meta(self.req_start, self.first_chunk_ts, output_tokens)
     }
-}
-
-/// pump 结束后的统计语义。
-enum PumpEnd {
-    /// 正常收尾（[DONE]/EOF/总超时）：按最新 usage 记成功
-    Completed,
-    /// 流内异常：记 error
-    Error(String),
-    /// 客户端断连：不记（对齐 Python ClientGone 分支无 record_stats）
-    ClientGone,
 }
 
 /// 流式 handler 主入口。
@@ -132,8 +124,7 @@ pub async fn handle_stream(
 
     tokio::spawn(async move {
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.begin();
+            task_st.task_begin();
         }
         let mut clock = Clock::new(pump_req_start);
         let mut tr = ChunkTranslator::new(&svc_model);
@@ -141,22 +132,21 @@ pub async fn handle_stream(
         // 对齐 Python finally：_task_finish(_classify(pending_finish_reason, had_tool_calls))
         // + _task_end（ClientGone 同样走 finally）
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.finish(tr.is_final_answer());
-            t.end();
+            task_st.task_finish(tr.is_final_answer());
+            task_st.task_end();
         }
         match end {
-            PumpEnd::Completed => {
+            PumpOutcome::Completed => {
                 stats.record(&svc_for_stats, tr.model(), tr.usage(), None, clock.meta(
                     tr.usage().get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
                 ));
             }
-            PumpEnd::Error(msg) => {
+            PumpOutcome::Error(msg) => {
                 stats.record(&svc_for_stats, tr.model(), tr.usage(), Some(&msg), clock.meta(
                     tr.usage().get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
                 ));
             }
-            PumpEnd::ClientGone => {}
+            PumpOutcome::ClientGone => {}
         }
         tracing::info!(
             "[STREAM] ended finished={} total_elapsed={:.2}s",
@@ -165,69 +155,36 @@ pub async fn handle_stream(
         );
     });
 
-    let stream_body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8")),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-            (header::HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no")),
-        ],
-        stream_body,
-    )
-        .into_response()
+    sse_response(rx)
 }
 
-/// SSE 行缓冲 + chunk 消费循环。返回 pump 结束语义。
+/// SSE 行缓冲 + chunk 消费循环（协议差异面：ChunkTranslator 翻译 + Clock 总超时）。
 async fn pump_loop(
     mut up: reqwest::Response,
-    tx: mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    tx: SseTx,
     tr: &mut ChunkTranslator,
     clock: &mut Clock,
-) -> PumpEnd {
+) -> PumpOutcome {
     let mut line_buf: Vec<u8> = Vec::new();
-    macro_rules! write_ev {
-        ($ev:expr) => {
-            match tx.send(Ok(axum::body::Bytes::from(sse_event(&$ev)))).await {
-                Ok(_) => true,
-                Err(_) => return PumpEnd::ClientGone, // 客户端断连：静默退出，取消上游
-            }
-        };
-    }
-
     loop {
-        // 读间隔超时兜底（对齐 aiohttp sock_read=STREAM_TIMEOUT：异常路径）
-        let chunk = match tokio::time::timeout(STREAM_TIMEOUT, up.chunk()).await {
-            Err(_) => { // 读间隔超时
-                let msg = "upstream read timeout".to_string();
-                tracing::error!("Stream error: {msg}");
-                if tr.is_started() {
-                    write_ev!(json!({
-                        "type": "error",
-                        "error": {"type": "api_error", "message": msg},
-                    }));
-                }
-                return PumpEnd::Error(msg);
-            }
-            Ok(Ok(None)) => {
+        let chunk = match next_chunk(&mut up).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
                 // 上游 EOF 未收 [DONE]：补发终止事件，避免客户端挂起
                 for ev in tr.on_eof() {
-                    write_ev!(ev);
+                    if !sse_send(&tx, &ev).await {
+                        return PumpOutcome::ClientGone;
+                    }
                 }
-                return PumpEnd::Completed;
+                return PumpOutcome::Completed;
             }
-            Ok(Ok(Some(bytes))) => bytes,
-            Ok(Err(e)) => {
-                // 上游读错误（对齐 Python 循环内 except Exception → 流内 error 事件）
-                let msg = e.to_string();
+            Err(msg) => {
+                // 读间隔超时 / 上游读错误（对齐 Python 循环内 except → 流内 error 事件）
                 tracing::error!("Stream error: {msg}");
-                if tr.is_started() {
-                    write_ev!(json!({
-                        "type": "error",
-                        "error": {"type": "api_error", "message": msg},
-                    }));
+                if tr.is_started() && !send_stream_error(&tx, &msg).await {
+                    return PumpOutcome::ClientGone;
                 }
-                return PumpEnd::Error(msg);
+                return PumpOutcome::Error(msg);
             }
         };
         clock.note_first_chunk();
@@ -241,19 +198,15 @@ async fn pump_loop(
                 STREAM_TIMEOUT.as_secs()
             );
             for ev in tr.on_timeout() {
-                write_ev!(ev);
+                if !sse_send(&tx, &ev).await {
+                    return PumpOutcome::ClientGone;
+                }
             }
-            return PumpEnd::Completed;
+            return PumpOutcome::Completed;
         }
 
         line_buf.extend_from_slice(&chunk);
-        // 按行切分（处理 CRLF；尾部不完整行留待下一个 chunk）
-        while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-            let mut line: Vec<u8> = line_buf.drain(..=pos).collect();
-            line.pop(); // \n
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
+        while let Some(line) = split_line(&mut line_buf) {
             let Ok(line) = std::str::from_utf8(&line) else { continue };
             let line = line.trim();
             if !line.starts_with("data:") {
@@ -262,16 +215,20 @@ async fn pump_loop(
             let data = line[5..].trim();
             if data == "[DONE]" {
                 for ev in tr.on_done() {
-                    write_ev!(ev);
+                    if !sse_send(&tx, &ev).await {
+                        return PumpOutcome::ClientGone;
+                    }
                 }
-                return PumpEnd::Completed;
+                return PumpOutcome::Completed;
             }
             if data.is_empty() {
                 continue;
             }
             let Ok(chunk) = serde_json::from_str::<Value>(data) else { continue };
             for ev in tr.on_chunk(&chunk) {
-                write_ev!(ev);
+                if !sse_send(&tx, &ev).await {
+                    return PumpOutcome::ClientGone;
+                }
             }
         }
     }
@@ -415,8 +372,7 @@ pub async fn handle_non_stream(
     let stop_reason = anthropic_stop_reason(Some(finish_reason), has_tool);
     // 任务状态（对齐 Python：非流式单次响应，finish_reason 判定）
     {
-        let mut t = st.task.lock().unwrap();
-        t.finish(classify(Some(finish_reason), has_tool));
+        st.task_finish(classify(Some(finish_reason), has_tool));
     }
     // 统计（对齐 record_stats：usage 全量 + req_start 计时；模型取 raw.model）
     let stats_model = raw

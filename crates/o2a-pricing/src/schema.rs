@@ -70,7 +70,9 @@ fn format_g(v: f64) -> String {
     } else {
         // 科学计数法：5 位小数 + 去尾零，指数至少 2 位（Python 风格 e+06 / e-07）
         let mantissa_exp = format!("{:.*e}", 5, v);
-        let (m, e) = mantissa_exp.split_once('e').unwrap();
+        let (m, e) = mantissa_exp
+            .split_once('e')
+            .expect("format {:e} 输出必含 'e'");
         let mut m = m.to_string();
         if m.contains('.') {
             while m.ends_with('0') {
@@ -262,7 +264,10 @@ pub fn entry_to_v2_entry(entry: &Value) -> Value {
             }
             return Value::Object(out);
         }
-        let tiers = entry["tiers"].as_array().unwrap();
+        // tiers_empty 已判定为 false：tiers 必为非空数组
+        let tiers = entry["tiers"]
+            .as_array()
+            .expect("tiers 非空已在上方判定");
         let t0 = &tiers[0];
         let mut c = v1_tier_to_components(t0);
         let mut ex: Vec<String> = c.keys().cloned().collect();
@@ -471,13 +476,12 @@ pub fn validate_pricing_rules(raw: &Value) -> Result<Vec<Value>, String> {
 
 /// 整份 pricing 归一化（幂等：v2 输入原样通过；v3 rules 保留为规则表）。
 pub fn normalize_pricing(raw: &Value) -> Result<Value, String> {
-    if !raw.is_object() {
+    let Some(obj) = raw.as_object() else {
         return Ok(json!({
             "_meta": {"schema": "o2a-pricing/v2", "currency": DEFAULT_CURRENCY},
             "models": {}, "accounts": {}, "services": {}, "rules": []
         }));
-    }
-    let obj = raw.as_object().unwrap();
+    };
     let rules = validate_pricing_rules(raw)?;
 
     let mut models = Map::new();

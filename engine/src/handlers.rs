@@ -123,10 +123,10 @@ fn handle_get(st: &ServiceState, path: &str, query: Option<&str>) -> Response {
             StatusCode::OK,
         ),
         "/status" => {
-            let t = st.task.lock().unwrap();
+            let t = st.task_snapshot();
             json_response(
                 &json!({
-                    "active": t.active(),
+                    "active": t.active,
                     "active_streams": t.active_streams,
                     "last_finish": t.last_finish,
                     "last_activity": t.last_activity,

@@ -100,10 +100,11 @@ fn extract(data: &Value) -> (Value, Value) {
     };
     let mut usage = obj.get("usage").cloned().unwrap_or(Value::Null);
     let mut limit = obj.get("limit").cloned().unwrap_or(Value::Null);
-    if usage.is_null() && obj.get("data").map(|d| d.is_object()).unwrap_or(false) {
-        let inner = obj.get("data").unwrap();
-        usage = inner.get("usage").cloned().unwrap_or(Value::Null);
-        limit = inner.get("limit").cloned().unwrap_or(Value::Null);
+    if usage.is_null() {
+        if let Some(inner) = obj.get("data").filter(|d| d.is_object()) {
+            usage = inner.get("usage").cloned().unwrap_or(Value::Null);
+            limit = inner.get("limit").cloned().unwrap_or(Value::Null);
+        }
     }
     if usage.is_object() {
         usage = or_first(vec![

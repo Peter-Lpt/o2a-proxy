@@ -8,17 +8,17 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::body::Body;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use o2a_config::Service;
-use o2a_convert::{convert_usage, sse_event};
+use o2a_convert::convert_usage;
 
 use crate::handlers::error_response;
-use crate::proxy::{build_target, stats_meta, STREAM_TIMEOUT};
+use crate::sse_pump::{next_chunk, raw_line, send_stream_error, sse_response, split_line};
+use crate::proxy::{build_target, stats_meta};
 use crate::state::{classify, ServiceState};
 
 /// 上游请求头（对齐 `upstream_direct_headers`）：
@@ -120,8 +120,7 @@ pub async fn direct_stream(
 
     tokio::spawn(async move {
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.begin();
+            task_st.task_begin();
         }
         let mut latest_usage: Option<Value> = None;
         let mut stop_reason: Option<String> = None;
@@ -129,43 +128,19 @@ pub async fn direct_stream(
 
         let mut line_buf: Vec<u8> = Vec::new();
         'pump: loop {
-            let chunk = match tokio::time::timeout(STREAM_TIMEOUT, up.chunk()).await {
-                Err(_) => {
-                    let msg = "upstream read timeout".to_string();
+            let chunk = match next_chunk(&mut up).await {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => break 'pump,
+                Err(msg) => {
                     tracing::error!("[direct] stream error: {msg}");
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(sse_event(&json!({
-                            "type": "error",
-                            "error": {"type": "api_error", "message": msg},
-                        })))))
-                        .await;
-                    break 'pump;
-                }
-                Ok(Ok(None)) => break 'pump,
-                Ok(Ok(Some(bytes))) => bytes,
-                Ok(Err(e)) => {
-                    let msg = e.to_string();
-                    tracing::error!("[direct] stream error: {msg}");
-                    let _ = tx
-                        .send(Ok(axum::body::Bytes::from(sse_event(&json!({
-                            "type": "error",
-                            "error": {"type": "api_error", "message": msg},
-                        })))))
-                        .await;
+                    send_stream_error(&tx, &msg).await;
                     break 'pump;
                 }
             };
             line_buf.extend_from_slice(&chunk);
-            while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
-                let mut line: Vec<u8> = line_buf.drain(..=pos).collect();
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
+            while let Some(line) = split_line(&mut line_buf) {
                 // 原样透传（对齐 Python stream_write(resp, line)）
-                let mut out = line.clone();
-                out.push(b'\n');
-                if tx.send(Ok(axum::body::Bytes::from(out))).await.is_err() {
+                if !raw_line(&tx, &line).await {
                     break 'pump; // ClientGone：静默
                 }
                 let Ok(line) = std::str::from_utf8(&line) else { continue };
@@ -186,13 +161,13 @@ pub async fn direct_stream(
                     Some("message_start") => {
                         let u = ev.get("message").cloned().unwrap_or(json!({}));
                         let u = u.get("usage").cloned().unwrap_or(Value::Null);
-                        if u.is_object() && !u.as_object().unwrap().is_empty() {
+                        if u.as_object().is_some_and(|o| !o.is_empty()) {
                             latest_usage = Some(u);
                         }
                     }
                     Some("message_delta") => {
                         let u = ev.get("usage").cloned().unwrap_or(Value::Null);
-                        if u.is_object() && !u.as_object().unwrap().is_empty() {
+                        if u.as_object().is_some_and(|o| !o.is_empty()) {
                             latest_usage.get_or_insert_with(|| json!({}));
                             if let Some(l) = latest_usage.as_mut() {
                                 merge_usage(l, &u);
@@ -209,7 +184,7 @@ pub async fn direct_stream(
                     // OpenAI 兼容流式：usage 通常出现在最后一个 chunk
                     _ => {
                         if let Some(u) = ev.get("usage") {
-                            if u.is_object() && !u.as_object().unwrap().is_empty() {
+                            if u.as_object().is_some_and(|o| !o.is_empty()) {
                                 latest_usage.get_or_insert_with(|| json!({}));
                                 if let Some(l) = latest_usage.as_mut() {
                                     merge_usage(l, u);
@@ -237,23 +212,12 @@ pub async fn direct_stream(
             );
         }
         {
-            let mut t = task_st.task.lock().unwrap();
-            t.finish(classify(stop_reason.as_deref(), false));
-            t.end();
+            task_st.task_finish(classify(stop_reason.as_deref(), false));
+            task_st.task_end();
         }
     });
 
-    let stream_body = Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx));
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream; charset=utf-8")),
-            (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
-            (header::HeaderName::from_static("x-accel-buffering"), HeaderValue::from_static("no")),
-        ],
-        stream_body,
-    )
-        .into_response()
+    sse_response(rx)
 }
 
 pub async fn direct_non_stream(
@@ -343,8 +307,7 @@ pub async fn direct_non_stream(
         }
         // 任务状态：Anthropic stop_reason == end_turn 视为最终答复
         let stop_reason = data.get("stop_reason").and_then(|v| v.as_str());
-        let mut t = st.task.lock().unwrap();
-        t.finish(classify(stop_reason, false));
+        st.task_finish(classify(stop_reason, false));
     }
 
     tracing::info!("[direct][nonstream] completed bytes={}", raw.len());

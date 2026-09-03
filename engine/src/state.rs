@@ -123,6 +123,15 @@ pub fn py_truthy(v: &serde_json::Value) -> bool {
     }
 }
 
+/// 任务状态只读快照（/status 与测试断言用，对齐 `_task_snapshot` 字段）。
+#[derive(Debug, Clone)]
+pub struct TaskSnapshot {
+    pub active: bool,
+    pub active_streams: i64,
+    pub last_finish: String,
+    pub last_activity: f64,
+}
+
 /// 每服务的请求处理状态（handler 共享；service 可被热重载原地替换）。
 pub struct ServiceState {
     pub service: Arc<RwLock<Service>>,
@@ -140,6 +149,29 @@ pub struct ServiceState {
 impl ServiceState {
     pub fn new(service: Service, engine: Option<Weak<EngineState>>) -> Self {
         Self::with_sink(service, engine, Arc::new(crate::proxy::NoopSink))
+    }
+
+    // 任务状态便捷封装：调用方不直接触碰 Mutex（锁内仅做单条 TaskState 方法）。
+    pub fn task_begin(&self) {
+        self.task.lock().unwrap().begin();
+    }
+
+    pub fn task_end(&self) {
+        self.task.lock().unwrap().end();
+    }
+
+    pub fn task_finish(&self, is_final: bool) {
+        self.task.lock().unwrap().finish(is_final);
+    }
+
+    pub fn task_snapshot(&self) -> TaskSnapshot {
+        let t = self.task.lock().unwrap();
+        TaskSnapshot {
+            active: t.active(),
+            active_streams: t.active_streams,
+            last_finish: t.last_finish.clone(),
+            last_activity: t.last_activity,
+        }
     }
 
     /// 测试/特殊用途：自定义统计接收端（无注册表 → /stats 501）。
