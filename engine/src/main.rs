@@ -54,10 +54,37 @@ fn parse_args(argv: Vec<String>) -> Args {
 }
 
 fn init_logging() {
-    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::fmt::format::Writer as FmtWriter;
+    use tracing_subscriber::fmt::FormatFields;
+    // 日志行格式对齐 Python logging："2026-09-03 21:40:09 [INFO] 消息"
+    // （本地时间、无 ANSI 色码、等级加方括号；tracing 的 WARN 映射为 WARNING）
+    struct PyFormat;
+    impl<S, N> fmt::FormatEvent<S, N> for PyFormat
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+        N: for<'a> fmt::FormatFields<'a> + 'static,
+    {
+        fn format_event(
+            &self,
+            ctx: &fmt::FmtContext<'_, S, N>,
+            mut w: FmtWriter<'_>,
+            event: &tracing::Event<'_>,
+        ) -> std::fmt::Result {
+            let level = match *event.metadata().level() {
+                tracing::Level::WARN => "WARNING".to_string(),
+                other => other.to_string(),
+            };
+            write!(w, "{} [{}] ", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), level)?;
+            ctx.format_fields(w.by_ref(), event)?;
+            writeln!(w)
+        }
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_target(false)
+        .with_ansi(false)
+        .event_format(PyFormat)
         .init();
 }
 
