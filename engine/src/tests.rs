@@ -264,15 +264,16 @@ async fn post_proxy_dispatch_contract() {
     assert_eq!(resp.status().as_u16(), 502);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "api_error");
-    // M4/M5 端点同样 501
-    let (code, _) = post(port, "/pricing-reload").await; // 先确认端点存在（见下个测试）
+    // M5 已实装 /quota /pricing-meta：无 EngineState 时也返回 200
+    // （/quota → 账号不存在错误或快照；/pricing-meta → 空目录缺省值）
+    let (code, _) = post(port, "/pricing-reload").await; // 端点存在性（/stats 无注册表 501 对照）
     assert_eq!(code, 200);
     let (code, _) = get(port, "/stats", None).await;
-    assert_eq!(code, 501);
+    assert_eq!(code, 501); // 无注册表仍为 501（NoopSink 测试路径）
     let (code, _) = get(port, "/quota", None).await;
-    assert_eq!(code, 501);
+    assert_eq!(code, 200);
     let (code, _) = get(port, "/pricing-meta", None).await;
-    assert_eq!(code, 501);
+    assert_eq!(code, 200);
 }
 
 /// 重载链路综合测试（共享全局 RELOADING 标志，故合并为一个串行用例）：

@@ -18,6 +18,7 @@ mod state;
 mod stats_sink;
 #[cfg(test)]
 mod m4_tests;
+mod m5_quota;
 #[cfg(test)]
 mod proxy_tests;
 #[cfg(test)]

@@ -90,8 +90,14 @@ async fn handle_any(State(st): State<Arc<ServiceState>>, req: Request) -> Respon
             .insert(header::RETRY_AFTER, HeaderValue::from_static("2"));
         return resp;
     }
-    // 5) GET 端点
+    // 5) GET 端点（/quota 含 await，且不应持有 svc 读锁跨 await —— 在 handle_get 之外分流）
     if method == Method::GET {
+        if path == "/quota" {
+            return crate::m5_quota::handle_quota(&st, req.uri().query()).await;
+        }
+        if path == "/pricing-meta" {
+            return crate::m5_quota::handle_pricing_meta(&st);
+        }
         return handle_get(&st, &path, req.uri().query());
     }
     // 6) POST 代理分发（claude 全量；codex/direct M4）
@@ -178,10 +184,7 @@ fn handle_get(st: &ServiceState, path: &str, query: Option<&str>) -> Response {
                 }
             }
         }
-        "/quota" | "/pricing-meta" => openai_error_response(
-            StatusCode::NOT_IMPLEMENTED,
-            "not implemented yet (M5: quota / pricing-meta)",
-        ),
+        "/quota" | "/pricing-meta" => unreachable!("由 handle_any 分流到 m5_quota"),
         _ => json_response(
             &json!({
                 "status": "ok",
@@ -203,7 +206,7 @@ fn handle_get(st: &ServiceState, path: &str, query: Option<&str>) -> Response {
 }
 
 /// 最小查询串解析（k=v&…；值做 %XX 与 '+' 反转义，对齐 request.query 语义）。
-fn query_params(query: Option<&str>) -> std::collections::BTreeMap<String, String> {
+pub(crate) fn query_params(query: Option<&str>) -> std::collections::BTreeMap<String, String> {
     fn decode(s: &str) -> String {
         let s = s.replace('+', " ");
         let bytes = s.as_bytes();

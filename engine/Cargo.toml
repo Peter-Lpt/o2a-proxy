@@ -20,6 +20,7 @@ reqwest = { workspace = true, features = ["gzip"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"
 tokio-stream = "0.1"
 
 [target.'cfg(unix)'.dependencies]
@@ -27,3 +28,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+chrono = { workspace = true }

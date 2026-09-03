@@ -821,7 +821,9 @@ name = "o2a-engine"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "chrono",
  "libc",
  "o2a-config",
  "o2a-convert",
