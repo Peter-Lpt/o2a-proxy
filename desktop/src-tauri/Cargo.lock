@@ -1889,6 +1889,7 @@ name = "o2a-desktop"
 version = "0.3.0"
 dependencies = [
  "chrono",
+ "o2a-pricing",
  "serde",
  "serde_json",
  "tauri",
@@ -1896,6 +1897,15 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "ureq",
+]
+
+[[package]]
+name = "o2a-pricing"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
