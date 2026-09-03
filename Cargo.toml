@@ -8,6 +8,7 @@ members = [
     "crates/o2a-pricing",
     "engine",
 ]
+exclude = ["desktop/src-tauri"]
 
 [workspace.package]
 version = "0.4.0"

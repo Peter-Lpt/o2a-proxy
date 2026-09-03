@@ -827,6 +827,8 @@ dependencies = [
  "libc",
  "o2a-config",
  "o2a-convert",
+ "o2a-pricing",
+ "o2a-quota",
  "o2a-stats",
  "reqwest",
  "serde",

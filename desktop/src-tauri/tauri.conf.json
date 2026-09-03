@@ -20,9 +20,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "../../proxy.py": "proxy.py",
-      "../../proxy_async.py": "proxy_async.py",
-      "../../o2a": "o2a"
+      "../../target/release/o2a-engine": "o2a-engine"
     },
     "windows": {
       "webviewInstallMode": {

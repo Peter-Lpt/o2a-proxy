@@ -207,6 +207,9 @@ pub struct EngineState {
     pub reloading: ReloadFlag,
     /// 统计注册表（按 config/env 解析；统计禁用时为 None → NoopSink）
     pub stats: Option<Arc<o2a_stats::StatsRegistry>>,
+    /// 引擎级额度查询缓存（对齐 Python 模块级 `_quota_cache = TTLCache(60)`，
+    /// 同引擎所有服务共享，键 = 账号 id）。
+    pub quota_cache: o2a_quota::base::TTLCache,
 }
 
 impl EngineState {
@@ -238,6 +241,7 @@ impl EngineState {
             runners: RwLock::new(HashMap::new()),
             reloading: ReloadFlag::default(),
             stats,
+            quota_cache: o2a_quota::base::TTLCache::new(60),
         })
     }
 

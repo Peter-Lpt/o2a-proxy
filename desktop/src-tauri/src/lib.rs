@@ -29,6 +29,8 @@ mod ffi {
 pub struct AppState {
     pub root: PathBuf,
     pub python: String,
+    /// 引擎二进制路径（o2a-engine）。None = 未找到二进制，回退 python+proxy_async.py（过渡期）
+    pub engine_binary: Option<PathBuf>,
     pub default_stats_dir: PathBuf,
     /// UI 保存的配置文件位置覆盖（settings.json，位于系统用户配置目录，win/mac 各自的标准位置）
     pub settings_file: PathBuf,
@@ -41,20 +43,56 @@ pub struct AppState {
     pub shared_float: Mutex<String>,
 }
 
-/// 定位引擎根目录（含 proxy.py 的目录）。优先级：
+/// 引擎根目录标记：o2a-engine 二进制（Rust 引擎/打包版）或 config.json（开发态）或
+/// proxy.py（过渡期兼容：外部 python 引擎仍可探测启动）。
+fn is_engine_root(dir: &Path) -> bool {
+    engine_binary_name()
+        .map(|name| dir.join(&name).is_file())
+        .unwrap_or(false)
+        || dir.join("config.json").is_file()
+        || dir.join("proxy.py").is_file()
+}
+
+/// 引擎二进制文件名（平台差异）。
+fn engine_binary_name() -> Option<String> {
+    if cfg!(target_os = "windows") {
+        Some("o2a-engine.exe".to_string())
+    } else {
+        Some("o2a-engine".to_string())
+    }
+}
+
+/// 引擎二进制定位：O2A_ENGINE env（显式文件）> root 下 o2a-engine(.exe) >
+/// 桌面端可执行文件同目录。找不到返回 None（回退 python 引擎）。
+fn resolve_engine_binary(root: &Path) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("O2A_ENGINE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let name = engine_binary_name()?;
+    let mut candidates: Vec<PathBuf> = vec![root.join(&name)];
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+        candidates.push(exe_dir.join(&name));
+    }
+    candidates.into_iter().find(|c| c.is_file())
+}
+
+/// 定位引擎根目录（含引擎入口的目录）。优先级：
 /// 1. O2A_ROOT 环境变量（显式指定，含 proxy.py 才用）
 /// 2. 开发模式：从 cwd 向上最多 6 层找含 proxy.py 的目录
 /// 3. 打包资源目录（绿色版内嵌引擎）——仅当 cwd 向上找不到时兜底，
 ///    避免 dev 模式下 resource_dir（target/debug）混入引擎文件时被误判为打包版
 fn find_root(app: &tauri::App) -> PathBuf {
     if let Ok(p) = std::env::var("O2A_ROOT") {
-        if Path::new(&p).join("proxy.py").exists() {
+        if is_engine_root(Path::new(&p)) {
             return PathBuf::from(p);
         }
     }
     let mut dir = std::env::current_dir().unwrap_or_default();
     for _ in 0..6 {
-        if dir.join("proxy.py").exists() {
+        if is_engine_root(&dir) {
             return dir;
         }
         if !dir.pop() {
@@ -62,7 +100,7 @@ fn find_root(app: &tauri::App) -> PathBuf {
         }
     }
     if let Ok(dir) = app.path().resource_dir() {
-        if dir.join("proxy.py").exists() {
+        if is_engine_root(&dir) {
             return dir;
         }
     }
@@ -1611,12 +1649,18 @@ pub fn run() {
                 .path()
                 .resource_dir()
                 .ok()
-                .filter(|d| d.join("proxy.py").exists());
+                .filter(|d| is_engine_root(d));
             let persistent_config =
                 std::env::var_os("O2A_ROOT").is_none() && resource_root.as_ref() == Some(&root);
+            // 引擎二进制定位；缺失时回退 python+proxy_async.py（过渡期，外部 python 引擎仍可用）
+            let engine_binary = resolve_engine_binary(&root);
+            if engine_binary.is_none() {
+                eprintln!("[引擎] 未找到 o2a-engine 二进制（O2A_ENGINE / 项目根 / 程序同目录），回退 python 引擎");
+            }
             let state = AppState {
                 root: root.clone(),
                 python: find_python(),
+                engine_binary,
                 // 默认统计目录：应用（项目根）下的相对目录（data/cache_stats）
                 default_stats_dir: root.join("data").join("cache_stats"),
                 settings_file: settings_path(app),
