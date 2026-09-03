@@ -209,7 +209,7 @@ pub fn handle_pricing_meta(st: &ServiceState) -> Response {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::Arc;
     use crate::handlers::build_router;
@@ -217,6 +217,11 @@ mod tests {
     /// env 触碰测试串行化（O2A_CONFIG / CACHE_STATS_* 为进程级全局）。
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     const ENV_KEYS: [&str; 4] = ["O2A_CONFIG", "O2A_PRICING", "O2A_PLANS", "CACHE_STATS_ENABLED"];
+
+    /// 供兄弟测试模块（m4_tests 等）串行化 env 触碰，避免并行竞态。
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     struct EnvGuard {
         _lock: std::sync::MutexGuard<'static, ()>,

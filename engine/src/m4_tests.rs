@@ -483,6 +483,8 @@ async fn stats_sink_alias_and_upstream_model() {
 
 #[test]
 fn o2a_stats_sink_writes_alias_and_upstream_model() {
+    // CACHE_STATS_ENABLED 为进程级 env，m5 的 env 测试可能并发改写，串行化
+    let _env = crate::m5_quota::tests::env_lock();
     let tmp = tempfile::tempdir().unwrap();
     let registry = Arc::new(o2a_stats::StatsRegistry::new(
         tmp.path().to_path_buf(),

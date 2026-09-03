@@ -246,7 +246,11 @@ async fn root_summary_shape() {
 }
 
 #[tokio::test]
+// 锁需跨 await 持有（整个请求链路都在锁内），测试代码内有界且已知
+#[allow(clippy::await_holding_lock)]
 async fn post_proxy_dispatch_contract() {
+    // /stats 分支读 CACHE_STATS_ENABLED（进程级 env），与 m5 的 env 测试串行化
+    let _env = crate::m5_quota::tests::env_lock();
     let svc = base_service("svc-p", "p-svc", "m1");
     let (port, _st) = spawn(svc).await;
     // codex 模式（client=openai）：空 body → invalid json，OpenAI 风格 400
