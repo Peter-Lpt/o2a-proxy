@@ -1,0 +1,60 @@
+{
+  "auth_token": "qs-cc",
+  "cache_stats_enabled": true,
+  "_readme_auth_token": "顶层 auth_token 为全局兜底；services[].auth_token 优先。非空时客户端须带 Authorization: Bearer <token> 或 x-api-key 请求头，/health 恒放行。留空 = 不校验",
+  "cache_stats_dir": "data/cache_stats",
+  "cache_stats_retention_days": 30,
+  "stream_timeout": 600,
+  "accounts": [
+    {
+      "id": "acc-1",
+      "name": "示例：阿里云 DashScope",
+      "openai_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+      "anthropic_url": ""
+    },
+    {
+      "id": "acc-2",
+      "name": "示例：Anthropic 官方",
+      "openai_url": "",
+      "anthropic_url": "https://api.anthropic.com/v1/messages"
+    }
+  ],
+  "services": [
+    {
+      "id": "svc-7f3a9c21",
+      "comment": "pi / OpenAI 兼容客户端（Chat Completions 整包透传）",
+      "account": "acc-1",
+      "api": "openai-completions",
+      "model": "qwen-plus",
+      "override_model": true,
+      "listen_address": "11011",
+      "max_tokens": 1000000,
+      "context_1m": true
+    },
+    {
+      "comment": "Codex → DeepSeek 官方（Responses 整包透传，上游原生支持）",
+      "account": "acc-1",
+      "api": "openai-responses",
+      "upstream_api": "openai-responses",
+      "model": "qwen-plus",
+      "listen_address": "11013"
+    },
+    {
+      "comment": "Claude Code 转换（Anthropic 入口 → OpenAI 上游，思考深度映射为 reasoning_effort）",
+      "account": "acc-1",
+      "api": "anthropic-messages",
+      "model": "qwen3-max",
+      "listen_address": "11014",
+      "thinking_mode": "effort"
+    },
+    {
+      "id": "svc-e8d54f2a",
+      "comment": "Claude Code 直连（Anthropic 透传）",
+      "account": "acc-2",
+      "api": "anthropic-messages",
+      "model": "claude-4",
+      "listen_address": "11012",
+      "pricing": {"mode": "subscription"}
+    }
+  ]
+}
