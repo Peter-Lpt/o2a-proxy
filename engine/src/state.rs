@@ -11,6 +11,11 @@ use o2a_config::Service;
 pub const UPSTREAM_POOL_LIMIT: usize = 200;
 /// 请求体上限：1M 上下文场景请求可能很大（对齐 `MAX_BODY_SIZE`）。
 pub const MAX_BODY_SIZE: usize = 128 * 1024 * 1024;
+/// 上游建连超时（对齐 `CONNECT_TIMEOUT = 120`；reqwest 无 per-request connect
+/// timeout，统一设在 Client 上）。
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 流式响应总/读间隔超时（对齐 `STREAM_TIMEOUT = 600`）。
+pub const STREAM_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// 重载中标记的引擎级实现（对齐 Python 模块级 `_O2A_RELOADING`：双职，
 /// 既作 503 语义判定，也作重载并发去重）。
@@ -67,17 +72,14 @@ impl Default for TaskState {
 }
 
 impl TaskState {
-    #[allow(dead_code)] // M3 流式 handler 接入；测试已覆盖语义
     pub fn begin(&mut self) {
         self.active_streams += 1;
     }
 
-    #[allow(dead_code)]
     pub fn end(&mut self) {
         self.active_streams = (self.active_streams - 1).max(0);
     }
 
-    #[allow(dead_code)]
     pub fn finish(&mut self, is_final: bool) {
         self.last_finish = if is_final { "final" } else { "continue" }.to_string();
         self.last_activity = unix_now();
@@ -101,12 +103,23 @@ fn unix_now() -> f64 {
 ///
 /// tool_calls/tool_use 与 length/max_tokens 均为长链中间（continue）；
 /// stop / end_turn / None / 其它 → final。
-#[allow(dead_code)] // M3 流式收尾使用；测试已覆盖语义
 pub fn classify(finish_reason: Option<&str>, has_tool_call: bool) -> bool {
     match finish_reason {
         Some(fr) if has_tool_call || fr == "tool_calls" || fr == "tool_use" => false,
         Some(fr) if fr == "length" || fr == "max_tokens" => false,
         _ => true,
+    }
+}
+
+/// Python truthiness：None/False/0/空串/空容器 → false（对齐 o2a-config 内部同名语义）。
+pub fn py_truthy(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Null => false,
+        serde_json::Value::Bool(b) => *b,
+        serde_json::Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        serde_json::Value::String(s) => !s.is_empty(),
+        serde_json::Value::Array(a) => !a.is_empty(),
+        serde_json::Value::Object(o) => !o.is_empty(),
     }
 }
 
@@ -116,15 +129,51 @@ pub struct ServiceState {
     pub task: std::sync::Mutex<TaskState>,
     /// 引擎级状态（/_reload 触发用）；测试直连 Router 时可为 None
     pub engine: Option<Weak<EngineState>>,
+    /// 上游客户端（对齐 app["session"]：连接池复用）
+    pub client: reqwest::Client,
+    /// 统计挂点（生产为 o2a-stats 实现；测试可注入 NoopSink / 捕获 sink）
+    pub stats: Arc<dyn crate::proxy::StatsSink>,
+    /// 统计注册表（/stats 端点与 /pricing-reload 用；NoopSink 测试路径为 None）
+    pub stats_registry: Option<Arc<o2a_stats::StatsRegistry>>,
 }
 
 impl ServiceState {
     pub fn new(service: Service, engine: Option<Weak<EngineState>>) -> Self {
+        Self::with_sink(service, engine, Arc::new(crate::proxy::NoopSink))
+    }
+
+    /// 测试/特殊用途：自定义统计接收端（无注册表 → /stats 501）。
+    pub fn with_sink(
+        service: Service,
+        engine: Option<Weak<EngineState>>,
+        sink: Arc<dyn crate::proxy::StatsSink>,
+    ) -> Self {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .pool_max_idle_per_host(UPSTREAM_POOL_LIMIT)
+            .use_rustls_tls()
+            .build()
+            .expect("upstream client build");
         Self {
             service: Arc::new(RwLock::new(service)),
             task: std::sync::Mutex::new(TaskState::default()),
             engine,
+            client,
+            stats: sink,
+            stats_registry: None,
         }
+    }
+
+    /// 生产路径：o2a-stats 接收端 + 注册表（/stats /pricing-reload 可用）。
+    pub fn with_stats_registry(
+        service: Service,
+        engine: Option<Weak<EngineState>>,
+        registry: Arc<o2a_stats::StatsRegistry>,
+    ) -> Self {
+        let sink = Arc::new(crate::stats_sink::O2aStatsSink { registry: registry.clone() });
+        let mut st = Self::with_sink(service, engine, sink);
+        st.stats_registry = Some(registry);
+        st
     }
 }
 
@@ -149,13 +198,15 @@ impl RunnerHandle {
 
 /// 引擎级状态：共享上游客户端 + runner 表（热重载 diff 的操作对象）。
 pub struct EngineState {
-    #[allow(dead_code)] // M3/M4 上游请求使用
+    #[allow(dead_code)] // 上游请求使用
     pub client: reqwest::Client,
     pub config_path: std::path::PathBuf,
     pub filter: Option<String>,
     pub runners: RwLock<HashMap<String, RunnerHandle>>,
     /// 重载中标记（503 语义 + 并发去重；见 `ReloadFlag`）。
     pub reloading: ReloadFlag,
+    /// 统计注册表（按 config/env 解析；统计禁用时为 None → NoopSink）
+    pub stats: Option<Arc<o2a_stats::StatsRegistry>>,
 }
 
 impl EngineState {
@@ -164,12 +215,29 @@ impl EngineState {
             .pool_max_idle_per_host(UPSTREAM_POOL_LIMIT)
             .use_rustls_tls()
             .build()?;
+        // 统计设置（对齐 Python：CACHE_STATS_* env setdefault + config 顶层字段）
+        let cfg_raw: serde_json::Value = std::fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or(serde_json::json!({}));
+        let settings = o2a_config::resolve_stats_settings(&cfg_raw);
+        let stats = if settings.enabled {
+            let pricing_path = o2a_config::resolve_pricing_path(Some(&config_path));
+            Some(Arc::new(o2a_stats::StatsRegistry::new(
+                settings.dir,
+                settings.retention_days,
+                Some(pricing_path),
+            )))
+        } else {
+            None
+        };
         Ok(Self {
             client,
             config_path,
             filter,
             runners: RwLock::new(HashMap::new()),
             reloading: ReloadFlag::default(),
+            stats,
         })
     }
 
@@ -178,7 +246,14 @@ impl EngineState {
         let port = u16::try_from(svc.port)
             .map_err(|_| anyhow::anyhow!("非法端口 {}", svc.port))?;
         let listener = tokio::net::TcpListener::bind((svc.host.as_str(), port)).await?;
-        let st = Arc::new(ServiceState::new(svc, Some(Arc::downgrade(self))));
+        let st = match &self.stats {
+            Some(reg) => Arc::new(ServiceState::with_stats_registry(
+                svc,
+                Some(Arc::downgrade(self)),
+                reg.clone(),
+            )),
+            None => Arc::new(ServiceState::new(svc, Some(Arc::downgrade(self)))),
+        };
         let router = crate::handlers::build_router(st.clone());
         let (tx, mut rx) = tokio::sync::watch::channel(false);
         let join = tokio::spawn(async move {

@@ -44,4 +44,7 @@ desktop/dist/
 # pi 项目级 workflow 配置（本地保留，不入库）
 .pi/
 workflows/
-WORKFLOWS.md/target
+WORKFLOWS.md
+
+# Rust build artifacts
+/target

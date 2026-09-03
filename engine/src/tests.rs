@@ -104,9 +104,11 @@ async fn health_exempt_any_method_and_auth() {
     assert_eq!(code, 200);
     assert_eq!(body["status"], "ok");
     // POST /health 同样豁免鉴权（path 精确豁免，不分方法）：
-    // 豁免后落入代理分发 → 501 占位（若豁免失效这里会是 401）
-    let (code, _) = post(port, "/health").await;
-    assert_eq!(code, 501);
+    // 豁免后落入代理分发 → 空 body → invalid json（codex 模式 → OpenAI 风格 400，
+    // 对齐 Python handle_request 的解析失败分支；若豁免失效这里会是 401）
+    let (code, body) = post(port, "/health").await;
+    assert_eq!(code, 400);
+    assert_eq!(body["error"]["message"], "invalid json");
     // /health/ 不豁免（精确匹配）
     let resp = get_raw(port, "/health/").await;
     assert_eq!(resp.status().as_u16(), 401);
@@ -244,11 +246,23 @@ async fn root_summary_shape() {
 }
 
 #[tokio::test]
-async fn post_proxy_dispatch_501_placeholder() {
+async fn post_proxy_dispatch_contract() {
     let svc = base_service("svc-p", "p-svc", "m1");
     let (port, _st) = spawn(svc).await;
+    // codex 模式（client=openai）：空 body → invalid json，OpenAI 风格 400
+    // （对齐 Python：解析失败分支按 service.mode == "codex" 选错误风格）
     let (code, body) = post(port, "/v1/messages").await;
-    assert_eq!(code, 501);
+    assert_eq!(code, 400);
+    assert_eq!(body["error"]["message"], "invalid json");
+    // codex 模式合法 JSON → 分发至上游（测试无 mock 上游 → 连接失败 502，OpenAI 风格）
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&serde_json::json!({"model": "x", "messages": []}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 502);
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["type"], "api_error");
     // M4/M5 端点同样 501
     let (code, _) = post(port, "/pricing-reload").await; // 先确认端点存在（见下个测试）

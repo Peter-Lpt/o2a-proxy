@@ -66,9 +66,11 @@ async fn handle_any(State(st): State<Arc<ServiceState>>, req: Request) -> Respon
             None => json_response(&json!({"error": "reload not supported"}), StatusCode::OK),
         };
     }
-    // 3) POST /pricing-reload：清定价缓存（o2a-stats 接入后生效，M4/M5）
+    // 3) POST /pricing-reload：清定价缓存（下次读取按新 pricing.json 重算）
     if method == Method::POST && path == "/pricing-reload" {
-        tracing::info!("[pricing] pricing-reload 收到（缓存清理在 stats 接入后生效）");
+        if let Some(reg) = &st.stats_registry {
+            reg.clear_pricing_cache();
+        }
         return json_response(&json!({"status": "pricing reloaded"}), StatusCode::OK);
     }
     // 4) 重载期间请求明确 503 + Retry-After（/health 保持探活）。
@@ -90,13 +92,10 @@ async fn handle_any(State(st): State<Arc<ServiceState>>, req: Request) -> Respon
     }
     // 5) GET 端点
     if method == Method::GET {
-        return handle_get(&st, &path);
+        return handle_get(&st, &path, req.uri().query());
     }
-    // 6) POST 代理分发：M3/M4 填充（claude / codex / direct）
-    openai_error_response(
-        StatusCode::NOT_IMPLEMENTED,
-        "proxy dispatch not implemented yet (M3/M4)",
-    )
+    // 6) POST 代理分发（claude 全量；codex/direct M4）
+    crate::proxy::handle_proxy(st, req).await
 }
 
 fn client_str(c: o2a_config::ClientKind) -> &'static str {
@@ -109,9 +108,8 @@ fn client_str(c: o2a_config::ClientKind) -> &'static str {
 
 /// GET 端点分发（对齐 `handle_get`）。
 ///
-/// 与 Python 的差异：/stats、/quota、/pricing-meta 属 M4/M5（统计与额度接入），
-/// 当前显式 501；Python 中未知的 GET 路径回退根摘要，此处保持一致。
-fn handle_get(st: &ServiceState, path: &str) -> Response {
+/// /quota 与 /pricing-meta 属 M5；未知 GET 路径回退根摘要（对齐 Python）。
+fn handle_get(st: &ServiceState, path: &str, query: Option<&str>) -> Response {
     let svc = st.service.read().unwrap();
     match path {
         "/models" | "/v1/models" => json_response(
@@ -133,9 +131,56 @@ fn handle_get(st: &ServiceState, path: &str) -> Response {
                 StatusCode::OK,
             )
         }
-        "/stats" | "/quota" | "/pricing-meta" => openai_error_response(
+        "/stats" => {
+            // 对齐 Python：统计禁用时明确报错（不 501）
+            if !o2a_stats::is_cache_stats_enabled() {
+                return json_response(
+                    &json!({"error": "cache stats is disabled"}),
+                    StatusCode::OK,
+                );
+            }
+            let Some(registry) = &st.stats_registry else {
+                return openai_error_response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "stats registry unavailable",
+                );
+            };
+            let qp = query_params(query);
+            let period = qp.get("period").map(String::as_str).unwrap_or("day");
+            let svc = st.service.read().unwrap();
+            match qp.get("account") {
+                // 账号级聚合：归并该账号下所有服务的 summary（load_config 反查，对齐 Python）
+                Some(account_id) => {
+                    let services = o2a_config::load_config();
+                    let refs: Vec<o2a_stats::ServiceSummaryRef> = services
+                        .iter()
+                        .filter(|s| s.account.id == *account_id)
+                        .map(|s| o2a_stats::ServiceSummaryRef {
+                            name: s.name.clone(),
+                            service_id: s.id.clone(),
+                        })
+                        .collect();
+                    json_response(
+                        &o2a_stats::get_account_summary(registry.env(), account_id, &refs, period),
+                        StatusCode::OK,
+                    )
+                }
+                None => {
+                    let no_cost = svc.pricing_mode != o2a_config::PricingMode::Token;
+                    let stats = registry.get(
+                        &svc.name,
+                        &svc.id,
+                        &svc.account.id,
+                        &svc.account.name,
+                        no_cost,
+                    );
+                    json_response(&stats.get_summary(period), StatusCode::OK)
+                }
+            }
+        }
+        "/quota" | "/pricing-meta" => openai_error_response(
             StatusCode::NOT_IMPLEMENTED,
-            "not implemented yet (M4/M5: stats / quota / pricing-meta)",
+            "not implemented yet (M5: quota / pricing-meta)",
         ),
         _ => json_response(
             &json!({
@@ -155,6 +200,43 @@ fn handle_get(st: &ServiceState, path: &str) -> Response {
             StatusCode::OK,
         ),
     }
+}
+
+/// 最小查询串解析（k=v&…；值做 %XX 与 '+' 反转义，对齐 request.query 语义）。
+fn query_params(query: Option<&str>) -> std::collections::BTreeMap<String, String> {
+    fn decode(s: &str) -> String {
+        let s = s.replace('+', " ");
+        let bytes = s.as_bytes();
+        let mut out = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+                if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                    out.push(h * 16 + l);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(q) = query {
+        for pair in q.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let (k, v) = match pair.split_once('=') {
+                Some((k, v)) => (k, v),
+                None => (pair, ""),
+            };
+            out.insert(decode(k), decode(v));
+        }
+    }
+    out
 }
 
 /// 单条模型条目（对齐 `_model_entry`）：无 default 键（override=true 时列表固定一条）。

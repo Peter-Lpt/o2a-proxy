@@ -8,9 +8,18 @@
 //!   o2a-engine [--service <id|comment|port>] [--config <路径|目录>] [--auth <路径|目录>]
 
 mod auth;
+mod claude;
+mod codex;
+mod direct;
 mod handlers;
+mod proxy;
 mod reload;
 mod state;
+mod stats_sink;
+#[cfg(test)]
+mod m4_tests;
+#[cfg(test)]
+mod proxy_tests;
 #[cfg(test)]
 mod tests;
 
