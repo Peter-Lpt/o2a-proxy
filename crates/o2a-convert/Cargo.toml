@@ -1,0 +1,10 @@
+[package]
+name = "o2a-convert"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+o2a-config = { workspace = true }
+rand = { workspace = true }

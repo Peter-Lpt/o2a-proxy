@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use crate::AppState;
 
-/// 递归复制目录（测试准备临时引擎目录用：root/proxy.py + root/o2a/）。
+/// 测试夹具：递归复制目录。
 #[cfg(test)]
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
@@ -23,6 +23,31 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         }
     }
     Ok(())
+}
+
+/// 测试夹具：确保 engine 二进制存在并拷贝到目标目录（root/o2a-engine）。
+/// 二进制来源：workspace target/debug（cargo test 不构建 workspace crate，
+/// 缺失时临时 cargo build -p o2a-engine 产出）。
+#[cfg(test)]
+fn ensure_engine_binary(root: &std::path::Path) -> PathBuf {
+    let bin_name = if cfg!(target_os = "windows") {
+        "o2a-engine.exe"
+    } else {
+        "o2a-engine"
+    };
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let built = workspace.join("target").join("debug").join(bin_name);
+    if !built.is_file() {
+        let status = std::process::Command::new("cargo")
+            .args(["build", "-p", "o2a-engine", "-q"])
+            .current_dir(&workspace)
+            .status()
+            .expect("cargo 不可用，无法构建测试用引擎二进制");
+        assert!(status.success(), "cargo build -p o2a-engine 失败");
+    }
+    let dest = root.join(bin_name);
+    std::fs::copy(&built, &dest).unwrap();
+    dest
 }
 
 fn config_services(state: &AppState) -> Vec<serde_json::Value> {
@@ -149,21 +174,11 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
             .open(&log)
             .map_err(|e| format!("无法创建日志文件: {e}"))?,
     ));
-    let mut cmd = Command::new(&state.python);
-    cmd.arg("proxy_async.py")
-        .arg("--service")
-        .arg(name)
-        .current_dir(&state.root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Windows 下禁用子进程控制台窗口（CREATE_NO_WINDOW）：
-    // 否则从 GUI 桌面端启动 python 引擎时会弹出一个 cmd 黑窗。
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000);
-    }
-    // 配置未显式指定统计目录时，把默认目录传给代理，保证两端路径一致
+    // 配置位置显式传给子进程：可能来自环境变量或 UI 保存的 settings.json（子进程读不到后者），
+    // 保证子进程与桌面端读写同一份 config.json / auth.json。
+    let config_path = crate::config_path(state);
+    let auth_path = crate::auth_path(state);
+    // 配置未显式指定统计目录时，把默认目录传给引擎，保证两端路径一致
     let has_stats_dir = crate::read_config_value(state)
         .ok()
         .and_then(|c| {
@@ -172,13 +187,53 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
                 .map(|s| !s.trim().is_empty())
         })
         .unwrap_or(false);
+
+    let mut cmd = match &state.engine_binary {
+        Some(bin) => {
+            // Rust 引擎：显式传 CLI 参数（--service/--config/--auth），不依赖 cwd 探测
+            let mut cmd = Command::new(bin);
+            cmd.arg("--service")
+                .arg(name)
+                .arg("--config")
+                .arg(&config_path)
+                .arg("--auth")
+                .arg(&auth_path);
+            // 定价文件：root 下存在时显式传入（引擎默认解析为 env > config 同目录 > cwd）
+            let pricing = state.root.join("pricing.json");
+            let plans = state.root.join("plans.json");
+            if pricing.is_file() {
+                cmd.env("O2A_PRICING", &pricing);
+            }
+            if plans.is_file() {
+                cmd.env("O2A_PLANS", &plans);
+            }
+            cmd
+        }
+        None => {
+            // 过渡期回退：python + proxy_async.py（引擎二进制未找到时；外部 python 引擎仍可用）
+            eprintln!("[引擎] 使用 python 引擎回退（未配置 o2a-engine 二进制）");
+            let mut cmd = Command::new(&state.python);
+            cmd.arg("proxy_async.py").arg("--service").arg(name);
+            cmd
+        }
+    };
+    cmd.current_dir(&state.root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Windows 下禁用子进程控制台窗口（CREATE_NO_WINDOW）：
+    // 否则从 GUI 桌面端启动引擎子进程时会弹出一个 cmd 黑窗。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
     if !has_stats_dir {
         cmd.env("CACHE_STATS_DIR", &state.default_stats_dir);
     }
-    // 配置位置显式传给子进程：可能来自环境变量或 UI 保存的 settings.json（子进程读不到后者），
-    // 保证子进程与桌面端读写同一份 config.json / auth.json。
-    cmd.env("O2A_CONFIG", crate::config_path(state));
-    cmd.env("O2A_AUTH", crate::auth_path(state));
+    // 配置位置显式传给子进程（python 回退路径走 env；引擎二进制已传 --config/--auth，
+    // env 同步传入保持双保险，与旧逻辑一致）
+    cmd.env("O2A_CONFIG", &config_path);
+    cmd.env("O2A_AUTH", &auth_path);
     let mut child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
     // 代理日志同时输出到当前终端（pnpm tauri dev / 前台运行）和日志文件（面板查看）
     if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
@@ -345,6 +400,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
+            engine_binary: None,
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: settings.clone(),
             persistent_config: false,
@@ -392,17 +448,13 @@ mod tests {
 
     #[test]
     fn start_service_detects_immediate_exit() {
-        // 缺 API Key 时代理启动即退出（确定性失败，避免 Windows 端口复用语义差异）
+        // 引擎二进制 + 缺 API Key 配置：select_services 过滤后无可用服务 → 启动即退出
+        // （确定性失败，避免 Windows 端口复用语义差异）
         let root = std::env::temp_dir().join(format!("o2a_proxy_svc_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
 
-        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..");
-        std::fs::copy(repo.join("proxy_async.py"), root.join("proxy_async.py")).unwrap();
-        std::fs::copy(repo.join("proxy.py"), root.join("proxy.py")).unwrap();
-        copy_dir_recursive(&repo.join("o2a"), &root.join("o2a")).unwrap();
+        ensure_engine_binary(&root);
 
         let cfg = serde_json::json!({
             "cache_stats_enabled": false,
@@ -420,6 +472,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
+            engine_binary: Some(root.join("o2a-engine")),
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,
@@ -454,6 +507,7 @@ mod tests {
         let state = AppState {
             root: root.clone(),
             python: "python".to_string(),
+            engine_binary: None,
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,

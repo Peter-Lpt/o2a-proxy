@@ -33,22 +33,16 @@ jobs:
           fi
 
   # Python 引擎：单测 + 端到端（mock 上游 + 真实 aiohttp 引擎，覆盖三种协议形态与流式终止回归）
-  python-tests:
+  engine-tests:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-      - name: 安装依赖
-        run: pip install -r requirements.txt pytest
-      - name: 运行测试
-        run: python -m pytest tests/test_cache_stats.py tests/test_codex_direct.py tests/test_thinking.py -v
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 引擎单元与契约测试
+        run: cargo test --workspace --all-features
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   # 桌面端前端：类型检查（vue-tsc）+ 构建（vite）
   desktop-build:

@@ -1,0 +1,21 @@
+[package]
+name = "o2a-quota"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+o2a-config = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+async-trait = "0.1"
+url = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"

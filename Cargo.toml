@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/o2a-config",
+    "crates/o2a-convert",
+    "crates/o2a-stats",
+    "crates/o2a-quota",
+    "crates/o2a-pricing",
+    "engine",
+]
+exclude = ["desktop/src-tauri"]
+
+[workspace.package]
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "socks"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+regex = "1"
+thiserror = "2"
+anyhow = "1"
+
+# 内部 crate
+o2a-config = { path = "crates/o2a-config" }
+o2a-convert = { path = "crates/o2a-convert" }
+o2a-stats = { path = "crates/o2a-stats" }
+o2a-quota = { path = "crates/o2a-quota" }
+o2a-pricing = { path = "crates/o2a-pricing" }
