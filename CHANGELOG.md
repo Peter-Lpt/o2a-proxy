@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **引擎全量重写为 Rust**：原 Python 引擎（`o2a/` 包，asyncio + aiohttp）整体替换为 `o2a-engine` 二进制（tokio + axum），无 Python 运行时依赖。HTTP 契约、协议转换语义、JSONL 统计格式、config/auth 双向兼容性逐项对齐；定价与桌面端共用同一实现（golden 对齐）。详见 `docs/rust-rewrite.md`。
+- **启动性能**：单服务冷启动从 ~1.2s 降至 ~0.1s（二进制直启，无解释器/导入开销）
+- **移除 Python 实现**：`o2a/`、`proxy.py`、`proxy_async.py`、`cache-stats.py`、`tests/`（pytest）、`requirements.txt` 及相关脚本；CI 的 python-tests job 改为 `cargo test --workspace` + clippy
+- **桌面端**：优先 spawn `o2a-engine` 二进制（`O2A_ENGINE` > 项目根 > 贴身目录 > `target/release/`），不再依赖系统 Python；找不到二进制时保留旧 Python 引擎回退（过渡期）
+
 ### 修复
 
 - **实时列表 key 冲突修复**：悬浮窗列表与应用内「实时调用」在同秒内出现多条相同记录（如同一秒内

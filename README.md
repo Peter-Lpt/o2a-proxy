@@ -6,7 +6,7 @@ Anthropic → OpenAI 协议转换代理：把 Claude Code / Claude Desktop 发�
 
 - **协议转换**：Anthropic Messages API → OpenAI Chat Completions；OpenAI Responses → Chat（codex 模式）；Anthropic 原生透传（direct 模式）
 - **流式响应**：完整支持 SSE 流式输出，thinking / tool_calls / usage 逐段透传
-- **异步引擎**：asyncio + aiohttp，单进程多服务、连接池复用、客户端断连即取消上游
+- **Rust 引擎**：tokio + axum 单进程多端口、连接池复用、客户端断连即取消上游；单二进制发行，无 Python 运行时依赖
 - **多服务配置**：`config.json` 支持任意数量服务，每服务独立端口、独立启停
 - **多账号管理**：账号（API Key + OpenAI/Anthropic 端点）与服务分离，多服务可复用同一账号，账号级统计聚合
 - **费用与缓存统计**：JSONL 原始记录 + 小时聚合，命中率 / 覆盖率 / 费用估算
@@ -23,9 +23,9 @@ flowchart LR
     end
     subgraph Proxy["o2a-proxy（本机）"]
         DESK["desktop/ 桌面客户端<br/>Tauri 2 + Vue 3"]
-        ENGINE["proxy_async.py / python -m o2a<br/>o2a/engine.py（asyncio + aiohttp）"]
-        CORE["o2a/ 核心包<br/>config.py / convert.py / stats.py"]
-        STATS[("data/cache_stats/<br/>JSONL + 小时聚合")]
+        ENGINE["o2a-engine（Rust 二进制）<br/>tokio + axum"]
+        CORE["crates/ 核心库<br/>o2a-config / o2a-convert / o2a-stats<br/>o2a-quota / o2a-pricing"]
+        STATS[("cache_stats/<br/>JSONL + 小时聚合")]
     end
     subgraph Upstream["上游模型服务"]
         DS["DashScope / DeepSeek / Kimi 等<br/>OpenAI 兼容 API"]
@@ -39,34 +39,31 @@ flowchart LR
     ENGINE -- "写入统计" --> STATS
 ```
 
-> `proxy.py` / `proxy_async.py` 为根目录**兼容 shim**（真实实现收拢在 `o2a/` 包中），保留文件名供桌面端路径探测、绿色版组装与旧导入方式使用。
-
 ### 组件说明
 
 | 组件 | 说明 |
 |---|---|
-| `o2a/engine.py` | **唯一引擎**：单进程 asyncio 事件循环承载所有服务端口，aiohttp 连接池复用上游连接，流式请求不占线程，客户端断开立即取消（等价旧 `proxy_async.py`） |
-| `o2a/convert.py` | **协议转换**：Anthropic ↔ OpenAI Chat / Responses 互转、整包透传、思考深度映射 |
-| `o2a/config.py` | **配置模型**：账号/服务体系、config.json / auth.json 加载与旧格式迁移 |
-| `o2a/stats.py` | **缓存统计**：JSONL 记录 + 小时聚合 + 计费（等价旧 CacheStats） |
-| `o2a/base.py` | 公共基础：日志、环境变量常量、项目根定位与配置路径解析 |
-| `proxy.py` / `proxy_async.py` | 根目录兼容 shim（re-export `o2a` 包符号，行为不变） |
+| `engine/` | **引擎二进制 `o2a-engine`**：单进程 tokio 事件循环承载所有服务端口，reqwest 连接池复用上游连接，客户端断开立即取消上游 |
+| `crates/o2a-convert` | **协议转换**：Anthropic ↔ OpenAI Chat / Responses 互转、整包透传、思考深度映射、流式翻译器 |
+| `crates/o2a-config` | **配置模型**：账号/服务体系、config.json / auth.json 加载与旧格式迁移、路径解析 |
+| `crates/o2a-stats` | **缓存统计**：JSONL 记录 + 小时聚合 + 计费重放 + 账号归并 |
+| `crates/o2a-quota` | **订阅额度**：适配器注册表（codex / openrouter / opencode-go / zai / local 等 8 个） |
+| `crates/o2a-pricing` | **定价**：定价目录解析与费用计算（与桌面端共享同一实现，golden 对齐） |
 | `desktop/` | Tauri 2 + Vue 3 桌面客户端：托盘启停、悬浮看板、统计面板、配置编辑器、模型列表联想 |
-| `data/cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
+| `cache_stats/` | 统计数据：`YYYY-MM-DD.jsonl`（原始记录）+ `summary/<服务>/YYYY-MM-DD.json`（小时聚合） |
 | `pricing.json` | 模型定价数据，用于费用估算（支持按账号覆盖，见下文） |
-| `auth.json` | API Key 独立存放（对齐 pi 的 auth.json 模式，可选） |
-| `cache-stats.py` | 命令行统计查看工具（走 HTTP /stats 接口） |
+| `auth.json` | API Key 独立存放（可选） |
 
 ## 安装
 
-### 1. 代理引擎（Python 3.10+）
+### 1. 代理引擎（Rust 二进制，无运行时依赖）
 
 ```bash
-pip install -r requirements.txt
+cargo build -p o2a-engine --release
 cp config.example.json config.json
 cp auth.example.json auth.json   # API Key 放这里，config.json 不存 Key
 # 编辑 auth.json 填入各账号 API Key；编辑 config.json 填账号端点与服务
-python proxy_async.py            # 或 python -m o2a
+./target/release/o2a-engine
 ```
 
 也可以使用环境变量兜底（无 `config.json` 时，单服务）：
@@ -75,7 +72,7 @@ python proxy_async.py            # 或 python -m o2a
 export DASHSCOPE_API_KEY=sk-xxx
 export DASHSCOPE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
 export PROXY_PORT=11011
-python proxy_async.py            # 或 python -m o2a
+./target/release/o2a-engine
 ```
 
 ### 2. 桌面客户端（推荐）
@@ -91,7 +88,7 @@ pnpm tauri build    # 打包（Windows NSIS/MSI、macOS dmg）
 
 > **同时运行两个实例**：已移除单实例限制，可同时启动正式版 `o2a-desktop.exe` 与开发版 `pnpm tauri dev`，方便一边使用一边改代码。在 `desktop/` 下执行 `pnpm dev:dual` 可一键先启动正式版、再启动开发版。两个实例共用同一份 `config.json` / 统计数据，代理端口也相同，实际使用时只让其中一个实例启动代理，避免端口冲突。
 
-客户端自动定位项目根目录（含 `proxy.py` 的目录），Python 路径可用 `O2A_PYTHON` 环境变量指定。
+客户端自动定位项目根目录，并优先 spawn `o2a-engine` 二进制（解析顺序：`O2A_ENGINE` 环境变量 > 项目根 > 桌面端可执行文件同目录 > `target/release/`）；找不到二进制时回退旧 Python 引擎（过渡期兼容）。
 
 ### 3. 配置 Claude Code
 
@@ -123,8 +120,7 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 |---|---|
 | `O2A_CONFIG` 环境变量 | 指定 `config.json` 路径；指向目录时取目录下 `config.json` |
 | `O2A_AUTH` 环境变量（可选） | 指定 `auth.json` 路径；**不设置时自动跟随 config.json 所在目录**，整套配置一起迁移 |
-| `python proxy_async.py --config <路径|目录> [--auth <路径|目录>]` | 命令行指定（写入等价环境变量） |
-| `CONFIG_FILE=<路径> ./scripts/start-proxy.sh` | 脚本启动方式；同样接受目录 |
+| `o2a-engine --config <路径|目录> [--auth <路径|目录>]` | 命令行指定（写入等价环境变量） |
 
 **桌面客户端**还可在「配置」页的「配置文件位置」卡片直接设置（路径输入 + 「浏览文件/浏览目录」系统原生选择器 + 应用位置 / 恢复默认）：
 该设置保存在系统用户配置目录（Windows `%APPDATA%\com.o2aproxy.desktop\settings.json`，macOS `~/Library/Application Support/com.o2aproxy.desktop/settings.json`），
@@ -133,17 +129,13 @@ export ANTHROPIC_AUTH_TOKEN=your-auth-token
 示例（把配置放到独立目录）：
 
 ```bash
-# 方式一：环境变量（引擎 / 桌面端 / start-proxy.sh 通用）
+# 方式一：环境变量（引擎 / 桌面端通用）
 export O2A_CONFIG=/etc/o2a-proxy/config.json
 export O2A_AUTH=/etc/o2a-proxy/auth.json   # 可选，默认跟随 config 目录
-python proxy_async.py
+o2a-engine
 
-# 方式二：命令行参数（仅引擎）
-python proxy_async.py --config /etc/o2a-proxy/config.json --auth /etc/o2a-proxy/auth.json
-
-# 方式三：启动脚本
-export CONFIG_FILE=/etc/o2a-proxy/config.json
-./scripts/start-proxy.sh
+# 方式二：命令行参数
+o2a-engine --config /etc/o2a-proxy/config.json --auth /etc/o2a-proxy/auth.json
 ```
 
 > 桌面客户端读取自身进程环境的 `O2A_CONFIG`/`O2A_AUTH`，并在启动代理子进程时继承传递，两端读写同一份配置。
@@ -389,13 +381,9 @@ Codex CLI（`~/.codex/auth.json`）、pi（`~/.pi/agent/auth.json`）与 OpenCod
 ## 统计与费用
 
 - **口径**：`缓存命中率 = 缓存读 / (缓存读 + 输入)`，对齐 Anthropic 官方定义
-- **记录文件**：`data/cache_stats/YYYY-MM-DD.jsonl`（每次请求一条）
-- **聚合文件**：`data/cache_stats/summary/<服务>/YYYY-MM-DD.json`（逐小时汇总，含费用）
-- **命令行查看**：
-
-```bash
-python cache-stats.py day
-```
+- **记录文件**：`cache_stats/YYYY-MM-DD.jsonl`（每次请求一条，路径由 `cache_stats_dir` 配置或 `CACHE_STATS_DIR` 环境变量决定）
+- **聚合文件**：`cache_stats/summary/<服务>/YYYY-MM-DD.json`（逐小时汇总，含费用）
+- **命令行查看**：`curl -H "Authorization: Bearer <token>" http://127.0.0.1:<port>/stats?period=day`
 
 - **桌面客户端**：统计页提供当前小时 / 今日 / 本月对比、逐小时 / 逐日图表、按模型分组统计、实时调用流，代理停止时历史数据仍可查看（直接读文件）。「按模型过滤」作用于整页统计——KPI 卡、性能条（耗时 / 首字 / 速度）、图表序列、按服务拆分与实时调用流都会随所选模型收窄口径；下拉选项始终列出区间内全部模型。
 
@@ -409,38 +397,33 @@ python cache-stats.py day
 
 ```text
 o2a-proxy/
-├── o2a/                     # Python 包（核心实现）
-│   ├── engine.py            # asyncio 引擎（原 proxy_async.py）
-│   ├── convert.py           # 协议转换（Anthropic ↔ OpenAI Chat / Responses）
-│   ├── config.py            # 账号 / 服务 / 配置加载
-│   ├── stats.py             # 缓存统计与计费
-│   ├── base.py              # 日志 / 常量 / 项目根定位
-│   └── __main__.py          # python -m o2a 入口
-├── proxy_async.py           # 兼容 shim → o2a.engine（桌面端子进程入口）
-├── proxy.py                 # 兼容 shim → o2a 包（桌面端路径探测 / 旧导入）
-├── cache-stats.py           # 命令行统计（走 /stats 接口）
+├── engine/                  # o2a-engine 引擎二进制（tokio + axum）
+├── crates/                  # 核心库
+│   ├── o2a-config/          # 配置模型 / 路径解析 / 旧格式迁移
+│   ├── o2a-convert/         # 协议转换（Anthropic ↔ OpenAI Chat / Responses）+ 流式翻译
+│   ├── o2a-stats/           # 统计（JSONL / 聚合 / 计费重放）
+│   ├── o2a-quota/           # 订阅额度适配器
+│   └── o2a-pricing/         # 定价（与桌面端共享实现）
+├── pricing/                 # 定价 golden fixtures（双端共享）
 ├── config.example.json      # 配置模板
 ├── pricing.json             # 模型定价
-├── requirements.txt         # Python 依赖
-├── scripts/                 # shell 脚本（start-proxy / cache-summary）
-├── tests/                   # pytest 测试（conftest.py 注入项目根）
+├── docs/rust-rewrite.md     # Rust 引擎实现文档（HTTP 契约 / 转换语义规约）
 ├── desktop/                 # Tauri 2 + Vue 3 桌面客户端
 │   ├── src-tauri/           # Rust 后端（托盘 / 进程管理 / 统计聚合）
 │   ├── src/                 # Vue 前端（面板 / 悬浮窗 / 图表）
-│   └── scripts/             # 打包 / 图标生成脚本
-├── data/cache_stats/        # 统计数据（运行时生成，不提交）
+│   └── scripts/             # 打包脚本（build-portable）
+├── cache_stats/             # 统计数据（运行时生成，不提交）
 └── logs/                    # 运行日志（运行时生成，不提交）
 ```
 
 测试：
 
 ```bash
-cd desktop/src-tauri && cargo test   # Rust 单测（统计聚合 / 进程管理 / 模型列表 / key 分流）
-python -m pytest tests/ -v           # Python 全量测试
-python tests/test_codex_direct.py    # 端到端：Chat 整包透传 / Responses 透传 / Responses→Chat 转换（mock 上游）
+cargo test --workspace               # 引擎全量测试（转换矩阵 / 流式状态机 / 契约测试 / golden）
+cd desktop/src-tauri && cargo test   # 桌面端 Rust 单测（进程管理 / 统计聚合 / 模型列表）
 ```
 
-> `test_codex_direct.py` 复用真实 `config.json` 中 ds 服务的账号配置，把上游指向本地 mock 服务器，不产生真实调用。
+> 引擎契约测试用内置 mock 上游验证 SSE 事件序列与端点行为，不产生真实调用。
 
 ## 常见问题
 
