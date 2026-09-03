@@ -446,8 +446,10 @@ const liveFeed = computed(() => {
   return livePool.value.slice(0, 30).map((r: any) => {
     const rate = Number(r.cache_hit_rate || 0);
     const isErr = !!r.error || r.status === "error";
+    // key 必须唯一：同秒内多条记录（如同秒重复报错）若 key 相同，
+    // Vue 的 keyed diff 会丢映射，节点会被钉在旧位置不再移动。
     return {
-      key: `${r.timestamp}_${r.service}_${r.output_tokens}_${r.error || ""}`,
+      key: `${r.timestamp}_${r.service}_${r.input_tokens}_${r.cache_read_tokens}_${r.cache_write_tokens}_${r.output_tokens}_${r.duration_ms}_${r.error || ""}`,
       time: String(r.timestamp || "").slice(11, 19),
       service: r.service || "",
       total:
