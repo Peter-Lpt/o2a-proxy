@@ -198,6 +198,10 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
                 .arg(&config_path)
                 .arg("--auth")
                 .arg(&auth_path);
+            // 显式传桌面端自身 PID：引擎 watchdog 以它为父进程基准。
+            // 引擎初始化耗时可能超过桌面端退出窗口，若引擎自己快照 getppid()，
+            // 父进程已死时快照到 1（孤儿）永不退出；传 PID 则无此竞态。
+            cmd.arg("--parent").arg(std::process::id().to_string());
             // 定价文件：root 下存在时显式传入（引擎默认解析为 env > config 同目录 > cwd）
             let pricing = state.root.join("pricing.json");
             let plans = state.root.join("plans.json");

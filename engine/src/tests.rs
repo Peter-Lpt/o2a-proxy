@@ -1,6 +1,6 @@
 //! M2 引擎骨架契约测试：随机端口起 axum 测试服务器，覆盖
 //! /health 豁免、鉴权、/models 矩阵、/status、503 reloading、/_reload swap、
-//! POST 501 占位、--service 过滤、diff_services。
+//! POST 501 占位、--service 过滤、--parent 解析、diff_services。
 
 use std::sync::Arc;
 
@@ -373,4 +373,20 @@ async fn reloading_flag_and_reload_endpoints() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     engine.shutdown_all().await;
+}
+
+/// `--parent` 解析：只有 > 1 的真实 PID 才生效（桌面端传自身 PID）；
+/// 1 / 非正数 / 非数字 / 缺省均归为 None，走“无 --parent”的回退路径。
+#[test]
+fn parse_args_parent() {
+    let parent_of = |argv: &[&str]| {
+        crate::parse_args(argv.iter().map(|s| s.to_string()).collect()).parent
+    };
+    assert_eq!(parent_of(&["--parent", "4242"]), Some(4242));
+    assert_eq!(parent_of(&["--config", "/tmp/c.json", "--parent", "4242"]), Some(4242));
+    assert_eq!(parent_of(&[]), None);
+    assert_eq!(parent_of(&["--parent"]), None);
+    for bad in ["1", "0", "-1", "abc", ""] {
+        assert_eq!(parent_of(&["--parent", bad]), None, "{bad} 应视为无效");
+    }
 }

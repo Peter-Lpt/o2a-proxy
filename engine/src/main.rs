@@ -37,6 +37,10 @@ struct Args {
     service: Option<String>,
     config: Option<String>,
     auth: Option<String>,
+    /// 父进程 PID（桌面端显式传入自身 PID）：watchdog 用它检测父进程退出，
+    /// 避免引擎初始化期间父进程就退出时 getppid 快照到 1（launchd 收养）导致永不退出。
+    /// 缺省或非正数（含 1）视为无效，回退到快照路径。
+    parent: Option<i32>,
 }
 
 /// 逐对扫描参数（对齐 Python main() 的 argv 索引扫描；未知参数忽略）。
@@ -48,6 +52,7 @@ fn parse_args(argv: Vec<String>) -> Args {
             "--service" => args.service = it.next(),
             "--config" => args.config = it.next(),
             "--auth" => args.auth = it.next(),
+            "--parent" => args.parent = it.next().and_then(|s| s.parse().ok()).filter(|&p| p > 1),
             _ => {}
         }
     }
@@ -106,7 +111,7 @@ fn main() -> ExitCode {
         tracing::error!("没有可用的服务（请检查 config.json 的 services 与 API key）");
         return ExitCode::from(1);
     }
-    match run_engine(selected, args.service) {
+    match run_engine(selected, args.service, args.parent) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e:#}");
@@ -115,14 +120,22 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_engine(services: Vec<Service>, filter: Option<String>) -> anyhow::Result<()> {
+fn run_engine(
+    services: Vec<Service>,
+    filter: Option<String>,
+    parent: Option<i32>,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    rt.block_on(serve_all(services, filter))
+    rt.block_on(serve_all(services, filter, parent))
 }
 
-async fn serve_all(services: Vec<Service>, filter: Option<String>) -> anyhow::Result<()> {
+async fn serve_all(
+    services: Vec<Service>,
+    filter: Option<String>,
+    parent_arg: Option<i32>,
+) -> anyhow::Result<()> {
     let state = Arc::new(EngineState::new(o2a_config::resolve_config_path(), filter)?);
     let mut started: Vec<(String, state::RunnerHandle)> = Vec::new();
     for svc in services {
@@ -160,7 +173,11 @@ async fn serve_all(services: Vec<Service>, filter: Option<String>) -> anyhow::Re
         .unwrap()
         .extend(started);
 
-    spawn_watchdog();
+    // 父进程存活检测。优先用桌面端显式传入的 --parent（PID 在 spawn 前确定），
+    // 不受引擎启动耗时影响：此前用启动时 getppid 快照，若父进程在引擎初始化
+    // 期间就退出，快照会记到 1（launchd 收养的孤儿），getppid() 恒定等于它，
+    // watchdog 永不触发，服务残留。
+    spawn_watchdog(parent_arg);
     #[cfg(unix)]
     spawn_sighup_handler(state.clone());
 
@@ -173,10 +190,28 @@ async fn serve_all(services: Vec<Service>, filter: Option<String>) -> anyhow::Re
 /// 父进程退出后自动关闭（对齐 `_parent_watchdog`：线程 2s 检查 getppid 变化）。
 /// Windows 无 getppid 等价（Python os.getppid 在 Windows 可用但语义弱），
 /// 桌面端本就通过子进程句柄管理生命周期，此处 cfg 跳过。
-fn spawn_watchdog() {
+///
+/// `parent_arg` 为桌面端显式传入的 `--parent`：PID 在 spawn 前就确定，父进程退出后
+/// `getppid()` 变成 1 与该 PID 不等，watchdog 正常触发（无启动竞态，故无需额外判定）。
+/// 未传 `--parent`（命令行独立运行）时取启动时的 getppid 快照；快照为 1 无法区分
+/// 「父进程在初始化期间退出的孤儿」与「systemd/launchd/nohup 正常收养」，
+/// 后者父进程恒为 1，据此退出会误杀独立部署，故此时不安装 watchdog。
+fn spawn_watchdog(parent_arg: Option<i32>) {
+    #[cfg(not(unix))]
+    let _ = parent_arg;
     #[cfg(unix)]
     {
-        let parent = unsafe { libc::getppid() };
+        let parent = match parent_arg {
+            Some(p) => p,
+            None => {
+                let snap = unsafe { libc::getppid() };
+                if snap <= 1 {
+                    tracing::info!("无 --parent 且父进程为 init，跳过跟随退出检测");
+                    return;
+                }
+                snap
+            }
+        };
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(2));
             if unsafe { libc::getppid() } != parent {
