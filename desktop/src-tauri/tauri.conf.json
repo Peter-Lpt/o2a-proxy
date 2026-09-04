@@ -19,9 +19,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": {
-      "../../target/release/o2a-engine": "o2a-engine"
-    },
     "windows": {
       "webviewInstallMode": {
         "type": "skip"
