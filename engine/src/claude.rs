@@ -72,7 +72,7 @@ pub async fn handle_stream(
         .client
         .post(&target)
         .headers(upstream_headers(svc))
-        .body(body)
+        .body(body.clone())
         .send()
         .await;
 
@@ -96,22 +96,51 @@ pub async fn handle_stream(
         }
     };
 
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        let err_body = up.text().await.unwrap_or_default();
-        tracing::error!("Upstream error {status}: {err_body}");
-        tracing::error!("Sent request: {}", crate::proxy::payload_summary(openai_req, body_len));
-        st.stats.record(svc,
-            openai_req.get("model").and_then(|v| v.as_str()).unwrap_or(&svc.model),
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            crate::proxy::stats_meta(req_start, None, 0),
-        );
-        return error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err_body}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::qianwen::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_headers(svc))
+                    .body(body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                let status = ex.status;
+                let err_body = ex.body;
+                tracing::error!("Upstream error {status}: {err_body}");
+                tracing::error!("Sent request: {}", crate::proxy::payload_summary(openai_req, body_len));
+                o2a_retry::record_retry_decision(status, &err_body, o2a_retry::qianwen::classify);
+                let mut resp = error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err_body}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err_body,
+                    resp.headers_mut(),
+                    o2a_retry::qianwen::classify,
+                );
+                st.stats.record(svc,
+                    openai_req.get("model").and_then(|v| v.as_str()).unwrap_or(&svc.model),
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    crate::proxy::stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
     tracing::info!("[FWD] upstream connected status=200 connect_time={:.2}s", req_start.elapsed().as_secs_f64());
 
     // 客户端 SSE 响应通道：接收端被 drop（客户端断连）时 send 失败 → pump 退出
@@ -258,7 +287,7 @@ pub async fn handle_non_stream(
         .client
         .post(&target)
         .headers(upstream_headers(svc))
-        .body(body)
+        .body(body.clone())
         .send()
         .await;
 
@@ -282,23 +311,52 @@ pub async fn handle_non_stream(
         }
     };
 
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        let err_body = up.text().await.unwrap_or_default();
-        tracing::error!("Upstream error {status}: {err_body}");
-        tracing::error!("Sent request: {}", crate::proxy::payload_summary(openai_req, body_len));
-        st.stats.record(
-            svc,
-            openai_req.get("model").and_then(|v| v.as_str()).unwrap_or(&svc.model),
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            crate::proxy::stats_meta(req_start, None, 0),
-        );
-        return error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err_body}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::qianwen::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_headers(svc))
+                    .body(body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                let status = ex.status;
+                let err_body = ex.body;
+                tracing::error!("Upstream error {status}: {err_body}");
+                tracing::error!("Sent request: {}", crate::proxy::payload_summary(openai_req, body_len));
+                o2a_retry::record_retry_decision(status, &err_body, o2a_retry::qianwen::classify);
+                let mut resp = error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err_body}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err_body,
+                    resp.headers_mut(),
+                    o2a_retry::qianwen::classify,
+                );
+                st.stats.record(
+                    svc,
+                    openai_req.get("model").and_then(|v| v.as_str()).unwrap_or(&svc.model),
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    crate::proxy::stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
     let raw_text = up.text().await.unwrap_or_default();
     let Ok(raw) = serde_json::from_str::<Value>(&raw_text) else {
         return error_response(StatusCode::BAD_GATEWAY, "upstream error: invalid json body");

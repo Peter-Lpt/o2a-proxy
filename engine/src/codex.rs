@@ -103,7 +103,7 @@ pub async fn passthrough(
         .client
         .post(&target)
         .headers(upstream_headers(svc))
-        .body(body)
+        .body(body.clone())
         .send()
         .await;
     let up = match up {
@@ -124,22 +124,51 @@ pub async fn passthrough(
             );
         }
     };
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        // 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
-        let err = up.text().await.unwrap_or_default();
-        st.stats.record(
-            svc,
-            &model,
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            stats_meta(req_start, None, 0),
-        );
-        return openai_error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::qianwen::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_headers(svc))
+                    .body(body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                // 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                let status = ex.status;
+                let err = ex.body;
+                o2a_retry::record_retry_decision(status, &err, o2a_retry::qianwen::classify);
+                let mut resp = openai_error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err,
+                    resp.headers_mut(),
+                    o2a_retry::qianwen::classify,
+                );
+                st.stats.record(
+                    svc,
+                    &model,
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
 
     if !stream {
         let raw = up.bytes().await.unwrap_or_default();
@@ -337,7 +366,7 @@ pub async fn openai_stream(
         .client
         .post(&target)
         .headers(upstream_headers(svc))
-        .body(chat_body)
+        .body(chat_body.clone())
         .send()
         .await;
     let up = match up {
@@ -358,22 +387,51 @@ pub async fn openai_stream(
             );
         }
     };
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        // 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
-        let err = up.text().await.unwrap_or_default();
-        st.stats.record(
-            svc,
-            &model,
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            stats_meta(req_start, None, 0),
-        );
-        return openai_error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::qianwen::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_headers(svc))
+                    .body(chat_body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                // 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                let status = ex.status;
+                let err = ex.body;
+                o2a_retry::record_retry_decision(status, &err, o2a_retry::qianwen::classify);
+                let mut resp = openai_error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err,
+                    resp.headers_mut(),
+                    o2a_retry::qianwen::classify,
+                );
+                st.stats.record(
+                    svc,
+                    &model,
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
 
     let (tx, rx) = mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(32);
     let svc_c = svc.clone();
@@ -582,7 +640,7 @@ pub async fn openai_non_stream(
         .client
         .post(&target)
         .headers(upstream_headers(svc))
-        .body(chat_body)
+        .body(chat_body.clone())
         .send()
         .await;
     let up = match up {
@@ -603,21 +661,51 @@ pub async fn openai_non_stream(
             );
         }
     };
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        let err = up.text().await.unwrap_or_default();
-        st.stats.record(
-            svc,
-            &model,
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            stats_meta(req_start, None, 0),
-        );
-        return openai_error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::qianwen::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_headers(svc))
+                    .body(chat_body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                // 原样透传上游错误体，避免丢失 type/code/param（如 429 Retry-After）
+                let status = ex.status;
+                let err = ex.body;
+                o2a_retry::record_retry_decision(status, &err, o2a_retry::qianwen::classify);
+                let mut resp = openai_error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err,
+                    resp.headers_mut(),
+                    o2a_retry::qianwen::classify,
+                );
+                st.stats.record(
+                    svc,
+                    &model,
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
     let raw = up.bytes().await.unwrap_or_default();
 
     let is_responses = truthy(req.get("input"));

@@ -144,11 +144,25 @@ pub struct ServiceState {
     pub stats: Arc<dyn crate::proxy::StatsSink>,
     /// 统计注册表（/stats 端点与 /pricing-reload 用；NoopSink 测试路径为 None）
     pub stats_registry: Option<Arc<o2a_stats::StatsRegistry>>,
+    /// 引擎侧自动重试设置（顶层 `retry` 块；缺省关闭 = 保持透传语义）。
+    pub retry: o2a_config::RetrySettings,
 }
 
 impl ServiceState {
     pub fn new(service: Service, engine: Option<Weak<EngineState>>) -> Self {
         Self::with_sink(service, engine, Arc::new(crate::proxy::NoopSink))
+    }
+
+    /// 用指定重试设置构造（测试注入用；生产路径由 EngineState 解析后赋值）。
+    #[allow(dead_code)]
+    pub fn with_retry(
+        service: Service,
+        engine: Option<Weak<EngineState>>,
+        retry: o2a_config::RetrySettings,
+    ) -> Self {
+        let mut s = Self::with_sink(service, engine, Arc::new(crate::proxy::NoopSink));
+        s.retry = retry;
+        s
     }
 
     // 任务状态便捷封装：调用方不直接触碰 Mutex（锁内仅做单条 TaskState 方法）。
@@ -193,6 +207,7 @@ impl ServiceState {
             client,
             stats: sink,
             stats_registry: None,
+            retry: o2a_config::RetrySettings::default(),
         }
     }
 
@@ -242,6 +257,8 @@ pub struct EngineState {
     /// 引擎级额度查询缓存（对齐 Python 模块级 `_quota_cache = TTLCache(60)`，
     /// 同引擎所有服务共享，键 = 账号 id）。
     pub quota_cache: o2a_quota::base::TTLCache,
+    /// 引擎侧自动重试设置（顶层 `retry` 块；缺省关闭 = 保持透传语义）。
+    pub retry: o2a_config::RetrySettings,
 }
 
 impl EngineState {
@@ -274,6 +291,7 @@ impl EngineState {
             reloading: ReloadFlag::default(),
             stats,
             quota_cache: o2a_quota::base::TTLCache::new(60),
+            retry: o2a_config::resolve_retry_settings(&cfg_raw),
         })
     }
 
@@ -283,12 +301,20 @@ impl EngineState {
             .map_err(|_| anyhow::anyhow!("非法端口 {}", svc.port))?;
         let listener = tokio::net::TcpListener::bind((svc.host.as_str(), port)).await?;
         let st = match &self.stats {
-            Some(reg) => Arc::new(ServiceState::with_stats_registry(
-                svc,
-                Some(Arc::downgrade(self)),
-                reg.clone(),
-            )),
-            None => Arc::new(ServiceState::new(svc, Some(Arc::downgrade(self)))),
+            Some(reg) => {
+                let mut s = ServiceState::with_stats_registry(
+                    svc,
+                    Some(Arc::downgrade(self)),
+                    reg.clone(),
+                );
+                s.retry = self.retry.clone();
+                Arc::new(s)
+            }
+            None => {
+                let mut s = ServiceState::new(svc, Some(Arc::downgrade(self)));
+                s.retry = self.retry.clone();
+                Arc::new(s)
+            }
         };
         let router = crate::handlers::build_router(st.clone());
         let (tx, mut rx) = tokio::sync::watch::channel(false);

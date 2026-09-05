@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/o2a-config",
     "crates/o2a-convert",
+    "crates/o2a-retry",
     "crates/o2a-stats",
     "crates/o2a-quota",
     "crates/o2a-pricing",
@@ -32,6 +33,7 @@ anyhow = "1"
 # 内部 crate
 o2a-config = { path = "crates/o2a-config" }
 o2a-convert = { path = "crates/o2a-convert" }
+o2a-retry = { path = "crates/o2a-retry" }
 o2a-stats = { path = "crates/o2a-stats" }
 o2a-quota = { path = "crates/o2a-quota" }
 o2a-pricing = { path = "crates/o2a-pricing" }

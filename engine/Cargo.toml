@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 o2a-config = { workspace = true }
 o2a-convert = { workspace = true }
+o2a-retry = { workspace = true }
 o2a-stats = { workspace = true }
 o2a-quota = { workspace = true }
 o2a-pricing = { workspace = true }

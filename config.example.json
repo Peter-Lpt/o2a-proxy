@@ -5,6 +5,13 @@
   "cache_stats_dir": "data/cache_stats",
   "cache_stats_retention_days": 30,
   "stream_timeout": 600,
+  "_readme_retry": "可选。引擎侧自动重试（千问 429/5xx 可重试错误按退避重放）。缺省整体关闭，不改变透传语义。",
+  "retry": {
+    "enabled": false,
+    "max_attempts": 5,
+    "base_ms": 1000,
+    "max_ms": 30000
+  },
   "accounts": [
     {
       "id": "acc-1",

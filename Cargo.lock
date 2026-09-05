@@ -829,6 +829,7 @@ dependencies = [
  "o2a-convert",
  "o2a-pricing",
  "o2a-quota",
+ "o2a-retry",
  "o2a-stats",
  "reqwest",
  "serde",
@@ -864,6 +865,19 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "o2a-retry"
+version = "0.4.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "o2a-config",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

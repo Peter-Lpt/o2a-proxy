@@ -536,3 +536,212 @@ fn o2a_stats_sink_writes_alias_and_upstream_model() {
     }
     assert!(found, "应写入一条 JSONL 记录");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2：引擎侧自动重试（retry 块 → retry_upstream 重放；千问判据表生效）
+// ---------------------------------------------------------------------------
+
+/// mock 上游：/v1/chat/completions 前 `fail_count` 次返 `error_body` 的 429，之后返 200。
+async fn spawn_retry_mock(fail_count: usize, error_body: &'static str) -> (String, Arc<Mutex<Vec<Value>>>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let count = Arc::new(AtomicUsize::new(0));
+    let (captured_h, count_h) = (captured.clone(), count.clone());
+    let app = axum::Router::new()
+        .route(
+            "/v1/chat/completions",
+            axum::routing::post(move |req: axum::extract::Request| {
+                let captured_h = captured_h.clone();
+                let count_h = count_h.clone();
+                async move {
+                    let body = axum::body::to_bytes(req.into_body(), 1 << 20)
+                        .await
+                        .unwrap_or_default();
+                    let payload: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    captured_h.lock().unwrap().push(payload);
+                    if count_h.fetch_add(1, Ordering::SeqCst) < fail_count {
+                        return Response::builder()
+                            .status(StatusCode::TOO_MANY_REQUESTS)
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(error_body))
+                            .unwrap();
+                    }
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            r#"{"id":"ok","model":"m-main","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}"#,
+                        ))
+                        .unwrap()
+                }
+            }),
+        )
+        .with_state(());
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{addr}"), captured)
+}
+
+/// 带重试设置起被测服务。
+async fn spawn_service_with_retry(
+    mut svc: o2a_config::Service,
+    retry: o2a_config::RetrySettings,
+) -> u16 {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    svc.host = "127.0.0.1".into();
+    svc.port = port as i64;
+    let st = Arc::new(ServiceState::with_retry(svc, None, retry));
+    let router = build_router(st.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    port
+}
+
+const THROTTLING_BODY: &str =
+    r#"{"code":"Throttling.RateQuota","message":"You have exceeded your request limit."}"#;
+const BILLING_BODY: &str =
+    r#"{"code":"CommodityNotPurchased","message":"Commodity has not purchased yet."}"#;
+const FREE_QUOTA_BODY: &str = r#"{"code":"Throttling","message":"Free allocated quota exceeded."}"#;
+
+fn chat_completions_payload() -> Value {
+    json!({"model": "x", "messages": [{"role": "user", "content": "hi"}], "stream": false})
+}
+
+/// 重试启用：2×429（自愈型 Throttling.RateQuota）→ 200；下游拿到 200，上游收到 3 次请求。
+#[tokio::test]
+async fn retry_enabled_429_ratequota_then_success() {
+    let (addr, captured) = spawn_retry_mock(2, THROTTLING_BODY).await;
+    let svc = service(
+        "svc-rt",
+        ClientKind::Openai,
+        Some(OpenaiApi::OpenaiCompletions),
+        format!("{addr}/v1/chat/completions"),
+        String::new(),
+    );
+    let port = spawn_service_with_retry(
+        svc,
+        o2a_config::RetrySettings { enabled: true, max_attempts: 3, base_ms: 10, max_ms: 50 },
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&chat_completions_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "重试后应返回成功");
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "hi");
+    // 2 次限流重放 + 1 次成功
+    assert_eq!(captured.lock().unwrap().len(), 3, "上游应收到 2+1 次请求");
+}
+
+/// 重试预算耗尽（一直 429）：最终透传 429，上游收到 max_attempts+1 次（不无限重试）。
+#[tokio::test]
+async fn retry_budget_exhausted_passthrough() {
+    let (addr, captured) = spawn_retry_mock(usize::MAX, THROTTLING_BODY).await;
+    let svc = service(
+        "svc-rt-ex",
+        ClientKind::Openai,
+        Some(OpenaiApi::OpenaiCompletions),
+        format!("{addr}/v1/chat/completions"),
+        String::new(),
+    );
+    let port = spawn_service_with_retry(
+        svc,
+        o2a_config::RetrySettings { enabled: true, max_attempts: 3, base_ms: 10, max_ms: 50 },
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&chat_completions_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 429, "预算耗尽应透传最终 429");
+    assert_eq!(captured.lock().unwrap().len(), 4, "应重放 3 次后透传（1+3）");
+}
+
+/// 计费类 429（CommodityNotPurchased）：判据表判定不可重试，一次请求即透传。
+#[tokio::test]
+async fn retry_enabled_billing_error_no_retry() {
+    let (addr, captured) = spawn_retry_mock(usize::MAX, BILLING_BODY).await;
+    let svc = service(
+        "svc-rt-bill",
+        ClientKind::Openai,
+        Some(OpenaiApi::OpenaiCompletions),
+        format!("{addr}/v1/chat/completions"),
+        String::new(),
+    );
+    let port = spawn_service_with_retry(
+        svc,
+        o2a_config::RetrySettings { enabled: true, max_attempts: 3, base_ms: 10, max_ms: 50 },
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&chat_completions_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 429);
+    assert_eq!(captured.lock().unwrap().len(), 1, "计费类错误不应重试");
+}
+
+/// 免费额度耗尽（消息命中判据表「Permanent」）：不重试，即使 code 是通用 Throttling。
+#[tokio::test]
+async fn retry_enabled_free_quota_no_retry() {
+    let (addr, captured) = spawn_retry_mock(usize::MAX, FREE_QUOTA_BODY).await;
+    let svc = service(
+        "svc-rt-fq",
+        ClientKind::Openai,
+        Some(OpenaiApi::OpenaiCompletions),
+        format!("{addr}/v1/chat/completions"),
+        String::new(),
+    );
+    let port = spawn_service_with_retry(
+        svc,
+        o2a_config::RetrySettings { enabled: true, max_attempts: 3, base_ms: 10, max_ms: 50 },
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&chat_completions_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 429);
+    assert_eq!(captured.lock().unwrap().len(), 1);
+}
+
+/// 未启用重试：一次请求即透传（行为与 Phase 1 一致，不触发任何重放）。
+#[tokio::test]
+async fn retry_disabled_passthrough_single_request() {
+    let (addr, captured) = spawn_retry_mock(usize::MAX, THROTTLING_BODY).await;
+    let svc = service(
+        "svc-rt-off",
+        ClientKind::Openai,
+        Some(OpenaiApi::OpenaiCompletions),
+        format!("{addr}/v1/chat/completions"),
+        String::new(),
+    );
+    let port = spawn_service_with_retry(svc, o2a_config::RetrySettings::default()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .json(&chat_completions_payload())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 429);
+    assert_eq!(captured.lock().unwrap().len(), 1, "未启用重试不应重放");
+}

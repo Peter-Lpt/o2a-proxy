@@ -17,7 +17,8 @@ pub mod paths;
 
 pub use load::{
     ensure_service_ids, load_auth_from, load_config, load_config_at, new_service_id,
-    resolve_api_key, resolve_stats_settings, StatsSettings,
+    resolve_api_key, resolve_retry_settings, resolve_stats_settings, RetrySettings,
+    StatsSettings,
 };
 pub use model::{
     normalize_pricing_value, Account, AccountKind, ClientKind, DispatchMode, ModelsMap,

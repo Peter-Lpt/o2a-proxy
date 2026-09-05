@@ -308,3 +308,58 @@ fn test_roundtrip_example_config() {
     let s1 = by_name("pi / OpenAI");
     assert_eq!(s1.auth_token, "qs-cc"); // 服务级未配 → 顶层全局兜底
 }
+
+// ---------------------------------------------------------------------------
+// 顶层 retry 块解析(Phase 2 引擎侧自动重试配置)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn retry_settings_default_disabled() {
+    // 缺省:整体关闭,保持透传语义
+    let s = o2a_config::resolve_retry_settings(&json!({}));
+    assert!(!s.enabled);
+    assert_eq!(s.max_attempts, 5);
+    assert_eq!(s.base_ms, 1000);
+    assert_eq!(s.max_ms, 30000);
+
+    // retry 非对象(如字符串)→ 默认
+    let s = o2a_config::resolve_retry_settings(&json!({"retry": "oops"}));
+    assert!(!s.enabled);
+}
+
+#[test]
+fn retry_settings_parsed() {
+    let s = o2a_config::resolve_retry_settings(&json!({
+        "retry": {"enabled": true, "max_attempts": 3, "base_ms": 250, "max_ms": 2000}
+    }));
+    assert!(s.enabled);
+    assert_eq!(s.max_attempts, 3);
+    assert_eq!(s.base_ms, 250);
+    assert_eq!(s.max_ms, 2000);
+    // 部分字段:缺省项保持默认
+    let s = o2a_config::resolve_retry_settings(&json!({"retry": {"enabled": true}}));
+    assert!(s.enabled);
+    assert_eq!(s.max_attempts, 5);
+}
+
+#[test]
+fn retry_settings_invalid_fallback() {
+    // 类型非法/非正数 → 逐字段回退默认
+    let s = o2a_config::resolve_retry_settings(&json!({
+        "retry": {"enabled": "yes", "max_attempts": -1, "base_ms": 0, "max_ms": "x"}
+    }));
+    assert!(!s.enabled);
+    assert_eq!(s.max_attempts, 5);
+    assert_eq!(s.base_ms, 1000);
+    assert_eq!(s.max_ms, 30000);
+}
+
+#[test]
+fn retry_settings_max_lt_base_clamped() {
+    // max_ms < base_ms → 回退 max_ms = base_ms
+    let s = o2a_config::resolve_retry_settings(&json!({
+        "retry": {"enabled": true, "base_ms": 5000, "max_ms": 100}
+    }));
+    assert_eq!(s.max_ms, s.base_ms);
+    assert_eq!(s.max_ms, 5000);
+}

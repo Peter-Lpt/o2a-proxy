@@ -74,10 +74,10 @@ pub async fn direct_stream(
         .client
         .post(&target)
         .headers(upstream_direct_headers(svc, Some(client_headers)))
-        .body(body)
+        .body(body.clone())
         .send()
         .await;
-    let mut up = match up {
+    let up = match up {
         Ok(r) => r,
         Err(e) => {
             let err = e.to_string();
@@ -95,23 +95,52 @@ pub async fn direct_stream(
             );
         }
     };
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        // 原样透传上游错误体
-        let err = up.text().await.unwrap_or_default();
-        tracing::error!("[direct] upstream error {status}: {err}");
-        st.stats.record(
-            svc,
-            &svc.model,
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            stats_meta(req_start, None, 0),
-        );
-        return error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    // (direct 为 Anthropic 透传，用通用分类；千问特有判据见 o2a_retry::qianwen)
+    let mut up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_direct_headers(svc, Some(client_headers)))
+                    .body(body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                let status = ex.status;
+                let err = ex.body;
+                tracing::error!("[direct] upstream error {status}: {err}");
+                o2a_retry::record_retry_decision(status, &err, o2a_retry::classify);
+                let mut resp = error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err,
+                    resp.headers_mut(),
+                    o2a_retry::classify,
+                );
+                st.stats.record(
+                    svc,
+                    &svc.model,
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
 
     let (tx, rx) = mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(32);
     let svc_c = svc.clone();
@@ -239,7 +268,7 @@ pub async fn direct_non_stream(
         .client
         .post(&target)
         .headers(upstream_direct_headers(svc, Some(client_headers)))
-        .body(body)
+        .body(body.clone())
         .send()
         .await;
     let up = match up {
@@ -260,22 +289,52 @@ pub async fn direct_non_stream(
             );
         }
     };
-    if up.status() != StatusCode::OK {
-        let status = up.status();
-        let err = up.text().await.unwrap_or_default();
-        tracing::error!("[direct] upstream error {status}: {err}");
-        st.stats.record(
-            svc,
-            &svc.model,
-            &json!({}),
-            Some(&format!("upstream HTTP {status}")),
-            stats_meta(req_start, None, 0),
-        );
-        return error_response(
-            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-            &format!("upstream error: {err}"),
-        );
-    }
+    // 引擎侧自动重试（st.retry.enabled 时）：可重试错误按退避重放；成功则继续正常处理，失败走透传
+    // (direct 为 Anthropic 透传，用通用分类；千问特有判据见 o2a_retry::qianwen)
+    let up = if up.status() == StatusCode::OK {
+        up
+    } else {
+        let settings = st.retry.clone();
+        let outcome = if settings.enabled {
+            o2a_retry::retry_upstream(&settings, o2a_retry::classify, up, || {
+                st.client
+                    .post(&target)
+                    .headers(upstream_direct_headers(svc, Some(client_headers)))
+                    .body(body.clone())
+                    .send()
+            })
+            .await
+        } else {
+            Err(o2a_retry::RetryExhausted::from_response(up).await)
+        };
+        match outcome {
+            Ok(ok) => ok,
+            Err(ex) => {
+                let status = ex.status;
+                let err = ex.body;
+                tracing::error!("[direct] upstream error {status}: {err}");
+                o2a_retry::record_retry_decision(status, &err, o2a_retry::classify);
+                let mut resp = error_response(
+                    StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+                    &format!("upstream error: {err}"),
+                );
+                o2a_retry::attach_retry_after_if_missing(
+                    status,
+                    &err,
+                    resp.headers_mut(),
+                    o2a_retry::classify,
+                );
+                st.stats.record(
+                    svc,
+                    &svc.model,
+                    &json!({}),
+                    Some(&format!("upstream HTTP {status}")),
+                    stats_meta(req_start, None, 0),
+                );
+                return resp;
+            }
+        }
+    };
     let raw = up.bytes().await.unwrap_or_default();
 
     // 旁路提取 usage / 任务状态（解析失败不影响原样返回）

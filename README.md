@@ -45,7 +45,8 @@ flowchart LR
 |---|---|
 | `engine/` | **引擎二进制 `o2a-engine`**：单进程 tokio 事件循环承载所有服务端口，reqwest 连接池复用上游连接，客户端断开立即取消上游 |
 | `crates/o2a-convert` | **协议转换**：Anthropic ↔ OpenAI Chat / Responses 互转、整包透传、思考深度映射、流式翻译器 |
-| `crates/o2a-config` | **配置模型**：账号/服务体系、config.json / auth.json 加载与旧格式迁移、路径解析 |
+| `crates/o2a-config` | **配置模型**：账号/服务体系、config.json / auth.json 加载与旧格式迁移、路径解析、`retry` 块解析 |
+| `crates/o2a-retry` | **上游重试**：厂商无关的判定/退避/重放核心 + 千问 429 判据表（按需注入） |
 | `crates/o2a-stats` | **缓存统计**：JSONL 记录 + 小时聚合 + 计费重放 + 账号归并 |
 | `crates/o2a-quota` | **订阅额度**：适配器注册表（codex / openrouter / opencode-go / zai / local 等 8 个） |
 | `crates/o2a-pricing` | **定价**：定价目录解析与费用计算（与桌面端共享同一实现，golden 对齐） |

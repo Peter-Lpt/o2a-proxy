@@ -245,6 +245,73 @@ pub fn resolve_stats_settings(config: &Value) -> StatsSettings {
     }
 }
 
+/// 顶层可选 `retry` 块(引擎侧自动重试配置;缺省全部默认且 `enabled=false` = 保持透传语义)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrySettings {
+    /// 是否启用引擎侧自动重试(缺省 false:下游 CLI 自带退避,代理不改语义)。
+    pub enabled: bool,
+    /// 最大重试次数(初始请求外的追加次数;0 = 不限制)。
+    pub max_attempts: usize,
+    /// 指数退避基数(ms)。
+    pub base_ms: u64,
+    /// 单次等待上限(ms);小于 base_ms 时回退为 base_ms。
+    pub max_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_attempts: 5,
+            base_ms: 1000,
+            max_ms: 30000,
+        }
+    }
+}
+
+/// 解析顶层 `retry` 块;字段非法(类型错/越界)一律警告 + 回退默认,对齐本项目「非法字段回退默认」风格。
+/// 缺省整体关闭,不改变现有透传行为。
+pub fn resolve_retry_settings(config: &Value) -> RetrySettings {
+    let Some(obj) = config.get("retry").and_then(Value::as_object) else {
+        return RetrySettings::default();
+    };
+
+    let enabled = match obj.get("enabled") {
+        Some(v) => v.as_bool().unwrap_or_else(|| {
+            tracing::warn!("[config] retry.enabled 非法，回退默认 false");
+            false
+        }),
+        None => false,
+    };
+    let max_attempts = match obj.get("max_attempts") {
+        Some(v) => v.as_u64().and_then(|n| usize::try_from(n).ok()).unwrap_or_else(|| {
+            tracing::warn!("[config] retry.max_attempts 非法，回退默认 5");
+            5
+        }),
+        None => 5,
+    };
+    let base_ms = match obj.get("base_ms") {
+        Some(v) => v.as_u64().filter(|&n| n > 0).unwrap_or_else(|| {
+            tracing::warn!("[config] retry.base_ms 非法，回退默认 1000");
+            1000
+        }),
+        None => 1000,
+    };
+    let max_ms = match obj.get("max_ms") {
+        Some(v) => v.as_u64().filter(|&n| n > 0).unwrap_or_else(|| {
+            tracing::warn!("[config] retry.max_ms 非法，回退默认 30000");
+            30000
+        }),
+        None => 30000,
+    };
+    if max_ms < base_ms {
+        tracing::warn!("[config] retry.max_ms({max_ms}) < base_ms({base_ms})，回退 max_ms=base_ms");
+        RetrySettings { enabled, max_attempts, base_ms, max_ms: base_ms }
+    } else {
+        RetrySettings { enabled, max_attempts, base_ms, max_ms }
+    }
+}
+
 /// 解析入口协议声明（对齐 `_OPENAI_API_VALUES` 校验）。
 fn parse_openai_api(s: &str, svc_name: &str) -> Option<OpenaiApi> {
     match s {

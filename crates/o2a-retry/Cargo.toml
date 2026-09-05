@@ -1,0 +1,18 @@
+[package]
+name = "o2a-retry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# 纯库：产物为 .rlib 静态链接进各 bin，不会新增任何可执行文件/绿色版打包项。
+[lib]
+name = "o2a_retry"
+
+[dependencies]
+o2a-config = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }

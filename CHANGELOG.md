@@ -7,6 +7,14 @@
 
 ### 变更
 
+- **上游自动重试（可配置）**：新增独立重试模块 `crates/o2a-retry/src/retry.rs`（指数退避+抖动、`Retry-After`
+  优先、厂商无关判定框架）+ `crates/o2a-retry/src/qianwen.rs`（千问平台 429 判据表：`Throttling.RateQuota`/
+  `AllocationQuota`/`BurstRate`/`Concurrency` 等自愈型限流值得重试，`CommodityNotPurchased`/
+  账单逾期/免费额度耗尽等计费资源型不重试）。`codex`/`claude`/`direct` 七处透传分支统一接入：
+  透传时记录可重试判定日志（含 status/category/code/建议退避）、缺失时补标准 `Retry-After` 头；
+  配置 `retry` 块（`enabled`/`max_attempts`/`base_ms`/`max_ms`，缺省关闭）开启后，在首字节下发前
+  对可重试错误按退避重放上游，预算耗尽/不可重试则原样透传。详见 `docs/retry-design.md`。
+
 - **桌面端启动即返回（事件驱动）**：`start_service` 不再同步等待验证窗口（旧固定 1.2s），spawn 后立即返回；监视线程识别引擎 stdout 的「代理启动」就绪标记（失败：进程未就绪即退出 → `proxy-start-failed` 事件附日志尾部；运行后退出 → `proxy-stopped` 事件），前端 toast + 刷新状态。`start_all`/autostart 随之从 N×1.2s 串行降为即时返回；启动验证兜底保留端口探测（python 回退引擎不打印标记时可用）。跨平台：BufReader 逐行读、TcpStream 探测、线程模型在 Windows/macOS/Linux 语义一致
 - **引擎全量重写为 Rust**：原 Python 引擎（`o2a/` 包，asyncio + aiohttp）整体替换为 `o2a-engine` 二进制（tokio + axum），无 Python 运行时依赖。HTTP 契约、协议转换语义、JSONL 统计格式、config/auth 双向兼容性逐项对齐；定价与桌面端共用同一实现（golden 对齐）。详见 `docs/rust-rewrite.md`。
 - **启动性能**：单服务冷启动从 ~1.2s 降至 ~0.1s（二进制直启，无解释器/导入开销）
