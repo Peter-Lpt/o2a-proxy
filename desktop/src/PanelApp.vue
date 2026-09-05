@@ -888,6 +888,21 @@ function normalizeConfig() {
     const d = Number(cfg.cache_stats_retention_days);
     cfg.cache_stats_retention_days = Number.isInteger(d) && d >= 1 ? d : 30;
   }
+  // retry 块：关闭时删除整块（引擎缺省即关，保持配置干净）；开启时强转数值
+  if (cfg.retry !== undefined) {
+    const r = cfg.retry && typeof cfg.retry === "object" && !Array.isArray(cfg.retry) ? cfg.retry : {};
+    const normInt = (v: any, d: number, min: number) => {
+      const n = Number(v);
+      return Number.isInteger(n) && n >= min ? n : d;
+    };
+    cfg.retry = {
+      enabled: !!r.enabled,
+      max_attempts: normInt(r.max_attempts, 5, 0),
+      base_ms: normInt(r.base_ms, 1000, 1),
+      max_ms: normInt(r.max_ms, 30000, 1),
+    };
+    if (!cfg.retry.enabled) delete cfg.retry;
+  }
 }
 
 function computeRemovedServices(oldList: any[], newList: any[]): string[] {

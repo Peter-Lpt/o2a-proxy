@@ -20,6 +20,16 @@
           <div class="model-hint">留空使用默认目录：{{ status.statsDir || "…" }}</div>
         </div>
         <div class="card form-card">
+          <div class="fc-h">上游自动重试 retry <span class="fc-sub">作用于所有服务（需重启生效）</span></div>
+          <label class="inline"><input v-model="retryCfg.enabled" type="checkbox" :disabled="anyRunning" /><span>启用自动重试（429/5xx 可重试错误按退避重放）</span></label>
+          <div class="grid2">
+            <label>重试次数 max_attempts <input v-model.number="retryCfg.max_attempts" type="number" min="0" :disabled="anyRunning" /></label>
+            <label>退避基数 base_ms <input v-model.number="retryCfg.base_ms" type="number" min="1" :disabled="anyRunning" /></label>
+            <label>等待上限 max_ms <input v-model.number="retryCfg.max_ms" type="number" min="1" :disabled="anyRunning" /></label>
+          </div>
+          <div class="model-hint">关闭 = 保持透传（下游 CLI 自带退避）。开启后按上游限流判据退避重放，计费/资源类错误不重试。缺省值：5 次 / 1s 起 / 30s 封顶。</div>
+        </div>
+        <div class="card form-card">
           <div class="fc-h">配置文件位置 <span class="fc-sub">config.json / auth.json 的读写位置</span></div>
           <label>路径
             <div class="field-row">
@@ -232,6 +242,14 @@ async function resetLocation() {
 
 // ---------- 概览计数 ----------
 const accountList = computed(() => cfg.accounts || []);
+
+// retry 块 UI 兜底：配置缺省/非法时显示默认态（保存时由 PanelApp normalizeConfig 定形）
+const retryCfg = computed<any>(() => {
+  if (!cfg.retry || typeof cfg.retry !== "object" || Array.isArray(cfg.retry)) {
+    cfg.retry = { enabled: false, max_attempts: 5, base_ms: 1000, max_ms: 30000 };
+  }
+  return cfg.retry;
+});
 const runningCount = computed(() => Object.values(runningMap.value).filter(Boolean).length);
 const stoppedCount = computed(() => Math.max(0, serviceList.value.length - runningCount.value));
 const dualCount = computed(
