@@ -5,7 +5,7 @@ mod stats;
 use std::collections::HashMap;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::menu::{Menu, MenuItem, Submenu};
@@ -37,7 +37,8 @@ pub struct AppState {
     /// 绿色版（root 来自打包资源目录）：配置文件默认落到持久用户目录，
     /// 避免解压临时目录被清理导致配置丢失
     pub persistent_config: bool,
-    pub children: Mutex<HashMap<String, std::process::Child>>,
+    /// 子进程管理表：Arc 包一层便于监视线程独立持有（不拖住整个 AppState 的借用生命周期）
+    pub children: Arc<Mutex<HashMap<String, std::process::Child>>>,
     /// 共享悬浮窗当前显示的服务（空串 = 全部视图）。
     /// 用于区分"切到不同服务"（保持打开只换内容）与"切到同一服务"（开关）。
     pub shared_float: Mutex<String>,
@@ -847,8 +848,10 @@ fn get_status_impl(state: &AppState) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 async fn start_service(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    // start_service 内部 sleep(1.2s) 验证子进程存活，属阻塞操作，
+    // start_service 内部含进程 spawn，属阻塞操作，
     // spawn_blocking 挪到阻塞线程池，避免拖住主线程/异步运行时。
+    // 启动失败不再从返回值同步回报：就绪/失败由监视线程发事件（proxy-start-failed / proxy-stopped），
+    // 前端 PanelApp 监听后 toast + 刷新状态。
     let app2 = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
         let state = app2.state::<AppState>();
@@ -1665,7 +1668,7 @@ pub fn run() {
                 default_stats_dir: root.join("data").join("cache_stats"),
                 settings_file: settings_path(app),
                 persistent_config,
-                children: Mutex::new(HashMap::new()),
+                children: Arc::new(Mutex::new(HashMap::new())),
                 shared_float: Mutex::new(String::new()),
             };
             app.manage(state);
@@ -1696,7 +1699,7 @@ pub fn run() {
                         let _ = toggle_float(app.clone());
                     }
                     "start_all" => {
-                        // 每服务串行等待约 1.2s 验证存活，异步执行避免卡住托盘 UI
+                        // start_service 即返回（就绪/失败异步通知），异步执行避免卡住托盘 UI
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let _ = start_all(app).await;
@@ -1779,12 +1782,23 @@ pub fn run() {
             // macOS/Linux 也统一预创建，走同一套单窗逻辑。
             create_float_window(app.handle(), "float", "")?;
 
-            // autostart（）：延迟 1.2s 等窗口/托盘初始化完成后，
-            // 自动拉起标记 autostart=true 的服务（阻塞线程池里 sleep + 串行启动）
+            // 引擎子进程「启动失败 / 运行后停止」事件出口：proxy.rs 监视线程
+            // 通过它把事件推给前端（PanelApp 监听 toast + 刷新状态）。
+            // AppHandle 跨平台一致，事件对所有窗口广播。
+            {
+                let handle = app.handle().clone();
+                crate::proxy::set_event_callback(Box::new(move |kind, name, message| {
+                    let _ = handle
+                        .emit(kind, serde_json::json!({ "id": name, "message": message }));
+                }));
+            }
+
+            // autostart：短延迟（300ms）等窗口/托盘初始化完成后，
+            // 自动拉起标记 autostart=true 的服务（start_service 即返回，阻塞线程池里执行）
             let app2 = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _ = tauri::async_runtime::spawn_blocking(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(1200));
+                    std::thread::sleep(std::time::Duration::from_millis(300));
                     let state = app2.state::<AppState>();
                     let _ = crate::proxy::start_autostart(&state);
                 })

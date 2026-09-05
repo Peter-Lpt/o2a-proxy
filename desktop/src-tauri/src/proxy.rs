@@ -1,12 +1,31 @@
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use crate::AppState;
+
+/// 事件出口：引擎子进程「启动失败 / 运行后停止」异步通知前端。
+/// lib.rs setup 注入 Tauri emit；测试注入记录器。
+type EventCallback = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+static EVENT_CB: std::sync::OnceLock<EventCallback> = std::sync::OnceLock::new();
+
+/// 注入事件出口（App 启动时调用一次；重复调用忽略）。
+/// kind: "proxy-start-failed" | "proxy-stopped"；payload = {id, message}。
+pub fn set_event_callback(cb: EventCallback) {
+    let _ = EVENT_CB.set(cb);
+}
+
+fn emit_proxy_event(kind: &str, name: &str, message: &str) {
+    if let Some(cb) = EVENT_CB.get() {
+        cb(kind, name, message);
+    }
+}
 
 /// 测试夹具：递归复制目录。
 #[cfg(test)]
@@ -80,28 +99,31 @@ fn is_alive(child: &mut std::process::Child) -> bool {
     child.try_wait().ok().flatten().is_none()
 }
 
-/// 把子进程一路输出同时写到日志文件（供面板查看）和当前终端（dev/前台运行）。
-fn tee_stream<R: Read + Send + 'static>(
-    mut reader: R,
-    file: Arc<Mutex<File>>,
-    mut term: Box<dyn Write + Send>,
-) {
-    thread::spawn(move || {
-        let mut buf = [0u8; 1024];
-        loop {
-            let n = match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) => break,
-            };
-            let _ = term.write_all(&buf[..n]);
-            let _ = term.flush();
-            if let Ok(mut f) = file.lock() {
-                let _ = f.write_all(&buf[..n]);
-                let _ = f.flush();
-            }
+/// 行级 tee：逐行写日志文件（面板查看）+ 终端（dev/前台运行）；
+/// `on_line` 回调用于识别引擎就绪标记（见 spawn_monitor）。
+/// 逐行而非分块：保证就绪标记在打印后立即被识别，不被缓冲滞后。
+fn tee_lines<R, F>(reader: R, file: Arc<Mutex<File>>, mut term: Box<dyn Write + Send>, mut on_line: F)
+where
+    R: Read,
+    F: FnMut(&str),
+{
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
         }
-    });
+        on_line(line.trim_end_matches(['\r', '\n']));
+        let bytes = line.as_bytes();
+        if let Ok(mut f) = file.lock() {
+            let _ = f.write_all(bytes);
+            let _ = f.flush();
+        }
+        let _ = term.write_all(bytes);
+        let _ = term.flush();
+    }
 }
 
 fn log_path(state: &AppState, name: &str) -> PathBuf {
@@ -158,12 +180,24 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     if !is_service_enabled(svc) {
         return Err(format!("服务已停用（enabled=false），请先在面板启用: {name}"));
     }
-    let mut children = state.children.lock().unwrap();
-    if let Some(child) = children.get_mut(name) {
-        if is_alive(child) {
-            return Ok(());
+    // 启动验证用 host/port（引擎将绑定到此地址；在 spawn 前取出，避免借用冲突）
+    let (host, port) = service_host_port(svc);
+    let already_running = {
+        let mut children = state.children.lock().unwrap();
+        match children.get_mut(name) {
+            Some(child) => {
+                if is_alive(child) {
+                    true
+                } else {
+                    children.remove(name);
+                    false
+                }
+            }
+            None => false,
         }
-        children.remove(name);
+    };
+    if already_running {
+        return Ok(());
     }
     let log = log_path(state, name);
     // 追加写而非覆盖：保留历史日志，便于回溯（旧布局下的根目录 proxy_*.log 历史不会丢失）
@@ -239,35 +273,109 @@ pub fn start_service(state: &AppState, name: &str) -> Result<(), String> {
     cmd.env("O2A_CONFIG", &config_path);
     cmd.env("O2A_AUTH", &auth_path);
     let mut child = cmd.spawn().map_err(|e| format!("启动失败: {e}"))?;
-    // 代理日志同时输出到当前终端（pnpm tauri dev / 前台运行）和日志文件（面板查看）
-    if let (Some(out), Some(err)) = (child.stdout.take(), child.stderr.take()) {
-        tee_stream(out, Arc::clone(&file), Box::new(std::io::stdout()));
-        tee_stream(err, Arc::clone(&file), Box::new(std::io::stderr()));
-    }
-    children.insert(name.to_string(), child);
-    // 轮询 try_wait 确认进程没有因端口占用/缺 key 等立刻退出：
-    // 快速退出的情况能立刻报错（无需等满窗口）；
-    // 验证窗口保持 1.2s，兼容 Windows 上 python 首次拉起较慢的环境。
-    let deadline = std::time::Instant::now() + Duration::from_millis(1200);
-    loop {
-        if let Some(ch) = children.get_mut(name) {
-            if let Some(status) = ch.try_wait().map_err(|e| e.to_string())? {
-                children.remove(name);
-                let tail = read_log_tail(&log, 1500);
-                let msg = if tail.is_empty() {
-                    String::new()
-                } else {
-                    format!("，日志：{tail}")
-                };
-                return Err(format!("代理启动后立即退出（code={status}）{msg}"));
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    let pid = child.id();
+    let stdout = child.stdout.take().map(|r| Box::new(r) as Box<dyn Read + Send>);
+    let stderr = child.stderr.take().map(|r| Box::new(r) as Box<dyn Read + Send>);
+    state.children.lock().unwrap().insert(name.to_string(), child);
+    // spawn 即返回：不再同步等待验证窗口（旧行为固定等 1.2s）。
+    // 就绪/失败由监视线程异步检测并事件通知前端：
+    // - 就绪：引擎绑定端口后向 stdout 打印「代理启动: http://...」，行级 tee 识别该标记；
+    // - 失败：进程退出且从未就绪 → proxy-start-failed 事件（附日志尾部）；
+    // - 运行后停止/退出：proxy-stopped 事件（前端刷新状态）。
+    spawn_monitor(
+        Arc::clone(&state.children),
+        name,
+        pid,
+        file,
+        stdout,
+        stderr,
+        &host,
+        port,
+        &log,
+    );
     Ok(())
+}
+
+/// 引擎子进程监视：就绪标记识别 + 退出检测 + 事件通知。
+/// 三个线程：stdout 行级 tee（识别就绪标记）/ stderr 行级 tee / 退出轮询。
+/// 只持有 children 的 Arc（不拖住整个 AppState 的借用生命周期，线程可 'static）。
+/// 跨平台：BufReader 逐行读、TcpStream 探测、线程模型在 Windows/macOS/Linux
+/// 语义一致；Rust 的 stdout 为行缓冲（LineWriter），标记打印后可实时被识别。
+fn spawn_monitor(
+    children: Arc<Mutex<HashMap<String, Child>>>,
+    name: &str,
+    pid: u32,
+    file: Arc<Mutex<File>>,
+    stdout: Option<Box<dyn Read + Send>>,
+    stderr: Option<Box<dyn Read + Send>>,
+    host: &str,
+    port: u16,
+    log: &std::path::Path,
+) {
+    let ready = Arc::new(AtomicBool::new(false));
+    if let Some(out) = stdout {
+        let file = Arc::clone(&file);
+        let ready = Arc::clone(&ready);
+        thread::spawn(move || {
+            tee_lines(out, file, Box::new(std::io::stdout()), move |line| {
+                if !ready.load(Ordering::SeqCst) && line.contains("代理启动") {
+                    ready.store(true, Ordering::SeqCst);
+                }
+            });
+        });
+    }
+    if let Some(err) = stderr {
+        thread::spawn(move || tee_lines(err, file, Box::new(std::io::stderr()), |_| {}));
+    }
+    let name = name.to_string();
+    let host = host.to_string();
+    let log = log.to_path_buf();
+    let ready = Arc::clone(&ready);
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(150));
+        let mut children = children.lock().unwrap();
+        match children.get_mut(&name) {
+            // 仍是本实例：检查退出；python 回退引擎可能不打印就绪标记，
+            // 端口可达也视为就绪（与 toggle_service 的 port_open 判定一致）
+            Some(c) if c.id() == pid => match c.try_wait() {
+                Ok(None) => {
+                    if !ready.load(Ordering::SeqCst) && port > 0 && crate::port_open(&host, port) {
+                        ready.store(true, Ordering::SeqCst);
+                    }
+                }
+                Ok(Some(_)) => {
+                    children.remove(&name);
+                    drop(children);
+                    handle_child_exit(&name, &ready, &log);
+                    break;
+                }
+                Err(_) => break,
+            },
+            // 已被移除（stop_service 用户停止）或被新实例替换（重启）：
+            // 本实例的监视到此结束，不发事件（主动停止不误报启动失败）
+            _ => break,
+        }
+    });
+}
+
+/// 子进程退出后的通知逻辑：
+/// - 已就绪：视为运行后停止/退出（含用户停止——但用户停止会先移除管理表，
+///   监视线程因 pid 不匹配提前退出，不会走到这里），通知前端刷新状态；
+/// - 未就绪：启动失败，附日志尾部推送错误事件。
+fn handle_child_exit(name: &str, ready: &AtomicBool, log: &std::path::Path) {
+    if ready.load(Ordering::SeqCst) {
+        emit_proxy_event("proxy-stopped", name, "");
+        return;
+    }
+    // 稍等日志 tee 线程把尾部写完再读，保证错误信息完整
+    thread::sleep(Duration::from_millis(200));
+    let tail = read_log_tail(log, 1500);
+    let msg = if tail.is_empty() {
+        "代理启动后立即退出（无日志输出，请检查端口占用与 API key）".to_string()
+    } else {
+        format!("代理启动失败，日志：{tail}")
+    };
+    emit_proxy_event("proxy-start-failed", name, &msg);
 }
 
 pub fn stop_service(state: &AppState, name: &str) -> Result<(), String> {
@@ -319,6 +427,18 @@ pub fn toggle_service(state: &AppState, name: &str) -> Result<(), String> {
     start_service(state, name)
 }
 
+/// 服务的启停 key：优先 id（稳定身份），老配置回退 comment；无身份返回 None。
+fn service_start_key(svc: &serde_json::Value) -> Option<String> {
+    let name = svc
+        .get("id")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
+        .or_else(|| svc.get("comment").and_then(|c| c.as_str()))
+        .unwrap_or("")
+        .to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
 pub fn start_all(state: &AppState) -> Result<(), String> {
     let services = config_services(state);
     let mut last_err = None;
@@ -327,18 +447,10 @@ pub fn start_all(state: &AppState) -> Result<(), String> {
         if !is_service_enabled(s) {
             continue;
         }
-        // 以 id 作为启停 key（稳定身份）；老配置无 id 时回退 comment
-        let name = s
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|v| !v.is_empty())
-            .or_else(|| s.get("comment").and_then(|c| c.as_str()))
-            .unwrap_or("")
-            .to_string();
-        if !name.is_empty() {
-            if let Err(e) = start_service(state, &name) {
-                last_err = Some(e);
-            }
+        let Some(name) = service_start_key(s) else { continue };
+        // start_service 即返回（就绪/失败异步通知），无需并行
+        if let Err(e) = start_service(state, &name) {
+            last_err = Some(e);
         }
     }
     match last_err {
@@ -359,17 +471,9 @@ pub fn start_autostart(state: &AppState) -> Result<(), String> {
         if !auto || !is_service_enabled(s) {
             continue;
         }
-        let name = s
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|v| !v.is_empty())
-            .or_else(|| s.get("comment").and_then(|c| c.as_str()))
-            .unwrap_or("")
-            .to_string();
-        if !name.is_empty() {
-            if let Err(e) = start_service(state, &name) {
-                last_err = Some(e);
-            }
+        let Some(name) = service_start_key(s) else { continue };
+        if let Err(e) = start_service(state, &name) {
+            last_err = Some(e);
         }
     }
     match last_err {
@@ -391,6 +495,42 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// 测试用事件记录器：所有 emit_proxy_event 事件追加到全局缓冲，
+    /// 供 wait_event 轮询断言（cargo test 并行运行共用同一进程，OnceLock 只注册一次）。
+    static RECORDED: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
+
+    fn ensure_recorder() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            set_event_callback(Box::new(|kind, name, message| {
+                RECORDED
+                    .lock()
+                    .unwrap()
+                    .push((kind.to_string(), name.to_string(), message.to_string()));
+            }));
+        });
+    }
+
+    /// 轮询等待某服务的指定事件，返回 message；超时返回 None。
+    fn wait_event(kind: &str, name: &str, timeout: Duration) -> Option<String> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some((_, _, m)) = RECORDED
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(k, n, _)| k == kind && n == name)
+            {
+                return Some(m.clone());
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     #[test]
     fn settings_override_resolves_config_and_auth() {
         // 环境变量优先级高于设置：测试环境若设置了 O2A_CONFIG 则跳过（不保证设置生效）
@@ -408,7 +548,7 @@ mod tests {
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: settings.clone(),
             persistent_config: false,
-            children: Mutex::new(std::collections::HashMap::new()),
+            children: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shared_float: Mutex::new(String::new()),
         };
 
@@ -451,7 +591,8 @@ mod tests {
     }
 
     #[test]
-    fn start_service_detects_immediate_exit() {
+    fn start_service_failure_notified_via_event() {
+        // start_service 即返回成功；启动失败由监视线程推 proxy-start-failed 事件。
         // 引擎二进制 + 缺 API Key 配置：select_services 过滤后无可用服务 → 启动即退出
         // （确定性失败，避免 Windows 端口复用语义差异）
         let root = std::env::temp_dir().join(format!("o2a_proxy_svc_test_{}", std::process::id()));
@@ -459,11 +600,12 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         ensure_engine_binary(&root);
+        ensure_recorder();
 
         let cfg = serde_json::json!({
             "cache_stats_enabled": false,
             "services": [{
-                "comment": "svc1",
+                "comment": "svc-fail-exit",
                 "mode": "claude",
                 "model": "m",
                 "listen_address": 18999,
@@ -480,13 +622,106 @@ mod tests {
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,
-            children: Mutex::new(std::collections::HashMap::new()),
+            children: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shared_float: Mutex::new(String::new()),
         };
-        let res = start_service(&state, "svc1");
-        assert!(res.is_err(), "缺少 API Key 时启动应报错");
-        let msg = res.unwrap_err();
-        assert!(msg.contains("立即退出"), "错误信息应包含启动失败原因，实际: {msg}");
+        let res = start_service(&state, "svc-fail-exit");
+        assert!(res.is_ok(), "start_service 应即返回成功，失败走异步事件；实际: {res:?}");
+
+        // 等待失败事件（引擎缺 key 立即退出 → 监视线程轮询到退出后推送）
+        let msg = wait_event("proxy-start-failed", "svc-fail-exit", Duration::from_secs(15))
+            .unwrap_or_else(|| panic!("未收到启动失败事件"));
+        assert!(
+            msg.contains("启动失败") || msg.contains("立即退出"),
+            "失败信息应包含原因，实际: {msg}"
+        );
+        assert!(
+            state.children.lock().unwrap().is_empty(),
+            "失败后子进程应从管理表移除"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn start_service_ready_then_self_exit_notifies() {
+        // 成功路径：引擎带有效 key 正常绑定端口（stdout 打印就绪标记）→
+        // start_service 即返回且子进程存活；外部杀掉进程（模拟自行退出）→
+        // 监视线程推 proxy-stopped 事件并从管理表移除。
+        let root = std::env::temp_dir().join(format!("o2a_proxy_ready_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        ensure_engine_binary(&root);
+        ensure_recorder();
+
+        let cfg = serde_json::json!({
+            "cache_stats_enabled": false,
+            "services": [{
+                "comment": "svc-ready-exit",
+                "mode": "claude",
+                "model": "m",
+                "listen_address": 18998,
+                "openai_base_url": "http://127.0.0.1:1/v1",
+                "openai_api_key": "sk-test"
+            }]
+        });
+        std::fs::write(root.join("config.json"), serde_json::to_string(&cfg).unwrap()).unwrap();
+
+        let state = AppState {
+            root: root.clone(),
+            python: "python".to_string(),
+            engine_binary: Some(root.join("o2a-engine")),
+            default_stats_dir: root.join("data").join("cache_stats"),
+            settings_file: root.join("settings.json"),
+            persistent_config: false,
+            children: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            shared_float: Mutex::new(String::new()),
+        };
+        let res = start_service(&state, "svc-ready-exit");
+        assert!(res.is_ok(), "start_service 应即返回成功；实际: {res:?}");
+        assert!(
+            state.children.lock().unwrap().contains_key("svc-ready-exit"),
+            "即返回后子进程应已登记"
+        );
+
+        // 等引擎绑定端口（就绪）
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut bound = false;
+        while std::time::Instant::now() < deadline {
+            if crate::port_open("127.0.0.1", 18998) {
+                bound = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(bound, "引擎应在 15s 内绑定端口 18998");
+
+        // 外部杀掉引擎（非 stop_service 路径，模拟自行退出/崩溃）
+        let pid = state
+            .children
+            .lock()
+            .unwrap()
+            .get("svc-ready-exit")
+            .map(|c| c.id())
+            .expect("子进程应在管理表中");
+        let mut kill = Command::new(if cfg!(windows) { "taskkill" } else { "kill" });
+        if cfg!(windows) {
+            kill.arg("/F").arg("/PID").arg(pid.to_string());
+        } else {
+            kill.arg("-9").arg(pid.to_string());
+        }
+        let _ = kill.output();
+
+        // 监视线程应推 proxy-stopped 事件并移除管理表项
+        assert!(
+            wait_event("proxy-stopped", "svc-ready-exit", Duration::from_secs(15)).is_some(),
+            "未收到 proxy-stopped 事件"
+        );
+        assert!(
+            state.children.lock().unwrap().is_empty(),
+            "退出后子进程应从管理表移除"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -515,7 +750,7 @@ mod tests {
             default_stats_dir: root.join("data").join("cache_stats"),
             settings_file: root.join("settings.json"),
             persistent_config: false,
-            children: Mutex::new(std::collections::HashMap::new()),
+            children: Arc::new(Mutex::new(std::collections::HashMap::new())),
             shared_float: Mutex::new(String::new()),
         };
         // 模拟一个运行中的子进程

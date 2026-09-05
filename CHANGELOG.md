@@ -7,6 +7,7 @@
 
 ### 变更
 
+- **桌面端启动即返回（事件驱动）**：`start_service` 不再同步等待验证窗口（旧固定 1.2s），spawn 后立即返回；监视线程识别引擎 stdout 的「代理启动」就绪标记（失败：进程未就绪即退出 → `proxy-start-failed` 事件附日志尾部；运行后退出 → `proxy-stopped` 事件），前端 toast + 刷新状态。`start_all`/autostart 随之从 N×1.2s 串行降为即时返回；启动验证兜底保留端口探测（python 回退引擎不打印标记时可用）。跨平台：BufReader 逐行读、TcpStream 探测、线程模型在 Windows/macOS/Linux 语义一致
 - **引擎全量重写为 Rust**：原 Python 引擎（`o2a/` 包，asyncio + aiohttp）整体替换为 `o2a-engine` 二进制（tokio + axum），无 Python 运行时依赖。HTTP 契约、协议转换语义、JSONL 统计格式、config/auth 双向兼容性逐项对齐；定价与桌面端共用同一实现（golden 对齐）。详见 `docs/rust-rewrite.md`。
 - **启动性能**：单服务冷启动从 ~1.2s 降至 ~0.1s（二进制直启，无解释器/导入开销）
 - **移除 Python 实现**：`o2a/`、`proxy.py`、`proxy_async.py`、`cache-stats.py`、`tests/`（pytest）、`requirements.txt` 及相关脚本；CI 的 python-tests job 改为 `cargo test --workspace` + clippy

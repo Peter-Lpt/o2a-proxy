@@ -1106,6 +1106,17 @@ onMounted(async () => {
   listen<boolean>("panel-visible", (e) => onPanelVisible(!!e.payload)).then(
     (f) => (unlistenPanel = f)
   );
+  // 引擎子进程启动失败（异步回报：start_service 即返回，失败由监视线程推送）
+  listen<{ id: string; message: string }>("proxy-start-failed", (e) => {
+    const msg = e.payload.message || `服务 ${e.payload.id} 启动失败`;
+    showToast(msg, "error");
+    offError.value = msg;
+    loadStatus();
+  }).catch(() => {});
+  // 运行中的引擎退出（含用户停止）：刷新状态即可
+  listen<{ id: string }>("proxy-stopped", () => {
+    loadStatus();
+  }).catch(() => {});
   document.addEventListener("visibilitychange", onVisibilityChange);
   document.addEventListener("keydown", onGlobalKeydown);
   // 主题：跨窗口同步（Tauri event）+ 系统深浅跟随
